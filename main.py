@@ -186,6 +186,7 @@ def manage_active_trades():
             if current_price >= trade['stop_loss'] or current_price <= trade['take_profit']:
                 print(f"Trade {symbol} fermé (vente)")
                 active_trades.remove(trade)
+execute_trade('BTC/USDT', 'buy', 100)
 
 # Fonction principale
 def main():
