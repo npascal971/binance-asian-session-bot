@@ -148,13 +148,7 @@ def main():
     except Exception as e:
         print(f"Erreur main: {e}")
 
-# Thread en arrière-plan
-@app.before_first_request
-def start_background_thread():
-    thread = threading.Thread(target=main_loop)
-    thread.daemon = True
-    thread.start()
-
+# Boucle de fond
 def main_loop():
     while True:
         main()
@@ -165,4 +159,8 @@ def home():
     return "Bot Trading en cours d'exécution 🚀"
 
 if __name__ == '__main__':
+    thread = threading.Thread(target=main_loop)
+    thread.daemon = True
+    thread.start()
+
     app.run(host='0.0.0.0', port=10000)
