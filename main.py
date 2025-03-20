@@ -6,6 +6,8 @@ import csv
 import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from flask import Flask
+import threading
 
 load_dotenv()
 
@@ -65,6 +67,9 @@ def get_asian_range(df):
     return asian_high, asian_low
 
 def identify_liquidity_zones(df, symbol):
+    if df.empty:
+        print(f"Aucune donnée disponible pour {symbol}")
+        return None
     liquidity_zones = {
         'highs': df['high'].tail(10).tolist(),
         'lows': df['low'].tail(10).tolist(),
@@ -73,6 +78,10 @@ def identify_liquidity_zones(df, symbol):
     return liquidity_zones
 
 def check_reversal_setup(ltf_df):
+    if ltf_df.empty:
+        print("Aucune donnée disponible pour l'analyse technique")
+        return 'hold'
+    
     ltf_df['rsi'] = ta.rsi(ltf_df['close'], length=14)
     macd = ta.macd(ltf_df['close'], fast=12, slow=26, signal=9)
     ltf_df['macd'] = macd['MACD_12_26_9']
@@ -80,15 +89,12 @@ def check_reversal_setup(ltf_df):
 
     last_close = ltf_df['close'].iloc[-1]
     prev_close = ltf_df['close'].iloc[-2]
-    prev_prev_close = ltf_df['close'].iloc[-3]
-
     last_rsi = ltf_df['rsi'].iloc[-1]
     last_macd = ltf_df['macd'].iloc[-1]
     last_signal = ltf_df['signal'].iloc[-1]
 
     print(f"Dernières valeurs - Close: {last_close}, RSI: {last_rsi}, MACD: {last_macd}, Signal: {last_signal}")
 
-    # Conditions de retournement (modifiées pour tester)
     if last_close > prev_close and last_rsi < 40 and last_macd > last_signal:
         print(f"Signal d'achat détecté")
         return 'buy'
@@ -96,7 +102,6 @@ def check_reversal_setup(ltf_df):
         print(f"Signal de vente détecté")
         return 'sell'
     return 'hold'
-
 
 def calculate_position_size(balance, entry_price, stop_loss_price):
     risk_amount = balance * risk_per_trade
@@ -167,6 +172,8 @@ def main():
                     asian_high, asian_low = get_asian_range(htf_df)
                     print(f"{symbol} - Asian High: {asian_high}, Low: {asian_low}")
                     liquidity_zones = identify_liquidity_zones(htf_df, symbol)
+                    if liquidity_zones is not None:
+                        print(f"Zones de liquidité pour {symbol} : {liquidity_zones}")
                     ltf_df = fetch_ohlcv(symbol, ltf_timeframe, limit=50)
                     if ltf_df is not None:
                         action = check_reversal_setup(ltf_df)
@@ -176,11 +183,8 @@ def main():
                             execute_trade(symbol, action, balance)
         manage_active_trades()
     except Exception as e:
-        print(f"Erreur main: {e}")
+        print(f"Erreur dans main: {e}")
     return "Script exécuté avec succès"
-
-from flask import Flask
-import threading
 
 app = Flask(__name__)
 
@@ -190,8 +194,10 @@ def home():
 
 def main_loop():
     while True:
+        print("Début de l'itération")
         main()
-        time.sleep(60 * 5)
+        print("Fin de l'itération")
+        time.sleep(60 * 5)  # Attendre 5 minutes avant la prochaine itération
 
 if __name__ == "__main__":
     thread = threading.Thread(target=main_loop)
