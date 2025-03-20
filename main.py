@@ -100,6 +100,7 @@ def record_asian_session_data(symbol, df):
         print(f"{symbol} - Session asiatique enregistrée : High={asian_session_data[symbol]['high']}, Low={asian_session_data[symbol]['low']}")
 
 # Fonction pour vérifier les configurations de retournement
+print(f"{symbol} - Action détectée : {action}")
 def check_reversal_setup(ltf_df, asian_high, asian_low):
     if ltf_df.empty:
         print("Aucune donnée disponible pour l'analyse technique")
@@ -126,6 +127,17 @@ def check_reversal_setup(ltf_df, asian_high, asian_low):
         print(f"Signal de vente détecté")
         return 'sell'
     return 'hold'
+
+# Fonction pour calculer la taille de position
+def calculate_position_size(balance, entry_price, stop_loss_price):
+    risk_amount = balance * risk_per_trade  # Combien tu risques sur le trade (1% ici)
+    stop_loss_distance = abs(entry_price - stop_loss_price)
+    if stop_loss_distance == 0:
+        print("Erreur : stop_loss_distance = 0")
+        return 0
+    position_size = risk_amount / stop_loss_distance
+    return round(position_size, 6)  # Tu peux ajuster le nombre de décimales selon l'asset
+
 
 # Fonction pour exécuter un trade
 def execute_trade(symbol, action, balance):
@@ -204,6 +216,8 @@ def main():
         
         # Si nous sommes après la session asiatique, analysez et prenez des trades
         elif now.hour >= asian_session_end:
+print(f"{symbol} - Asian high: {asian_high}, Asian low: {asian_low}")
+
             print("Session asiatique terminée - Analyse des données...")
             for symbol in symbols:
                 asian_high = asian_session_data[symbol]['high']
