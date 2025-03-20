@@ -55,12 +55,14 @@ def fetch_ohlcv(symbol, timeframe, limit=100):
         print(f"Données OHLCV pour {symbol} :\n{df.tail()}")
         return df
     except Exception as e:
-        print(f"Erreur OHLCV pour {symbol} : {e}")
+        print(f"Erreur lors de la récupération des données OHLCV pour {symbol} : {e}")
         return None
 
 def get_asian_range(df):
     asian_df = df.between_time(f'{asian_session_start}:00', f'{asian_session_end}:00')
-    return asian_df['high'].max(), asian_df['low'].min()
+    asian_high = asian_df['high'].max()
+    asian_low = asian_df['low'].min()
+    return asian_high, asian_low
 
 def identify_liquidity_zones(df, symbol):
     liquidity_zones = {
@@ -77,15 +79,28 @@ def check_reversal_setup(ltf_df):
     ltf_df['signal'] = macd['MACDs_12_26_9']
     last_close = ltf_df['close'].iloc[-1]
     prev_close = ltf_df['close'].iloc[-2]
+	  prev_prev_close = ltf_df['close'].iloc[-3]
+	
     last_rsi = ltf_df['rsi'].iloc[-1]
     last_macd = ltf_df['macd'].iloc[-1]
     last_signal = ltf_df['signal'].iloc[-1]
-    print(f"Close: {last_close}, RSI: {last_rsi}, MACD: {last_macd}, Signal: {last_signal}")
-    if last_close > prev_close and last_rsi < 40 and last_macd > last_signal:
-        print(f"Signal d'achat")
+	
+     print(f"Dernières valeurs - Close: {last_close}, RSI: {last_rsi}, MACD: {last_macd}, Signal: {last_signal}")
+
+    
+
+    # Conditions de retournement (modifiées pour tester)
+
+    if last_close > prev_close and last_rsi < 40 and last_macd > last_signal:  # RSI < 40 au lieu de 30
+
+        print(f"Signal d'achat détecté pour {symbol}")
+
         return 'buy'
-    elif last_close < prev_close and last_rsi > 60 and last_macd < last_signal:
-        print(f"Signal de vente")
+		
+		
+     elif last_close < prev_close and last_rsi > 60 and last_macd < last_signal:  # RSI > 60 au lieu de 70
+
+        print(f"Signal de vente détecté pour {symbol}")
         return 'sell'
     return 'hold'
 
