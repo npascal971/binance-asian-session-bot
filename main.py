@@ -33,6 +33,21 @@ exchange = ccxt.binance({
 
 exchange.set_sandbox_mode(True)
 
+# Configuration des symboles et paramètres
+symbols = [
+    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT', 'DOGE/USDT', 'DOT/USDT'
+]
+timeframe = '1h'
+ltf_timeframe = '5m'
+asian_session_start = 22  # 22h UTC (début de la session asiatique)
+asian_session_end = 6     # 6h UTC (fin de la session asiatique)
+risk_per_trade = 0.01
+max_simultaneous_trades = 1
+active_trades = []
+
+# Dictionnaire pour stocker les données de la session asiatique
+asian_session_data = {symbol: {'high': None, 'low': None} for symbol in symbols}
+
 # Fonction pour envoyer un e-mail
 def send_email(subject, body):
     sender_email = os.getenv('EMAIL_ADDRESS')  # Votre adresse e-mail
@@ -60,18 +75,6 @@ def send_email(subject, body):
     except Exception as e:
         print(f"Erreur lors de l'envoi de l'e-mail : {e}")
 
-# Configuration des symboles et paramètres
-symbols = [
-    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT', 'DOGE/USDT', 'DOT/USDT'
-]
-timeframe = '1h'
-ltf_timeframe = '5m'
-asian_session_start = 16
-asian_session_end = 22
-risk_per_trade = 0.01
-max_simultaneous_trades = 1
-active_trades = []
-
 # Fonction pour récupérer les données OHLCV
 def fetch_ohlcv(symbol, timeframe, limit=100):
     try:
@@ -88,27 +91,16 @@ def fetch_ohlcv(symbol, timeframe, limit=100):
         print(f"Erreur lors de la récupération des données OHLCV pour {symbol} : {e}")
         return None
 
-# Fonction pour calculer la plage asiatique
-def get_asian_range(df):
+# Fonction pour enregistrer les hauts et les bas de la session asiatique
+def record_asian_session_data(symbol, df):
     asian_df = df.between_time(f'{asian_session_start}:00', f'{asian_session_end}:00')
-    asian_high = asian_df['high'].max()
-    asian_low = asian_df['low'].min()
-    return asian_high, asian_low
-
-# Fonction pour identifier les zones de liquidité
-def identify_liquidity_zones(df, symbol):
-    if df.empty:
-        print(f"Aucune donnée disponible pour {symbol}")
-        return None
-    liquidity_zones = {
-        'highs': df['high'].tail(10).tolist(),
-        'lows': df['low'].tail(10).tolist(),
-    }
-    print(f"Zones de liquidité pour {symbol} : {liquidity_zones}")
-    return liquidity_zones
+    if not asian_df.empty:
+        asian_session_data[symbol]['high'] = asian_df['high'].max()
+        asian_session_data[symbol]['low'] = asian_df['low'].min()
+        print(f"{symbol} - Session asiatique enregistrée : High={asian_session_data[symbol]['high']}, Low={asian_session_data[symbol]['low']}")
 
 # Fonction pour vérifier les configurations de retournement
-def check_reversal_setup(ltf_df):
+def check_reversal_setup(ltf_df, asian_high, asian_low):
     if ltf_df.empty:
         print("Aucune donnée disponible pour l'analyse technique")
         return 'hold'
@@ -126,28 +118,14 @@ def check_reversal_setup(ltf_df):
 
     print(f"Dernières valeurs - Close: {last_close}, RSI: {last_rsi}, MACD: {last_macd}, Signal: {last_signal}")
 
-    if last_close > prev_close and last_rsi < 45 and last_macd > last_signal:
+    # Conditions de trading basées sur les niveaux de la session asiatique
+    if last_close > asian_high and last_rsi < 45 and last_macd > last_signal:
         print(f"Signal d'achat détecté")
         return 'buy'
-    elif last_close < prev_close and last_rsi > 55 and last_macd < last_signal:
+    elif last_close < asian_low and last_rsi > 55 and last_macd < last_signal:
         print(f"Signal de vente détecté")
         return 'sell'
     return 'hold'
-
-# Fonction pour calculer la taille de la position
-def calculate_position_size(balance, entry_price, stop_loss_price):
-    risk_amount = balance * risk_per_trade
-    distance = abs(entry_price - stop_loss_price)
-    return risk_amount / distance if distance > 0 else 0
-
-# Fonction pour enregistrer les trades dans un fichier CSV
-def log_trade(symbol, action, entry_price, size, stop_loss, take_profit):
-    file_exists = os.path.isfile('trades_log.csv')
-    with open('trades_log.csv', mode='a', newline='') as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(['Timestamp', 'Symbol', 'Action', 'Entry Price', 'Size', 'Stop Loss', 'Take Profit'])
-        writer.writerow([pd.Timestamp.now(), symbol, action, entry_price, size, stop_loss, take_profit])
 
 # Fonction pour exécuter un trade
 def execute_trade(symbol, action, balance):
@@ -191,47 +169,35 @@ def execute_trade(symbol, action, balance):
     except Exception as e:
         print(f"Erreur trade : {e}")
 
-# Fonction pour gérer les trades actifs
-def manage_active_trades():
-    global active_trades
-    for trade in active_trades[:]:
-        symbol = trade['symbol']
-        ticker = exchange.fetch_ticker(symbol)
-        current_price = ticker['last']
-        if trade['action'] == 'buy':
-            if current_price <= trade['stop_loss'] or current_price >= trade['take_profit']:
-                print(f"Trade {symbol} fermé")
-                active_trades.remove(trade)
-        elif trade['action'] == 'sell':
-            if current_price >= trade['stop_loss'] or current_price <= trade['take_profit']:
-                print(f"Trade {symbol} fermé")
-                active_trades.remove(trade)
-
 # Fonction principale
 def main():
     try:
         now = pd.Timestamp.now(tz='UTC')
         print(f"Heure actuelle : {now}")
-        if now.hour >= asian_session_start or now.hour < asian_session_end:
-            print("Session asiatique active")
+        
+        # Si nous sommes pendant la session asiatique, enregistrez les données
+        if asian_session_start <= now.hour < asian_session_end:
+            print("Session asiatique en cours - Enregistrement des données...")
             for symbol in symbols:
-                print(f"Analyse de {symbol}")
                 htf_df = fetch_ohlcv(symbol, timeframe)
                 if htf_df is not None:
-                    asian_high, asian_low = get_asian_range(htf_df)
-                    print(f"{symbol} - Asian High: {asian_high}, Low: {asian_low}")
-                    liquidity_zones = identify_liquidity_zones(htf_df, symbol)
-                    if liquidity_zones is not None:
-                        print(f"Zones de liquidité pour {symbol} : {liquidity_zones}")
+                    record_asian_session_data(symbol, htf_df)
+        
+        # Si nous sommes après la session asiatique, analysez et prenez des trades
+        elif now.hour >= asian_session_end:
+            print("Session asiatique terminée - Analyse des données...")
+            for symbol in symbols:
+                asian_high = asian_session_data[symbol]['high']
+                asian_low = asian_session_data[symbol]['low']
+                if asian_high is not None and asian_low is not None:
                     ltf_df = fetch_ohlcv(symbol, ltf_timeframe, limit=50)
                     if ltf_df is not None:
-                        action = check_reversal_setup(ltf_df)
-                        print(f"Action : {action}")
+                        action = check_reversal_setup(ltf_df, asian_high, asian_low)
+                        print(f"Action pour {symbol} : {action}")
                         if action in ['buy', 'sell']:
                             balance = exchange.fetch_balance()['total']['USDT']
                             execute_trade(symbol, action, balance)
-        else:
-            print("Session asiatique inactive")
+        
         manage_active_trades()
     except Exception as e:
         print(f"Erreur dans main: {e}")
