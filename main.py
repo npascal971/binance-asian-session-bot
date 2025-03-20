@@ -32,7 +32,7 @@ try:
     balance = exchange.fetch_balance()
     print(f"Solde disponible : {balance['total']['USDT']} USDT")
 except Exception as e:
-    print(f"Erreur : {e}")
+    print(f"Erreur lors de la récupération du solde : {e}")
 
 symbols = [
     'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT', 'DOGE/USDT', 'DOT/USDT'
@@ -95,10 +95,10 @@ def check_reversal_setup(ltf_df):
 
     print(f"Dernières valeurs - Close: {last_close}, RSI: {last_rsi}, MACD: {last_macd}, Signal: {last_signal}")
 
-    if last_close > prev_close and last_rsi < 40 and last_macd > last_signal:
+    if last_close > prev_close and last_rsi < 45 and last_macd > last_signal:
         print(f"Signal d'achat détecté")
         return 'buy'
-    elif last_close < prev_close and last_rsi > 60 and last_macd < last_signal:
+    elif last_close < prev_close and last_rsi > 55 and last_macd < last_signal:
         print(f"Signal de vente détecté")
         return 'sell'
     return 'hold'
