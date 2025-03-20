@@ -169,6 +169,24 @@ def execute_trade(symbol, action, balance):
     except Exception as e:
         print(f"Erreur trade : {e}")
 
+# Fonction pour gérer les trades actifs
+def manage_active_trades():
+    global active_trades
+    for trade in active_trades[:]:  # Utilisez une copie de la liste pour éviter des modifications pendant l'itération
+        symbol = trade['symbol']
+        ticker = exchange.fetch_ticker(symbol)
+        current_price = ticker['last']
+        
+        # Vérifier les conditions de fermeture du trade
+        if trade['action'] == 'buy':
+            if current_price <= trade['stop_loss'] or current_price >= trade['take_profit']:
+                print(f"Trade {symbol} fermé (achat)")
+                active_trades.remove(trade)
+        elif trade['action'] == 'sell':
+            if current_price >= trade['stop_loss'] or current_price <= trade['take_profit']:
+                print(f"Trade {symbol} fermé (vente)")
+                active_trades.remove(trade)
+
 # Fonction principale
 def main():
     try:
@@ -198,6 +216,7 @@ def main():
                             balance = exchange.fetch_balance()['total']['USDT']
                             execute_trade(symbol, action, balance)
         
+        # Gérer les trades actifs
         manage_active_trades()
     except Exception as e:
         print(f"Erreur dans main: {e}")
