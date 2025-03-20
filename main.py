@@ -66,8 +66,8 @@ symbols = [
 ]
 timeframe = '1h'
 ltf_timeframe = '5m'
-asian_session_start = 22
-asian_session_end = 6
+asian_session_start = 16
+asian_session_end = 22
 risk_per_trade = 0.01
 max_simultaneous_trades = 1
 active_trades = []
