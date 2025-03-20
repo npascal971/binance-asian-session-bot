@@ -8,9 +8,14 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask
 import threading
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
+# Charger les variables d'environnement
 load_dotenv()
 
+# Configuration de l'API Binance
 exchange = ccxt.binance({
     'apiKey': os.getenv('BINANCE_API_KEY'),
     'secret': os.getenv('BINANCE_API_SECRET'),
@@ -28,12 +33,34 @@ exchange = ccxt.binance({
 
 exchange.set_sandbox_mode(True)
 
-try:
-    balance = exchange.fetch_balance()
-    print(f"Solde disponible : {balance['total']['USDT']} USDT")
-except Exception as e:
-    print(f"Erreur lors de la récupération du solde : {e}")
+# Fonction pour envoyer un e-mail
+def send_email(subject, body):
+    sender_email = os.getenv('EMAIL_ADDRESS')  # Votre adresse e-mail
+    receiver_email = os.getenv('EMAIL_ADDRESS')  # Adresse du destinataire
+    password = os.getenv('EMAIL_PASSWORD')  # Mot de passe de l'e-mail
 
+    # Création du message
+    message = MIMEMultipart()
+    message["From"] = sender_email
+    message["To"] = receiver_email
+    message["Subject"] = subject
+
+    # Ajout du corps du message
+    message.attach(MIMEText(body, "plain"))
+
+    try:
+        # Connexion au serveur SMTP de Gmail
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()  # Sécurisation de la connexion
+        server.login(sender_email, password)  # Authentification
+        text = message.as_string()  # Conversion du message en texte
+        server.sendmail(sender_email, receiver_email, text)  # Envoi de l'e-mail
+        server.quit()  # Fermeture de la connexion
+        print("E-mail envoyé avec succès")
+    except Exception as e:
+        print(f"Erreur lors de l'envoi de l'e-mail : {e}")
+
+# Configuration des symboles et paramètres
 symbols = [
     'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT', 'DOGE/USDT', 'DOT/USDT'
 ]
@@ -45,6 +72,7 @@ risk_per_trade = 0.01
 max_simultaneous_trades = 1
 active_trades = []
 
+# Fonction pour récupérer les données OHLCV
 def fetch_ohlcv(symbol, timeframe, limit=100):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -60,12 +88,14 @@ def fetch_ohlcv(symbol, timeframe, limit=100):
         print(f"Erreur lors de la récupération des données OHLCV pour {symbol} : {e}")
         return None
 
+# Fonction pour calculer la plage asiatique
 def get_asian_range(df):
     asian_df = df.between_time(f'{asian_session_start}:00', f'{asian_session_end}:00')
     asian_high = asian_df['high'].max()
     asian_low = asian_df['low'].min()
     return asian_high, asian_low
 
+# Fonction pour identifier les zones de liquidité
 def identify_liquidity_zones(df, symbol):
     if df.empty:
         print(f"Aucune donnée disponible pour {symbol}")
@@ -77,6 +107,7 @@ def identify_liquidity_zones(df, symbol):
     print(f"Zones de liquidité pour {symbol} : {liquidity_zones}")
     return liquidity_zones
 
+# Fonction pour vérifier les configurations de retournement
 def check_reversal_setup(ltf_df):
     if ltf_df.empty:
         print("Aucune donnée disponible pour l'analyse technique")
@@ -103,11 +134,13 @@ def check_reversal_setup(ltf_df):
         return 'sell'
     return 'hold'
 
+# Fonction pour calculer la taille de la position
 def calculate_position_size(balance, entry_price, stop_loss_price):
     risk_amount = balance * risk_per_trade
     distance = abs(entry_price - stop_loss_price)
     return risk_amount / distance if distance > 0 else 0
 
+# Fonction pour enregistrer les trades dans un fichier CSV
 def log_trade(symbol, action, entry_price, size, stop_loss, take_profit):
     file_exists = os.path.isfile('trades_log.csv')
     with open('trades_log.csv', mode='a', newline='') as file:
@@ -116,6 +149,7 @@ def log_trade(symbol, action, entry_price, size, stop_loss, take_profit):
             writer.writerow(['Timestamp', 'Symbol', 'Action', 'Entry Price', 'Size', 'Stop Loss', 'Take Profit'])
         writer.writerow([pd.Timestamp.now(), symbol, action, entry_price, size, stop_loss, take_profit])
 
+# Fonction pour exécuter un trade
 def execute_trade(symbol, action, balance):
     global active_trades
     if len(active_trades) >= max_simultaneous_trades:
@@ -141,9 +175,23 @@ def execute_trade(symbol, action, balance):
             'size': position_size,
         })
         log_trade(symbol, action, current_price, position_size, stop_loss_price, take_profit_price)
+        
+        # Envoyer une notification par e-mail
+        subject = f"Trade exécuté - {symbol}"
+        body = f"""
+        Un trade a été exécuté :
+        - Symbol: {symbol}
+        - Action: {action}
+        - Entry Price: {current_price}
+        - Size: {position_size}
+        - Stop Loss: {stop_loss_price}
+        - Take Profit: {take_profit_price}
+        """
+        send_email(subject, body)
     except Exception as e:
         print(f"Erreur trade : {e}")
 
+# Fonction pour gérer les trades actifs
 def manage_active_trades():
     global active_trades
     for trade in active_trades[:]:
@@ -159,6 +207,7 @@ def manage_active_trades():
                 print(f"Trade {symbol} fermé")
                 active_trades.remove(trade)
 
+# Fonction principale
 def main():
     try:
         now = pd.Timestamp.now(tz='UTC')
@@ -188,12 +237,14 @@ def main():
         print(f"Erreur dans main: {e}")
     return "Script exécuté avec succès"
 
+# Configuration de Flask
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "🚀 Trading bot is running!"
 
+# Boucle principale
 def main_loop():
     while True:
         print("Début de l'itération")
@@ -201,6 +252,7 @@ def main_loop():
         print("Fin de l'itération")
         time.sleep(60 * 5)  # Attendre 5 minutes avant la prochaine itération
 
+# Démarrer le bot
 if __name__ == "__main__":
     thread = threading.Thread(target=main_loop)
     thread.daemon = True
