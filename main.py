@@ -176,17 +176,17 @@ import threading
 app = Flask(__name__)
 
 @app.route('/')
-def run_main():
-    result = main()
-    return result
+def home():
+    return "🚀 Trading bot is running!"
 
-def background_loop():
+def main_loop():
     while True:
         main()
         time.sleep(60 * 5)
 
-if __name__ == '__main__':
-    thread = threading.Thread(target=background_loop)
+if __name__ == "__main__":
+    thread = threading.Thread(target=main_loop)
     thread.daemon = True
     thread.start()
-    app.run(host='0.0.0.0', port=10000)
+
+    app.run(host="0.0.0.0", port=10000, debug=True)
