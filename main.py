@@ -39,7 +39,7 @@ symbols = [
 ]
 timeframe = '1h'
 ltf_timeframe = '5m'
-asian_session_start = 18
+asian_session_start = 14
 asian_session_end = 6
 risk_per_trade = 0.01
 max_simultaneous_trades = 1
@@ -181,6 +181,8 @@ def main():
                         if action in ['buy', 'sell']:
                             balance = exchange.fetch_balance()['total']['USDT']
                             execute_trade(symbol, action, balance)
+        else:
+            print("Session asiatique inactive")
         manage_active_trades()
     except Exception as e:
         print(f"Erreur dans main: {e}")
