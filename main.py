@@ -77,32 +77,26 @@ def check_reversal_setup(ltf_df):
     macd = ta.macd(ltf_df['close'], fast=12, slow=26, signal=9)
     ltf_df['macd'] = macd['MACD_12_26_9']
     ltf_df['signal'] = macd['MACDs_12_26_9']
+
     last_close = ltf_df['close'].iloc[-1]
     prev_close = ltf_df['close'].iloc[-2]
-	  prev_prev_close = ltf_df['close'].iloc[-3]
-	
+    prev_prev_close = ltf_df['close'].iloc[-3]
+
     last_rsi = ltf_df['rsi'].iloc[-1]
     last_macd = ltf_df['macd'].iloc[-1]
     last_signal = ltf_df['signal'].iloc[-1]
-	
-     print(f"Dernières valeurs - Close: {last_close}, RSI: {last_rsi}, MACD: {last_macd}, Signal: {last_signal}")
 
-    
+    print(f"Dernières valeurs - Close: {last_close}, RSI: {last_rsi}, MACD: {last_macd}, Signal: {last_signal}")
 
     # Conditions de retournement (modifiées pour tester)
-
-    if last_close > prev_close and last_rsi < 40 and last_macd > last_signal:  # RSI < 40 au lieu de 30
-
-        print(f"Signal d'achat détecté pour {symbol}")
-
+    if last_close > prev_close and last_rsi < 40 and last_macd > last_signal:
+        print(f"Signal d'achat détecté")
         return 'buy'
-		
-		
-     elif last_close < prev_close and last_rsi > 60 and last_macd < last_signal:  # RSI > 60 au lieu de 70
-
-        print(f"Signal de vente détecté pour {symbol}")
+    elif last_close < prev_close and last_rsi > 60 and last_macd < last_signal:
+        print(f"Signal de vente détecté")
         return 'sell'
     return 'hold'
+
 
 def calculate_position_size(balance, entry_price, stop_loss_price):
     risk_amount = balance * risk_per_trade
