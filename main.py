@@ -33,19 +33,20 @@ class TradingBot:
             },
         })
         self.exchange.set_sandbox_mode(True)
-# Vérification du solde
-try:
-    balance = exchange.fetch_balance()
-    print(f"Solde disponible : {balance['total']['USDT']} USDT")
-except ccxt.AuthenticationError as e:
-    print(f"Erreur d'authentification : {e}")
-    print("Vérifiez votre clé API et votre secret.")
-except ccxt.NetworkError as e:
-    print(f"Erreur réseau : {e}")
-except ccxt.ExchangeError as e:
-    print(f"Erreur d'échange : {e}")
-except Exception as e:
-    print(f"Erreur inattendue : {e}")
+
+        # Vérification du solde
+        try:
+            balance = self.exchange.fetch_balance()
+            print(f"Solde disponible : {balance['total']['USDT']} USDT")
+        except ccxt.AuthenticationError as e:
+            print(f"Erreur d'authentification : {e}")
+            print("Vérifiez votre clé API et votre secret.")
+        except ccxt.NetworkError as e:
+            print(f"Erreur réseau : {e}")
+        except ccxt.ExchangeError as e:
+            print(f"Erreur d'échange : {e}")
+        except Exception as e:
+            print(f"Erreur inattendue : {e}")
 
         # Configuration des symboles et paramètres
         self.symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT', 'DOGE/USDT', 'DOT/USDT']
@@ -80,7 +81,7 @@ except Exception as e:
         except Exception as e:
             print(f"Erreur lors de l'envoi de l'e-mail : {e}")
 
-       def fetch_ohlcv(self, symbol, timeframe, limit=100):
+    def fetch_ohlcv(self, symbol, timeframe, limit=100):
         """Récupérer les données OHLCV pour un symbole donné."""
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -103,8 +104,6 @@ except Exception as e:
         asian_high = asian_df['high'].max()
         asian_low = asian_df['low'].min()
         return asian_high, asian_low
-
-    def check_reversal_set
 
     def identify_liquidity_zones(self, df, symbol):
         """Identifier les zones de liquidité."""
@@ -252,7 +251,6 @@ except Exception as e:
         except Exception as e:
             print(f"❌ Erreur dans main: {e}")
         return "✅ Script exécuté avec succès"
-
 
 # Configuration de Flask
 app = Flask(__name__)
