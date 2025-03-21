@@ -90,6 +90,8 @@ class TradingBot:
             self.asian_session_data[symbol]['high'] = asian_df['high'].max()
             self.asian_session_data[symbol]['low'] = asian_df['low'].min()
             print(f"{symbol} - Session asiatique enregistrée : High={self.asian_session_data[symbol]['high']}, Low={self.asian_session_data[symbol]['low']}")
+        else:
+            print(f"{symbol} - Aucune donnée trouvée pour la session asiatique (asian_df est vide)")
 
     def check_reversal_setup(self, ltf_df, asian_high, asian_low):
         """Vérifier les configurations de retournement."""
@@ -111,8 +113,10 @@ class TradingBot:
 
         # Conditions de trading basées sur les niveaux de la session asiatique
         if last_close > asian_high and last_rsi < 45 and last_macd > last_signal:
+            print(f"Signal d'achat détecté")
             return 'buy'
         elif last_close < asian_low and last_rsi > 55 and last_macd < last_signal:
+            print(f"Signal de vente détecté")
             return 'sell'
         return 'hold'
 
@@ -130,6 +134,11 @@ class TradingBot:
         """Exécuter un trade (achat ou vente)."""
         if len(self.active_trades) >= self.max_simultaneous_trades:
             print(f"Trade ignoré - max atteint")
+            return
+
+        # Vérifier le solde avant d'exécuter un trade
+        if balance <= 0:
+            print(f"Solde insuffisant pour exécuter un trade. Solde actuel : {balance} USDT")
             return
 
         ticker = self.exchange.fetch_ticker(symbol)
