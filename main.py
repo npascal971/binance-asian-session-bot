@@ -78,7 +78,7 @@ class AsianSessionTrader:
                     'high': df['high'].max(),
                     'low': df['low'].min(),
                     'vwap': df['vwap'].mean(),
-                    'macd': last_macd
+                    'macd': macd.iloc[-1]['MACD_12_26_9'] if not macd.empty else 0
                 }
 
             logging.info("✅ Analyse de session terminée")
