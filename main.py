@@ -31,7 +31,19 @@ class TradingBot:
             },
         })
         self.exchange.set_sandbox_mode(True)
-
+# Vérification du solde
+try:
+    balance = exchange.fetch_balance()
+    print(f"Solde disponible : {balance['total']['USDT']} USDT")
+except ccxt.AuthenticationError as e:
+    print(f"Erreur d'authentification : {e}")
+    print("Vérifiez votre clé API et votre secret.")
+except ccxt.NetworkError as e:
+    print(f"Erreur réseau : {e}")
+except ccxt.ExchangeError as e:
+    print(f"Erreur d'échange : {e}")
+except Exception as e:
+    print(f"Erreur inattendue : {e}")
         # Variables de trading
         self.balance = 0.0
         self.max_position_size = 0.1  # 10% du capital
