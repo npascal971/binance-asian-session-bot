@@ -26,6 +26,7 @@ class AsianSessionTrader:
     def __init__(self):
         # Configuration API Binance
         self.exchange = self.configure_exchange()
+print(self.exchange.fetch_ticker('BTC/USDT'))
         self.symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
         self.risk_per_trade = 0.02  # 2% du capital par trade
         self.session_data = {}
@@ -37,6 +38,8 @@ class AsianSessionTrader:
         }
         
         self.update_balance()
+logging.info(f"Configuration session : {self.asian_session}")
+logging.info(f"UTC maintenant : {datetime.utcnow()}")
 
     def configure_exchange(self):
         """Configure l'API d'échange"""
@@ -99,6 +102,12 @@ class AsianSessionTrader:
             logging.error(f"Erreur d'exécution : {str(e)}")
 
     def run_cycle(self):
+ """Cycle de test immédiat"""""""""""""""""""""""""""""""""""""""""""
+    logging.info("🚨 Mode test forcé - Début du cycle")
+    self.analyze_session()
+    self.execute_post_session_trades()
+    time.sleep(60)
+
         """Gestion du cycle de trading"""
         while True:
             now = datetime.utcnow()
