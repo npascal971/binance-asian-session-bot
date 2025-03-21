@@ -142,11 +142,12 @@ class TradingBot:
             return 'sell'
         return 'hold'
 
-    def calculate_position_size(self, balance, entry_price, stop_loss_price):
-        """Calculer la taille de la position en fonction du risque."""
-        risk_amount = balance * self.risk_per_trade
-        distance = abs(entry_price - stop_loss_price)
-        return risk_amount / distance if distance > 0 else 0
+    def calculate_position_size(self, entry_price, stop_loss_price):
+    risk_amount = self.balance * self.risk_per_trade
+    risk_per_share = abs(entry_price - stop_loss_price)
+    position_size = risk_amount / risk_per_share if risk_per_share > 0 else 0
+    # Limite de taille pour éviter le sur-effet de levier
+    return min(position_size, self.max_position_size)
 
     def log_trade(self, symbol, action, entry_price, size, stop_loss, take_profit):
         """Enregistrer les trades dans un fichier CSV."""
