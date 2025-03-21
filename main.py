@@ -32,9 +32,9 @@ class AsianSessionTrader:
         print(self.exchange.fetch_ticker('BTC/USDT'))
         
         # Heures UTC (15h00 à 15h30 pour test)
-       self.asian_hours = {
-            'start': 15,
-            'end': 15.5
+       self.asian_session = {
+            'start': {'hour': 15, 'minute': 0},
+            'end': {'hour': 15, 'minute': 30}
         }
         self.update_balance()
         logging.info(f"Configuration session : {self.asian_session}")
@@ -101,12 +101,6 @@ class AsianSessionTrader:
             logging.error(f"Erreur d'exécution : {str(e)}")
 
     def run_cycle(self):
- """Cycle de test immédiat"""""""""""""""""""""""""""""""""""""""""""
-    logging.info("🚨 Mode test forcé - Début du cycle")
-    self.analyze_session()
-    self.execute_post_session_trades()
-    time.sleep(60)
-
         """Gestion du cycle de trading"""
         while True:
             now = datetime.utcnow()
