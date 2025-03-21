@@ -100,7 +100,6 @@ def record_asian_session_data(symbol, df):
         print(f"{symbol} - Session asiatique enregistrée : High={asian_session_data[symbol]['high']}, Low={asian_session_data[symbol]['low']}")
 
 # Fonction pour vérifier les configurations de retournement
-print(f"{symbol} - Action détectée : {action}")
 def check_reversal_setup(ltf_df, asian_high, asian_low):
     if ltf_df.empty:
         print("Aucune donnée disponible pour l'analyse technique")
@@ -137,7 +136,6 @@ def calculate_position_size(balance, entry_price, stop_loss_price):
         return 0
     position_size = risk_amount / stop_loss_distance
     return round(position_size, 6)  # Tu peux ajuster le nombre de décimales selon l'asset
-
 
 # Fonction pour exécuter un trade
 def execute_trade(symbol, action, balance):
@@ -198,7 +196,6 @@ def manage_active_trades():
             if current_price >= trade['stop_loss'] or current_price <= trade['take_profit']:
                 print(f"Trade {symbol} fermé (vente)")
                 active_trades.remove(trade)
-execute_trade('BTC/USDT', 'buy', 100)
 
 # Fonction principale
 def main():
@@ -215,22 +212,20 @@ def main():
                     record_asian_session_data(symbol, htf_df)
 
         # Sinon, après session asiatique
-       elif now.hour >= asian_session_end:
-    print("Session asiatique terminée - Analyse des données...")
-    for symbol in symbols:
-        asian_high = asian_session_data[symbol]['high']
-        asian_low = asian_session_data[symbol]['low']
-        print(f"{symbol} - Asian high: {asian_high}, Asian low: {asian_low}")
-        if asian_high is not None and asian_low is not None:
-            ltf_df = fetch_ohlcv(symbol, ltf_timeframe, limit=50)
-            if ltf_df is not None:
-                action = check_reversal_setup(ltf_df, asian_high, asian_low)
-                print(f"{symbol} - Action détectée : {action}")
-                if action in ['buy', 'sell']:
-                    balance = exchange.fetch_balance()['total']['USDT']
-                    execute_trade(symbol, action, balance)
-
-
+        elif now.hour >= asian_session_end:
+            print("Session asiatique terminée - Analyse des données...")
+            for symbol in symbols:
+                asian_high = asian_session_data[symbol]['high']
+                asian_low = asian_session_data[symbol]['low']
+                print(f"{symbol} - Asian high: {asian_high}, Asian low: {asian_low}")
+                if asian_high is not None and asian_low is not None:
+                    ltf_df = fetch_ohlcv(symbol, ltf_timeframe, limit=50)
+                    if ltf_df is not None:
+                        action = check_reversal_setup(ltf_df, asian_high, asian_low)
+                        print(f"{symbol} - Action détectée : {action}")
+                        if action in ['buy', 'sell']:
+                            balance = exchange.fetch_balance()['total']['USDT']
+                            execute_trade(symbol, action, balance)
 
         # Gérer les trades actifs
         manage_active_trades()
