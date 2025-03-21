@@ -142,12 +142,18 @@ class TradingBot:
             return 'sell'
         return 'hold'
 
-    def calculate_position_size(self, entry_price, stop_loss_price):
-    risk_amount = self.balance * self.risk_per_trade
-    risk_per_share = abs(entry_price - stop_loss_price)
-    position_size = risk_amount / risk_per_share if risk_per_share > 0 else 0
-    # Limite de taille pour éviter le sur-effet de levier
-    return min(position_size, self.max_position_size)
+   def calculate_position_size(self, entry_price, stop_loss_price):
+        try:
+            balance = self.exchange.fetch_balance()['total']['USDT']
+        except Exception as e:
+            logging.error(f"Error fetching balance: {e}")
+            return 0  # Or handle this error appropriately
+
+        risk_amount = balance * self.risk_per_trade
+        risk_per_share = abs(entry_price - stop_loss_price)
+        position_size = risk_amount / risk_per_share if risk_per_share > 0 else 0
+        # Limit size to avoid over-leveraging
+        return min(position_size, self.max_position_size)
 
     def log_trade(self, symbol, action, entry_price, size, stop_loss, take_profit):
         """Enregistrer les trades dans un fichier CSV."""
