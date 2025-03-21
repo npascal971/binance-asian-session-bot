@@ -137,6 +137,17 @@ def calculate_position_size(balance, entry_price, stop_loss_price):
     position_size = risk_amount / stop_loss_distance
     return round(position_size, 6)  # Tu peux ajuster le nombre de décimales selon l'asset
 
+# Fonction pour vérifier le solde du compte
+def get_account_balance():
+    try:
+        balance = exchange.fetch_balance()
+        usdt_balance = balance['total']['USDT']
+        print(f"Solde du compte : {usdt_balance} USDT")
+        return usdt_balance
+    except Exception as e:
+        print(f"Erreur lors de la récupération du solde : {e}")
+        return None
+
 # Fonction pour exécuter un trade
 def execute_trade(symbol, action, balance):
     global active_trades
@@ -210,6 +221,12 @@ def main():
         now = pd.Timestamp.now(tz='UTC')
         print(f"Heure actuelle : {now}")
 
+        # Vérifier le solde du compte
+        balance = get_account_balance()
+        if balance is None:
+            print("Impossible de récupérer le solde du compte. Arrêt du bot.")
+            return
+
         # Si session asiatique en cours
         if asian_session_start <= now.hour or now.hour < asian_session_end:
             print("Session asiatique en cours - Enregistrement des données...")
@@ -231,7 +248,6 @@ def main():
                         action = check_reversal_setup(ltf_df, asian_high, asian_low)
                         print(f"{symbol} - Action détectée : {action}")
                         if action in ['buy', 'sell']:
-                            balance = exchange.fetch_balance()['total']['USDT']
                             execute_trade(symbol, action, balance)
 
         # Gérer les trades actifs
