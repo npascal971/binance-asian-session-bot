@@ -25,33 +25,25 @@ logging.basicConfig(
 
 class AsianSessionTrader:
     def __init__(self):
-        """Initialisation du bot de trading"""
         self.exchange = self.configure_exchange()
         self.symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT"]
-        self.risk_per_trade = 0.02  # 2% du capital par trade
+        self.risk_per_trade = 0.02
         self.session_data = {}
-
-        # Heures UTC pour la session asiatique
         self.asian_session = {"start": {"hour": 18, "minute": 0}, "end": {"hour": 18, "minute": 55}}
-
         self.update_balance()
         logging.info(f"Configuration session : {self.asian_session}")
         logging.info(f"UTC maintenant : {datetime.utcnow()}")
 
     def configure_exchange(self):
-        """Configure l'API Binance"""
-        exchange = ccxt.binance(
-            {
-                "apiKey": os.getenv("BINANCE_API_KEY"),
-                "secret": os.getenv("BINANCE_API_SECRET"),
-                "enableRateLimit": True,
-            }
-        )
+        exchange = ccxt.binance({
+            "apiKey": os.getenv("BINANCE_API_KEY"),
+            "secret": os.getenv("BINANCE_API_SECRET"),
+            "enableRateLimit": True,
+        })
         exchange.set_sandbox_mode(True)
         return exchange
 
     def update_balance(self):
-        """Met à jour le solde USDT"""
         try:
             balance = self.exchange.fetch_balance()
             self.balance = balance["total"].get("USDT", 0)
@@ -60,60 +52,59 @@ class AsianSessionTrader:
             logging.error(f"Erreur de solde : {str(e)}")
 
     def analyze_session(self):
-        """Analyse les données de la session asiatique"""
         try:
             for symbol in self.symbols:
                 ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", since=self.get_session_start())
                 df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-                # Vérifier si le DataFrame contient des données
-                if df.empty:
-                    logging.error(f"Pas de données pour {symbol}")
+                if df.empty or len(df) < 26:
+                    logging.warning(f"Pas assez de données pour {symbol} (seulement {len(df)} bougies)")
                     continue
 
-                # Calcul des indicateurs
                 df["vwap"] = (df["high"] + df["low"] + df["close"]) / 3
                 macd = ta.macd(df["close"])
 
-                if macd is None or macd.empty:
-                    logging.error(f"Erreur MACD pour {symbol}")
+                if macd is None or macd.empty or "MACD_12_26_9" not in macd.columns:
+                    logging.warning(f"MACD non calculable pour {symbol}")
+                    continue
+
+                last_macd_value = macd["MACD_12_26_9"].dropna().iloc[-1] if not macd["MACD_12_26_9"].dropna().empty else None
+                if last_macd_value is None:
+                    logging.warning(f"MACD vide pour {symbol}")
                     continue
 
                 self.session_data[symbol] = {
                     "high": df["high"].max(),
                     "low": df["low"].min(),
                     "vwap": df["vwap"].mean(),
-                    "macd": macd.iloc[-1]["MACD_12_26_9"],
+                    "macd": last_macd_value,
                 }
 
             logging.info("Analyse de session terminée")
-            self.send_email("📊 Rapport de Session", self.generate_report())
+            if self.session_data:
+                self.send_email("\ud83d\udcc8 Rapport de Session", self.generate_report())
+            else:
+                logging.info("Aucun signal exploitable trouvé. Aucun email envoyé.")
 
         except Exception as e:
-            logging.error(f"❌ Échec critique de l'analyse : {str(e)}")
+            logging.error(f"\u274c \u00c9chec critique de l'analyse : {str(e)}")
 
     def execute_post_session_trades(self):
-        """Exécute les trades après la session asiatique"""
         try:
             for symbol, data in self.session_data.items():
                 current_price = self.get_current_price(symbol)
-
                 if current_price is None:
                     continue
-
                 if current_price > data["vwap"] and data["macd"] > 0:
                     self.place_order(symbol, "buy", current_price)
                 elif current_price < data["vwap"] and data["macd"] < 0:
                     self.place_order(symbol, "sell", current_price)
-
             self.session_data = {}
             self.update_balance()
-
         except Exception as e:
             logging.error(f"Erreur d'exécution des trades : {str(e)}")
 
     def run_cycle(self):
-        """Gestion du cycle de trading"""
         while True:
             now = datetime.utcnow()
             start_time = datetime(now.year, now.month, now.day, self.asian_session["start"]["hour"], self.asian_session["start"]["minute"])
@@ -121,59 +112,44 @@ class AsianSessionTrader:
 
             if start_time <= now < end_time:
                 if not self.session_data:
-                    logging.info("🚀 Début de l'analyse...")
+                    logging.info("\ud83d\ude80 D\u00e9but de l'analyse...")
                     self.analyze_session()
             elif now >= end_time:
                 if self.session_data:
-                    logging.info("💡 Exécution des trades...")
+                    logging.info("\ud83d\udca1 Ex\u00e9cution des trades...")
                     self.execute_post_session_trades()
-
             time.sleep(60)
 
     def place_order(self, symbol, side, price):
-        """Passe un ordre de marché"""
         try:
             position_size = (self.balance * self.risk_per_trade) / price
             if os.getenv("ENVIRONMENT") == "LIVE":
                 self.exchange.create_market_order(symbol, side, position_size)
-                logging.info(f"Ordre exécuté : {side} {position_size:.4f} {symbol}")
+                logging.info(f"Ordre ex\u00e9cut\u00e9 : {side} {position_size:.4f} {symbol}")
             else:
                 logging.info(f"SIMULATION : {side} {position_size:.4f} {symbol}")
-
-            self.send_email(
-                "🎯 Nouveau Trade",
-                f"**{symbol}** | {side.upper()}\n"
-                f"Montant: {position_size:.4f}\n"
-                f"Prix: {price:.2f}",
-            )
-
+            self.send_email("\ud83c\udfaf Nouveau Trade", f"**{symbol}** | {side.upper()}\nMontant: {position_size:.4f}\nPrix: {price:.2f}")
         except Exception as e:
             logging.error(f"Erreur d'ordre : {str(e)}")
 
     def get_current_price(self, symbol):
-        """Récupère le prix actuel du marché"""
         try:
             return self.exchange.fetch_ticker(symbol)["last"]
         except Exception as e:
-            logging.error(f"Erreur récupération prix {symbol} : {str(e)}")
+            logging.error(f"Erreur r\u00e9cup\u00e9ration prix {symbol} : {str(e)}")
             return None
 
     def get_session_start(self):
-        """Calcule le timestamp de début de session"""
-        return int(
-            datetime(datetime.utcnow().year, datetime.utcnow().month, datetime.utcnow().day, self.asian_session["start"]["hour"], self.asian_session["start"]["minute"]).timestamp()
-            * 1000
-        )
+        return int(datetime(datetime.utcnow().year, datetime.utcnow().month, datetime.utcnow().day,
+                            self.asian_session["start"]["hour"], self.asian_session["start"]["minute"]).timestamp() * 1000)
 
     def generate_report(self):
-        """Génère un rapport d'analyse"""
-        report = "📈 **Rapport de Session**\n\n"
+        report = "\ud83d\udcc8 **Rapport de Session**\n\n"
         for symbol, data in self.session_data.items():
             report += f"**{symbol}**\n- HIGH: {data['high']:.2f}\n- LOW: {data['low']:.2f}\n- VWAP: {data['vwap']:.2f}\n- MACD: {data['macd']:.4f}\n\n"
         return report
 
     def send_email(self, subject, body):
-        """Envoi un email de notification"""
         try:
             msg = MIMEMultipart()
             msg["From"] = os.getenv("EMAIL_ADDRESS")
@@ -185,28 +161,23 @@ class AsianSessionTrader:
                 server.starttls()
                 server.login(os.getenv("EMAIL_ADDRESS"), os.getenv("EMAIL_PASSWORD"))
                 server.send_message(msg)
-
         except Exception as e:
             logging.error(f"Erreur envoi email : {str(e)}")
 
 
-# Configuration Flask
 app = Flask(__name__)
 
 
 @app.route("/")
 def status():
-    return "<h1>Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique</p><p>🕒 Prochaine analyse : 17h00 UTC</p>"
-
+    return "<h1>Trading Bot Actif</h1><p>Strat\u00e9gie : Post-Session Asiatique</p><p>\ud83d\udd52 Prochaine analyse : 17h00 UTC</p>"
 
 def run_bot():
     trader = AsianSessionTrader()
     trader.run_cycle()
 
-
 if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
-
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
