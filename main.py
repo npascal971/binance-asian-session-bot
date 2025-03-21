@@ -29,17 +29,16 @@ class AsianSessionTrader:
         self.symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
         self.risk_per_trade = 0.02  # 2% du capital par trade
         self.session_data = {}
-print(self.exchange.fetch_ticker('BTC/USDT'))
+        print(self.exchange.fetch_ticker('BTC/USDT'))
         
         # Heures UTC (15h00 à 15h30 pour test)
-        self.asian_session = {
-            'start': {'hour': 15, 'minute': 0},
-            'end': {'hour': 15, 'minute': 30}
+       self.asian_hours = {
+            'start': 15,
+            'end': 15.5
         }
-        
         self.update_balance()
-logging.info(f"Configuration session : {self.asian_session}")
-logging.info(f"UTC maintenant : {datetime.utcnow()}")
+        logging.info(f"Configuration session : {self.asian_session}")
+        logging.info(f"UTC maintenant : {datetime.utcnow()}")
 
     def configure_exchange(self):
         """Configure l'API d'échange"""
