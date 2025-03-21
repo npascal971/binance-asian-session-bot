@@ -32,7 +32,7 @@ class AsianSessionTrader:
         self.symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT"]
         self.risk_per_trade = 0.02
         self.session_data = {}
-        self.asian_session = {"start": {"hour": 19, "minute": 0}, "end": {"hour": 19, "minute": 55}}
+        self.asian_session = {"start": {"hour": 23, "minute": 0}, "end": {"hour": 10, "minute": 0}}
 
         self.update_balance()
         logging.info(f"Configuration session : {self.asian_session}")
