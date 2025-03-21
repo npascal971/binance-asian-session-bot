@@ -199,4 +199,66 @@ class TradingBot:
             ticker = self.exchange.fetch_ticker(symbol)
             current_price = ticker['last']
             if trade['action'] == 'buy':
-                if current_price <= trade['stop_loss'] or current_price >= trade
+                if current_price <= trade['stop_loss'] or current_price >= trade['take_profit']:
+                    print(f"Trade {symbol} fermé")
+                    self.active_trades.remove(trade)
+            elif trade['action'] == 'sell':
+                if current_price >= trade['stop_loss'] or current_price <= trade['take_profit']:
+                    print(f"Trade {symbol} fermé")
+                    self.active_trades.remove(trade)
+
+    def main(self):
+        """Fonction principale du bot."""
+        try:
+            now = pd.Timestamp.now(tz='UTC')
+            print(f"🕐 Heure actuelle : {now}")
+            if now.hour >= self.asian_session_start or now.hour < self.asian_session_end:
+                print("🌏 Session asiatique active")
+                for symbol in self.symbols:
+                    print(f"Analyse de {symbol}")
+                    htf_df = self.fetch_ohlcv(symbol, self.timeframe)
+                    if htf_df is not None:
+                        asian_high, asian_low = self.get_asian_range(htf_df)
+                        print(f"{symbol} - Asian High: {asian_high}, Low: {asian_low}")
+                        liquidity_zones = self.identify_liquidity_zones(htf_df, symbol)
+                        if liquidity_zones is not None:
+                            print(f"Zones de liquidité pour {symbol} : {liquidity_zones}")
+                        ltf_df = self.fetch_ohlcv(symbol, self.ltf_timeframe, limit=50)
+                        if ltf_df is not None:
+                            action = self.check_reversal_setup(ltf_df)
+                            print(f"Action : {action}")
+                            if action in ['buy', 'sell']:
+                                balance = self.exchange.fetch_balance()['total']['USDT']
+                                self.execute_trade(symbol, action, balance)
+            else:
+                print("Session asiatique inactive")
+            self.manage_active_trades()
+        except Exception as e:
+            print(f"❌ Erreur dans main: {e}")
+        return "✅ Script exécuté avec succès"
+
+
+# Configuration de Flask
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🚀 Trading bot is running!"
+
+def main_loop():
+    bot = TradingBot()
+    while True:
+        try:
+            print("🔁 Début de l'itération")
+            bot.main()
+            print("✅ Fin de l'itération")
+        except Exception as e:
+            print(f"Erreur dans la boucle principale : {e}")
+        time.sleep(60 * 5)
+
+if __name__ == "__main__":
+    thread = threading.Thread(target=main_loop)
+    thread.daemon = True
+    thread.start()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
