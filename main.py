@@ -205,36 +205,37 @@ def main():
     try:
         now = pd.Timestamp.now(tz='UTC')
         print(f"Heure actuelle : {now}")
-        
-        # Si nous sommes pendant la session asiatique, enregistrez les données
-        if asian_session_start <= now.hour < asian_session_end:
+
+        # Si session asiatique en cours
+        if asian_session_start <= now.hour or now.hour < asian_session_end:
             print("Session asiatique en cours - Enregistrement des données...")
             for symbol in symbols:
                 htf_df = fetch_ohlcv(symbol, timeframe)
                 if htf_df is not None:
                     record_asian_session_data(symbol, htf_df)
-        
-        # Si nous sommes après la session asiatique, analysez et prenez des trades
-elif now.hour >= asian_session_end:
-    print("Session asiatique terminée - Analyse des données...")
-    for symbol in symbols:
-        asian_high = asian_session_data[symbol]['high']
-        asian_low = asian_session_data[symbol]['low']
-        print(f"{symbol} - Asian high: {asian_high}, Asian low: {asian_low}")
-        if asian_high is not None and asian_low is not None:
-            ltf_df = fetch_ohlcv(symbol, ltf_timeframe, limit=50)
-            if ltf_df is not None:
-                action = check_reversal_setup(ltf_df, asian_high, asian_low)
-                print(f"Action pour {symbol} : {action}")
-                if action in ['buy', 'sell']:
-                    balance = exchange.fetch_balance()['total']['USDT']
-                    execute_trade(symbol, action, balance)
 
-        
+        # Sinon, après session asiatique
+        elif now.hour >= asian_session_end:
+            print("Session asiatique terminée - Analyse des données...")
+            for symbol in symbols:
+                asian_high = asian_session_data[symbol]['high']
+                asian_low = asian_session_data[symbol]['low']
+                print(f"{symbol} - Asian high: {asian_high}, Asian low: {asian_low}")
+                if asian_high is not None and asian_low is not None:
+                    ltf_df = fetch_ohlcv(symbol, ltf_timeframe, limit=50)
+                    if ltf_df is not None:
+                        action = check_reversal_setup(ltf_df, asian_high, asian_low)
+                        print(f"Action pour {symbol} : {action}")
+                        if action in ['buy', 'sell']:
+                            balance = exchange.fetch_balance()['total']['USDT']
+                            execute_trade(symbol, action, balance)
+
         # Gérer les trades actifs
         manage_active_trades()
+
     except Exception as e:
         print(f"Erreur dans main: {e}")
+
     return "Script exécuté avec succès"
 
 # Configuration de Flask
