@@ -2,6 +2,7 @@ import ccxt
 import time
 import pandas as pd
 import pandas_ta as ta
+import csv
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -37,12 +38,11 @@ class TradingBot:
         self.symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT', 'DOGE/USDT', 'DOT/USDT']
         self.timeframe = '1h'
         self.ltf_timeframe = '5m'
-        self.asian_session_start = 1  # 00h UTC (modifié pour tester)
-        self.asian_session_end = 2   # 23h UTC (modifié pour tester)
+        self.asian_session_start = 16  # 16h UTC
+        self.asian_session_end = 22    # 22h UTC
         self.risk_per_trade = 0.01
         self.max_simultaneous_trades = 1
         self.active_trades = []
-        self.asian_session_data = {symbol: {'high': None, 'low': None} for symbol in self.symbols}
 
     def send_email(self, subject, body):
         """Envoyer un e-mail de notification."""
@@ -83,17 +83,26 @@ class TradingBot:
             print(f"Erreur lors de la récupération des données OHLCV pour {symbol} : {e}")
             return None
 
-    def record_asian_session_data(self, symbol, df):
-        """Enregistrer les hauts et les bas de la session asiatique."""
+    def get_asian_range(self, df):
+        """Calculer la plage asiatique (high et low)."""
         asian_df = df.between_time(f'{self.asian_session_start}:00', f'{self.asian_session_end}:00')
-        if not asian_df.empty:
-            self.asian_session_data[symbol]['high'] = asian_df['high'].max()
-            self.asian_session_data[symbol]['low'] = asian_df['low'].min()
-            print(f"{symbol} - Session asiatique enregistrée : High={self.asian_session_data[symbol]['high']}, Low={self.asian_session_data[symbol]['low']}")
-        else:
-            print(f"{symbol} - Aucune donnée trouvée pour la session asiatique (asian_df est vide)")
+        asian_high = asian_df['high'].max()
+        asian_low = asian_df['low'].min()
+        return asian_high, asian_low
 
-    def check_reversal_setup(self, ltf_df, asian_high, asian_low):
+    def identify_liquidity_zones(self, df, symbol):
+        """Identifier les zones de liquidité."""
+        if df.empty:
+            print(f"Aucune donnée disponible pour {symbol}")
+            return None
+        liquidity_zones = {
+            'highs': df['high'].tail(10).tolist(),
+            'lows': df['low'].tail(10).tolist(),
+        }
+        print(f"Zones de liquidité pour {symbol} : {liquidity_zones}")
+        return liquidity_zones
+
+    def check_reversal_setup(self, ltf_df):
         """Vérifier les configurations de retournement."""
         if ltf_df.empty:
             print("Aucune donnée disponible pour l'analyse technique")
@@ -105,17 +114,17 @@ class TradingBot:
         ltf_df['signal'] = macd['MACDs_12_26_9']
 
         last_close = ltf_df['close'].iloc[-1]
+        prev_close = ltf_df['close'].iloc[-2]
         last_rsi = ltf_df['rsi'].iloc[-1]
         last_macd = ltf_df['macd'].iloc[-1]
         last_signal = ltf_df['signal'].iloc[-1]
 
         print(f"Dernières valeurs - Close: {last_close}, RSI: {last_rsi}, MACD: {last_macd}, Signal: {last_signal}")
 
-        # Conditions de trading basées sur les niveaux de la session asiatique
-        if last_close > asian_high and last_rsi < 45 and last_macd > last_signal:
+        if last_close > prev_close and last_rsi < 45 and last_macd > last_signal:
             print(f"Signal d'achat détecté")
             return 'buy'
-        elif last_close < asian_low and last_rsi > 55 and last_macd < last_signal:
+        elif last_close < prev_close and last_rsi > 55 and last_macd < last_signal:
             print(f"Signal de vente détecté")
             return 'sell'
         return 'hold'
@@ -123,22 +132,22 @@ class TradingBot:
     def calculate_position_size(self, balance, entry_price, stop_loss_price):
         """Calculer la taille de la position en fonction du risque."""
         risk_amount = balance * self.risk_per_trade
-        stop_loss_distance = abs(entry_price - stop_loss_price)
-        if stop_loss_distance == 0:
-            print("Erreur : stop_loss_distance = 0")
-            return 0
-        position_size = risk_amount / stop_loss_distance
-        return round(position_size, 6)
+        distance = abs(entry_price - stop_loss_price)
+        return risk_amount / distance if distance > 0 else 0
+
+    def log_trade(self, symbol, action, entry_price, size, stop_loss, take_profit):
+        """Enregistrer les trades dans un fichier CSV."""
+        file_exists = os.path.isfile('trades_log.csv')
+        with open('trades_log.csv', mode='a', newline='') as file:
+            writer = csv.writer(file)
+            if not file_exists:
+                writer.writerow(['Timestamp', 'Symbol', 'Action', 'Entry Price', 'Size', 'Stop Loss', 'Take Profit'])
+            writer.writerow([pd.Timestamp.now(), symbol, action, entry_price, size, stop_loss, take_profit])
 
     def execute_trade(self, symbol, action, balance):
         """Exécuter un trade (achat ou vente)."""
         if len(self.active_trades) >= self.max_simultaneous_trades:
             print(f"Trade ignoré - max atteint")
-            return
-
-        # Vérifier le solde avant d'exécuter un trade
-        if balance <= 0:
-            print(f"Solde insuffisant pour exécuter un trade. Solde actuel : {balance} USDT")
             return
 
         ticker = self.exchange.fetch_ticker(symbol)
@@ -166,6 +175,9 @@ class TradingBot:
                 'take_profit': take_profit_price,
                 'size': position_size,
             })
+            self.log_trade(symbol, action, current_price, position_size, stop_loss_price, take_profit_price)
+            
+            # Envoyer une notification par e-mail
             subject = f"Trade exécuté - {symbol}"
             body = f"""
             Un trade a été exécuté :
@@ -187,85 +199,4 @@ class TradingBot:
             ticker = self.exchange.fetch_ticker(symbol)
             current_price = ticker['last']
             if trade['action'] == 'buy':
-                if current_price <= trade['stop_loss'] or current_price >= trade['take_profit']:
-                    print(f"Trade {symbol} fermé (achat)")
-                    self.active_trades.remove(trade)
-            elif trade['action'] == 'sell':
-                if current_price >= trade['stop_loss'] or current_price <= trade['take_profit']:
-                    print(f"Trade {symbol} fermé (vente)")
-                    self.active_trades.remove(trade)
-
-    def main(self):
-        """Fonction principale du bot."""
-        try:
-            now = pd.Timestamp.now(tz='UTC')
-            print(f"🕐 Heure actuelle : {now}")
-
-            # 🔍 Récupérer et afficher le solde du compte test
-            balance = self.exchange.fetch_balance()['total']['USDT']
-            print(f"💰 Solde du compte test : {balance:.2f} USDT")
-
-            # ✅ Si session asiatique en cours
-            if self.asian_session_start <= now.hour or now.hour < self.asian_session_end:
-                print("🌏 Session asiatique en cours - Enregistrement des données...")
-                for symbol in self.symbols:
-                    htf_df = self.fetch_ohlcv(symbol, self.timeframe)
-                    if htf_df is not None:
-                        self.record_asian_session_data(symbol, htf_df)
-
-            # ✅ Après session asiatique, on cherche les signaux
-            elif now.hour >= self.asian_session_end:
-                print("✅ Session asiatique terminée - Analyse des données...")
-                for symbol in self.symbols:
-                    asian_high = self.asian_session_data[symbol]['high']
-                    asian_low = self.asian_session_data[symbol]['low']
-                    print(f"{symbol} - 📊 High: {asian_high}, Low: {asian_low}")
-
-                    if asian_high is not None and asian_low is not None:
-                        ltf_df = self.fetch_ohlcv(symbol, self.ltf_timeframe, limit=50)
-                        if ltf_df is not None:
-                            action = self.check_reversal_setup(ltf_df, asian_high, asian_low)
-                            print(f"{symbol} - ⚡ Signal détecté : {action}")
-
-                            if action == 'hold':
-                                print(f"{symbol} - ⏸ Aucun trade car conditions RSI/MACD non remplies ou prix pas en dehors des bornes asiatiques.")
-                            elif action in ['buy', 'sell']:
-                                self.execute_trade(symbol, action, balance)
-                        else:
-                            print(f"{symbol} - ⚠️ Données LTF non disponibles")
-                    else:
-                        print(f"{symbol} - ⚠️ Données asiatiques non valides ou non encore enregistrées")
-
-            # 🔁 Gérer les trades ouverts
-            self.manage_active_trades()
-
-        except Exception as e:
-            print(f"❌ Erreur dans main: {e}")
-
-        return "✅ Script exécuté avec succès"
-
-
-# Configuration de Flask
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "🚀 Trading bot is running!"
-
-def main_loop():
-    bot = TradingBot()
-    while True:
-        try:
-            print("🔁 Début de l'itération")
-            bot.main()
-            print("✅ Fin de l'itération")
-        except Exception as e:
-            print(f"Erreur dans la boucle principale : {e}")
-        time.sleep(60 * 5)
-
-if __name__ == "__main__":
-    thread = threading.Thread(target=main_loop)
-    thread.daemon = True
-    thread.start()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+                if current_price <= trade['stop_loss'] or current_price >= trade
