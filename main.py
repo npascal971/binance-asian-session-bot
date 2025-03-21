@@ -57,35 +57,45 @@ class AsianSessionTrader:
             logging.error(f"Erreur de solde : {str(e)}")
 
     def analyze_session(self):
-        """Analyse la session asiatique en cours"""
-        try:
-            for symbol in self.symbols:
-                ohlcv = self.exchange.fetch_ohlcv(symbol, '1h', since=self.get_session_start())
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    """Analyse corrigée avec gestion d'erreurs renforcée"""
+    try:
+        for symbol in self.symbols:
+            # Récupération des données avec vérification
+            ohlcv = self.exchange.fetch_ohlcv(symbol, '1h', limit=100)
+            if not ohlcv or len(ohlcv) < 34:  # 26 périodes pour MACD standard
+                logging.warning(f"Données insuffisantes pour {symbol}")
+                continue
 
-                # Calcul des indicateurs
-                df['vwap'] = (df['high'] + df['low'] + df['close']) / 3
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            # Calcul MACD avec paramètres explicites
+            macd = ta.macd(
+                close=df['close'],
+                fast=12,
+                slow=26,
+                signal=9
+            )
+            
+            # Vérification complète des données MACD
+            if macd is None or macd.empty:
+                logging.warning(f"MACD vide pour {symbol}, utilisation de 0")
+                macd_value = 0.0
+            else:
+                macd_value = macd.iloc[-1].get('MACD_12_26_9', 0.0)
 
-                macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+            self.session_data[symbol] = {
+                'high': df['high'].max(),
+                'low': df['low'].min(),
+                'vwap': (df['high'].mean() + df['low'].mean() + df['close'].mean()) / 3,
+                'macd': macd_value
+            }
 
-                if macd is not None and not macd.empty and 'MACD_12_26_9' in macd.columns:
-                    last_macd = macd['MACD_12_26_9'].iloc[-1]
-                else:
-                    last_macd = 0
-                    logging.warning(f"⚠️ MACD introuvable ou vide pour {symbol}, valeur par défaut utilisée : {last_macd}")
+        logging.info("✅ Analyse terminée avec succès")
+        self.send_email("📈 Rapport Technique", self.generate_report())
 
-                self.session_data[symbol] = {
-                    'high': df['high'].max(),
-                    'low': df['low'].min(),
-                    'vwap': df['vwap'].mean(),
-                    'macd': macd.iloc[-1]['MACD_12_26_9'] if not macd.empty else 0
-                }
-
-            logging.info("✅ Analyse de session terminée")
-            self.send_email("📊 Rapport de Session", self.generate_report())
-
-        except Exception as e:
-            logging.error(f"❌ Erreur d'analyse : {str(e)}")
+    except Exception as e:
+        logging.error(f"❌ Échec critique de l'analyse : {str(e)}")
+        self.send_email("🚨 Erreur d'Analyse", f"Erreur détectée : {str(e)}")
 
     def execute_post_session_trades(self):
         """Exécute les trades après la session"""
