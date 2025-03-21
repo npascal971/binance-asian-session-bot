@@ -175,7 +175,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def status():
-     html = "<h1>Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique</p><p>Prochaine analyse : 17h00 UTC</p>"
+    html = "<h1>Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique</p><p>Prochaine analyse : 17h00 UTC</p>"
     return Response(html, content_type='text/html; charset=utf-8')
 
 def run_bot():
