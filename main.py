@@ -166,31 +166,22 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur email : {str(e)}")
 
-    def run_cycle(self):
-        """Exécute le cycle complet"""
-       while True:
+def run_cycle(self):
+    """Exécute le cycle complet"""
+    while True:  # <-- Correction de l'indentation ici
         now = datetime.utcnow()
-        logging.info(f"Vérification horaire - Heure actuelle UTC: {now.hour}:{now.minute}")
-        logging.info(f"Données session: {self.session_data}")
-
-# Simulation déclenchement
-        if True:  # Enlever cette ligne après test
-            self.analyze_session()
-            self.execute_post_session_trades()
         
-        time.sleep(10)  # Réduire le sleep pour test
-            
-            # Pendant la session
-            if self.asian_hours['start'] <= now.hour < self.asian_hours['end']:
-                if not self.session_data:
-                    self.analyze_session()
-                    
-            # Après la session
-            else:
-                if self.session_data:
-                    self.execute_post_session_trades()
+        # Pendant la session
+        if self.asian_hours['start'] <= now.hour < self.asian_hours['end']:
+            if not self.session_data:
+                self.analyze_session()
                 
-            time.sleep(60 * 15)  # Vérifie toutes les 15 minutes
+        # Après la session
+        else:
+            if self.session_data:
+                self.execute_post_session_trades()
+        
+        time.sleep(60 * 15)
 
 # Configuration Flask
 app = Flask(__name__)
