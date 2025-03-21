@@ -5,7 +5,7 @@ import pandas_ta as ta
 import os
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask, Response
 import threading
@@ -16,7 +16,6 @@ from email.mime.multipart import MIMEMultipart
 # Chargement des variables d'environnement
 load_dotenv()
 
-# Configuration des logs
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -30,10 +29,10 @@ class AsianSessionTrader:
     def __init__(self):
         self.exchange = self.configure_exchange()
         self.symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT"]
-        self.risk_per_trade = 0.01  # 1% de risque
+        self.risk_per_trade = 0.01
         self.session_data = {}
-        self.positions_taken = set()
         self.asian_session = {"start": {"hour": 23, "minute": 0}, "end": {"hour": 10, "minute": 0}}
+
         self.update_balance()
         logging.info(f"Configuration session : {self.asian_session}")
         logging.info(f"UTC maintenant : {datetime.utcnow()}")
@@ -44,7 +43,7 @@ class AsianSessionTrader:
             "secret": os.getenv("BINANCE_API_SECRET"),
             "enableRateLimit": True,
         })
-        exchange.set_sandbox_mode(True)  # Met à False pour environnement réel
+        exchange.set_sandbox_mode(True)
         return exchange
 
     def update_balance(self):
@@ -54,9 +53,6 @@ class AsianSessionTrader:
             logging.info(f"Solde actuel : {self.balance:.2f} USDT")
         except Exception as e:
             logging.error(f"Erreur de solde : {str(e)}")
-
-    def already_in_position(self, symbol):
-        return symbol in self.positions_taken
 
     def analyze_session(self):
         try:
@@ -74,24 +70,12 @@ class AsianSessionTrader:
                     logging.warning(f"Erreur calcul MACD pour {symbol}")
                     continue
 
-                vwap = df["vwap"].mean()
-                macd_value = macd.iloc[-1]["MACD_12_26_9"]
-                current_price = self.get_current_price(symbol)
-
                 self.session_data[symbol] = {
                     "high": df["high"].max(),
                     "low": df["low"].min(),
-                    "vwap": vwap,
-                    "macd": macd_value,
+                    "vwap": df["vwap"].mean(),
+                    "macd": macd.iloc[-1]["MACD_12_26_9"],
                 }
-
-                # 📈 Prise de trade immédiate si conditions remplies
-                if current_price and macd_value > 0 and current_price > vwap and not self.already_in_position(symbol):
-                    self.update_balance()
-                    position_size = round((self.balance * self.risk_per_trade) / current_price, 4)
-                    self.place_order(symbol, "buy", current_price, position_size)
-                    self.place_tp_sl_order(symbol, "buy", current_price, position_size)
-                    self.positions_taken.add(symbol)
 
             logging.info("Analyse de session terminée")
 
@@ -103,32 +87,6 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur d'analyse : {str(e)}")
 
-    def place_order(self, symbol, side, price, quantity):
-        try:
-            if os.getenv("ENVIRONMENT") == "LIVE":
-                self.exchange.create_market_order(symbol, side.upper(), quantity)
-                logging.info(f"Ordre exécuté : {side.upper()} {quantity:.4f} {symbol}")
-            else:
-                logging.info(f"SIMULATION : {side.upper()} {quantity:.4f} {symbol}")
-
-            self.send_email(
-                "Nouveau Trade",
-                f"{symbol} | {side.upper()}\nMontant: {quantity:.4f}\nPrix: {price:.2f}",
-            )
-
-        except Exception as e:
-            logging.error(f"Erreur d'ordre : {str(e)}")
-
-    def place_tp_sl_order(self, symbol, side, entry_price, quantity):
-        try:
-            tp_price = entry_price * 1.02
-            sl_price = entry_price * 0.98
-            logging.info(f"TP/SL configurés pour {symbol} | TP: {tp_price:.2f} | SL: {sl_price:.2f}")
-            # Ajout d'ordre réel TP/SL possible ici si souhaité (create_order avec stop/limit)
-
-        except Exception as e:
-            logging.error(f"Erreur TP/SL pour {symbol} : {str(e)}")
-
     def execute_post_session_trades(self):
         try:
             for symbol, data in self.session_data.items():
@@ -136,16 +94,14 @@ class AsianSessionTrader:
                 if current_price is None:
                     continue
 
-                if current_price > data["vwap"] and data["macd"] > 0 and not self.already_in_position(symbol):
-                    self.update_balance()
-                    position_size = round((self.balance * self.risk_per_trade) / current_price, 4)
-                    self.place_order(symbol, "buy", current_price, position_size)
-                    self.place_tp_sl_order(symbol, "buy", current_price, position_size)
-                    self.positions_taken.add(symbol)
+                # Vérification des conditions d'achat SMC simplifiées
+                if current_price <= data["low"]:
+                    self.place_order(symbol, "buy", current_price)
+                elif current_price >= data["high"]:
+                    self.place_order(symbol, "sell", current_price)
 
             self.session_data = {}
             self.update_balance()
-
         except Exception as e:
             logging.error(f"Erreur exécution des trades : {str(e)}")
 
@@ -153,19 +109,35 @@ class AsianSessionTrader:
         while True:
             now = datetime.utcnow()
             start_time = datetime(now.year, now.month, now.day, self.asian_session["start"]["hour"], self.asian_session["start"]["minute"])
-            end_time = datetime(now.year, now.month, now.day, self.asian_session["end"]["hour"], self.asian_session["end"]["minute"])
+            end_time = start_time + timedelta(hours=11)
 
             if start_time <= now < end_time:
                 if not self.session_data:
                     logging.info("Debut de l'analyse...")
-                    self.positions_taken.clear()
                     self.analyze_session()
             elif now >= end_time:
                 if self.session_data:
-                    logging.info("Execution des trades...")
+                    logging.info("Execution des trades post-session...")
                     self.execute_post_session_trades()
 
             time.sleep(60)
+
+    def place_order(self, symbol, side, price):
+        try:
+            position_size = (self.balance * self.risk_per_trade) / price
+            if os.getenv("ENVIRONMENT") == "LIVE":
+                self.exchange.create_market_order(symbol, side, position_size)
+                logging.info(f"Ordre exécuté : {side} {position_size:.4f} {symbol}")
+            else:
+                logging.info(f"SIMULATION : {side} {position_size:.4f} {symbol}")
+
+            self.send_email(
+                "Nouveau Trade",
+                f"{symbol} | {side.upper()}\nMontant: {position_size:.4f}\nPrix: {price:.2f}",
+            )
+
+        except Exception as e:
+            logging.error(f"Erreur d'ordre : {str(e)}")
 
     def get_current_price(self, symbol):
         try:
@@ -175,10 +147,8 @@ class AsianSessionTrader:
             return None
 
     def get_session_start(self):
-        return int(
-            datetime(datetime.utcnow().year, datetime.utcnow().month, datetime.utcnow().day,
-                     self.asian_session["start"]["hour"], self.asian_session["start"]["minute"]).timestamp() * 1000
-        )
+        session_start = datetime.utcnow().replace(hour=self.asian_session["start"]["hour"], minute=self.asian_session["start"]["minute"], second=0, microsecond=0)
+        return int(session_start.timestamp() * 1000)
 
     def generate_report(self):
         report = "Rapport de Session\n\n"
@@ -196,13 +166,13 @@ class AsianSessionTrader:
 
             with smtplib.SMTP("smtp.gmail.com", 587) as server:
                 server.starttls()
-                server.login(os.getenv("EMAIL_ADDRESS"], os.getenv("EMAIL_PASSWORD"))
+                server.login(os.getenv("EMAIL_ADDRESS"), os.getenv("EMAIL_PASSWORD"))
                 server.send_message(msg)
 
         except Exception as e:
             logging.error(f"Erreur envoi email : {str(e)}")
 
-# API Flask simple
+# Flask API
 app = Flask(__name__)
 
 @app.route("/")
