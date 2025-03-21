@@ -60,28 +60,36 @@ class AsianSessionTrader:
             logging.error(f"Erreur de solde : {str(e)}")
 
     def analyze_session(self):
-        """Analyse la session asiatique en cours"""
-        try:
-            for symbol in self.symbols:
-                ohlcv = self.exchange.fetch_ohlcv(symbol, '1h', since=self.get_session_start())
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                
-                # Calcul des indicateurs
-                df['vwap'] = (df['high'] + df['low'] + df['close']) / 3
-                macd = ta.macd(df['close'])
-                
-                self.session_data[symbol] = {
-                    'high': df['high'].max(),
-                    'low': df['low'].min(),
-                    'vwap': df['vwap'].mean(),
-                    'macd': macd.iloc[-1]['MACD_12_26_9']
-                }
-                
-            logging.info("Analyse de session terminée")
-            self.send_email("📊 Rapport de Session", self.generate_report())
-            
-        except Exception as e:
-            logging.error(f"Erreur d'analyse : {str(e)}")
+    """Analyse la session asiatique en cours"""
+    try:
+        for symbol in self.symbols:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, '1h', since=self.get_session_start())
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+            # Calcul des indicateurs
+            df['vwap'] = (df['high'] + df['low'] + df['close']) / 3
+
+            macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+
+            if macd is not None and not macd.empty and 'MACD_12_26_9' in macd.columns:
+                last_macd = macd['MACD_12_26_9'].iloc[-1]
+            else:
+                last_macd = 0
+                logging.warning(f"⚠️ MACD introuvable ou vide pour {symbol}, valeur par défaut utilisée : {last_macd}")
+
+            self.session_data[symbol] = {
+                'high': df['high'].max(),
+                'low': df['low'].min(),
+                'vwap': df['vwap'].mean(),
+                'macd': last_macd
+            }
+
+        logging.info("✅ Analyse de session terminée")
+        self.send_email("📊 Rapport de Session", self.generate_report())
+
+    except Exception as e:
+        logging.error(f"❌ Erreur d'analyse : {str(e)}")
+
 
     def execute_post_session_trades(self):
         """Exécute les trades après la session"""
