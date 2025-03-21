@@ -32,8 +32,8 @@ class AsianSessionTrader:
         
         # Heures UTC
         self.asian_hours = {
-            'start': 16,  # 16h UTC
-            'end': 22     # 22h UTC
+            'start': 15,  # 16h UTC
+            'end': 15.5     # 22h UTC
         }
         
         self.update_balance()
@@ -168,8 +168,17 @@ class AsianSessionTrader:
 
     def run_cycle(self):
         """Exécute le cycle complet"""
-        while True:
-            now = datetime.utcnow()
+       while True:
+        now = datetime.utcnow()
+        logging.info(f"Vérification horaire - Heure actuelle UTC: {now.hour}:{now.minute}")
+        logging.info(f"Données session: {self.session_data}")
+
+# Simulation déclenchement
+        if True:  # Enlever cette ligne après test
+            self.analyze_session()
+            self.execute_post_session_trades()
+        
+        time.sleep(10)  # Réduire le sleep pour test
             
             # Pendant la session
             if self.asian_hours['start'] <= now.hour < self.asian_hours['end']:
