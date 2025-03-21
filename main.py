@@ -57,7 +57,7 @@ class AsianSessionTrader:
             logging.error(f"Erreur de solde : {str(e)}")
 
     def analyze_session(self):
-    """Analyse corrigée avec gestion d'erreurs renforcée"""
+        """Analyse corrigée avec gestion d'erreurs renforcée"""
     try:
         for symbol in self.symbols:
             # Récupération des données avec vérification
