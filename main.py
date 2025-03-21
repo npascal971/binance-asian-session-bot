@@ -37,8 +37,8 @@ class TradingBot:
         self.symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT', 'DOGE/USDT', 'DOT/USDT']
         self.timeframe = '1h'
         self.ltf_timeframe = '5m'
-        self.asian_session_start = 0  # 00h UTC (modifié pour tester)
-        self.asian_session_end = 23   # 23h UTC (modifié pour tester)
+        self.asian_session_start = 1  # 00h UTC (modifié pour tester)
+        self.asian_session_end = 2   # 23h UTC (modifié pour tester)
         self.risk_per_trade = 0.01
         self.max_simultaneous_trades = 1
         self.active_trades = []
