@@ -32,7 +32,7 @@ class AsianSessionTrader:
         print(self.exchange.fetch_ticker('BTC/USDT'))
         
         # Heures UTC (15h00 à 15h30 pour test)
-       self.asian_session = {
+        self.asian_session = {
             'start': {'hour': 15, 'minute': 0},
             'end': {'hour': 15, 'minute': 30}
         }
