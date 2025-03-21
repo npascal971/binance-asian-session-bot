@@ -6,6 +6,7 @@ import os
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
+from flask import Response
 from flask import Flask
 import threading
 import smtplib
@@ -174,7 +175,8 @@ app = Flask(__name__)
 
 @app.route("/")
 def status():
-    return "<h1>Trading Bot Actif</h1><p>Strat\u00e9gie : Post-Session Asiatique</p><p>\ud83d\udd52 Prochaine analyse : 17h00 UTC</p>"
+     html = "<h1>Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique</p><p>Prochaine analyse : 17h00 UTC</p>"
+    return Response(html, content_type='text/html; charset=utf-8')
 
 def run_bot():
     trader = AsianSessionTrader()
