@@ -37,7 +37,22 @@ class AsianSessionTrader:
         }
         
         self.update_balance()
-
+def run_cycle(self):
+        """Exécute le cycle complet"""
+        while True:
+            now = datetime.utcnow()
+            
+            # Pendant la session
+            if self.asian_hours['start'] <= now.hour < self.asian_hours['end']:
+                if not self.session_data:
+                    self.analyze_session()
+                    
+            # Après la session
+            else:
+                if self.session_data:
+                    self.execute_post_session_trades()
+            
+            time.sleep(60 * 15)
     def configure_exchange(self):
         """Configure l'API d'échange"""
         exchange = ccxt.binance({
@@ -166,22 +181,7 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur email : {str(e)}")
 
-def run_cycle(self):
-    """Exécute le cycle complet"""
-    while True:  # <-- Correction de l'indentation ici
-        now = datetime.utcnow()
-        
-        # Pendant la session
-        if self.asian_hours['start'] <= now.hour < self.asian_hours['end']:
-            if not self.session_data:
-                self.analyze_session()
-                
-        # Après la session
-        else:
-            if self.session_data:
-                self.execute_post_session_trades()
-        
-        time.sleep(60 * 15)
+
 
 # Configuration Flask
 app = Flask(__name__)
