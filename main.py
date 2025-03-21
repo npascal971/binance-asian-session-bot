@@ -33,8 +33,8 @@ class AsianSessionTrader:
         
         # Heures UTC (15h00 à 15h30 pour test)
         self.asian_session = {
-            'start': {'hour': 15, 'minute': 0},
-            'end': {'hour': 15, 'minute': 30}
+            'start': {'hour': 17, 'minute': 0},
+            'end': {'hour': 17, 'minute': 30}
         }
         self.update_balance()
         logging.info(f"Configuration session : {self.asian_session}")
