@@ -215,7 +215,7 @@ def main():
                     record_asian_session_data(symbol, htf_df)
 
         # Sinon, après session asiatique
-        elif now.hour >= asian_session_end:
+       elif now.hour >= asian_session_end:
     print("Session asiatique terminée - Analyse des données...")
     for symbol in symbols:
         asian_high = asian_session_data[symbol]['high']
@@ -229,6 +229,7 @@ def main():
                 if action in ['buy', 'sell']:
                     balance = exchange.fetch_balance()['total']['USDT']
                     execute_trade(symbol, action, balance)
+
 
 
         # Gérer les trades actifs
