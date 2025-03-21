@@ -60,7 +60,7 @@ class AsianSessionTrader:
             logging.error(f"Erreur de solde : {str(e)}")
 
     def analyze_session(self):
-    """Analyse la session asiatique en cours"""
+        """Analyse la session asiatique en cours"""
     try:
         for symbol in self.symbols:
             ohlcv = self.exchange.fetch_ohlcv(symbol, '1h', since=self.get_session_start())
