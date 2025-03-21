@@ -33,6 +33,19 @@ exchange = ccxt.binance({
 })
 
 exchange.set_sandbox_mode(True)
+# Vérification du solde
+try:
+    balance = exchange.fetch_balance()
+    print(f"Solde disponible : {balance['total']['USDT']} USDT")
+except ccxt.AuthenticationError as e:
+    print(f"Erreur d'authentification : {e}")
+    print("Vérifiez votre clé API et votre secret.")
+except ccxt.NetworkError as e:
+    print(f"Erreur réseau : {e}")
+except ccxt.ExchangeError as e:
+    print(f"Erreur d'échange : {e}")
+except Exception as e:
+    print(f"Erreur inattendue : {e}")
 
 # Configuration des symboles et paramètres
 symbols = [
