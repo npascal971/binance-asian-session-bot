@@ -26,10 +26,10 @@ class AsianSessionTrader:
     def __init__(self):
         # Configuration API Binance
         self.exchange = self.configure_exchange()
-print(self.exchange.fetch_ticker('BTC/USDT'))
         self.symbols = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
         self.risk_per_trade = 0.02  # 2% du capital par trade
         self.session_data = {}
+print(self.exchange.fetch_ticker('BTC/USDT'))
         
         # Heures UTC (15h00 à 15h30 pour test)
         self.asian_session = {
