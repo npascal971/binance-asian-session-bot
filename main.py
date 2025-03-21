@@ -39,8 +39,8 @@ symbols = [
 ]
 timeframe = '1h'
 ltf_timeframe = '5m'
-asian_session_start = 22  # 22h UTC (début de la session asiatique)
-asian_session_end = 6     # 6h UTC (fin de la session asiatique)
+asian_session_start = 0  # 00h UTC (modifié pour tester)
+asian_session_end = 23   # 23h UTC (modifié pour tester)
 risk_per_trade = 0.01
 max_simultaneous_trades = 1
 active_trades = []
@@ -143,12 +143,19 @@ def execute_trade(symbol, action, balance):
     if len(active_trades) >= max_simultaneous_trades:
         print(f"Trade ignoré - max atteint")
         return
+
     ticker = exchange.fetch_ticker(symbol)
     current_price = ticker['last']
     stop_loss_price = current_price * (0.99 if action == 'buy' else 1.01)
     take_profit_price = current_price * (1.02 if action == 'buy' else 0.98)
     position_size = calculate_position_size(balance, current_price, stop_loss_price)
-    try:
+
+    if os.getenv('ENVIRONMENT') == 'TEST':  # Mode test
+        print(f"Mode TEST - Trade simulé : {action} {symbol} avec un solde de {balance} USDT")
+        print(f"Details: Entry Price={current_price}, Size={position_size}, Stop Loss={stop_loss_price}, Take Profit={take_profit_price}")
+        return  # Ne pas exécuter de trade réel
+
+    try:  # Mode production
         if action == 'buy':
             order = exchange.create_market_buy_order(symbol, position_size)
         else:
@@ -245,9 +252,12 @@ def home():
 # Boucle principale
 def main_loop():
     while True:
-        print("Début de l'itération")
-        main()
-        print("Fin de l'itération")
+        try:
+            print("Début de l'itération")
+            main()
+            print("Fin de l'itération")
+        except Exception as e:
+            print(f"Erreur dans la boucle principale : {e}")
         time.sleep(60 * 5)  # Attendre 5 minutes avant la prochaine itération
 
 # Démarrer le bot
