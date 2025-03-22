@@ -223,36 +223,59 @@ class AsianSessionTrader:
                 continue
 
             price = self.exchange.fetch_ticker(symbol)['last']
-            trade_amount = self.risk_per_trade * self.exchange.fetch_balance()['total']['USDT'] / price
+            usdt_balance = self.exchange.fetch_balance()['total']['USDT']
+            trade_amount = self.risk_per_trade * usdt_balance / price
 
             sl = price * 0.99
             tp = price * 1.02
 
-            self.active_trades[symbol] = {
-                "entry": price,
-                "sl": sl,
-                "tp": tp,
-                "amount": trade_amount,
-                "open": True
-            }
+            try:
+                # ⚡ Envoi de l'ordre réel (testnet) : achat au prix du marché
+                order = self.exchange.create_market_buy_order(symbol, trade_amount)
+                logging.info(f"✅ ORDRE RÉEL TESTNET exécuté pour {symbol} : {order}")
 
-            logging.info(f"SIMULATION : Achat {trade_amount:.4f} {symbol} à {price:.2f} (SL: {sl:.2f}, TP: {tp:.2f})")
+                # Stockage du trade pour suivi SL/TP
+                self.active_trades[symbol] = {
+                    "entry": price,
+                    "sl": sl,
+                    "tp": tp,
+                    "amount": trade_amount,
+                    "order_id": order['id'],
+                    "open": True
+                }
+
+            except Exception as e:
+                logging.error(f"❌ Échec de l'ordre sur {symbol} : {e}")
+
 
     def monitor_trades(self):
-        for symbol, trade in self.active_trades.items():
-            if not trade['open']:
-                continue
+    for symbol, trade in self.active_trades.items():
+        if not trade['open']:
+            continue
 
-            price = self.exchange.fetch_ticker(symbol)['last']
+        price = self.exchange.fetch_ticker(symbol)['last']
 
-            if price <= trade['sl']:
-                trade['open'] = False
-                logging.info(f"SL touché pour {symbol} à {price:.2f} ❌")
-                self.send_email(f"SL touché - {symbol}", f"Le SL a été touché pour {symbol} à {price:.2f}")
-            elif price >= trade['tp']:
-                trade['open'] = False
-                logging.info(f"TP touché pour {symbol} à {price:.2f} ✅")
-                self.send_email(f"TP atteint - {symbol}", f"Le TP a été atteint pour {symbol} à {price:.2f}")
+        if price <= trade['sl']:
+            trade['open'] = False
+            try:
+                # 🔻 Vente pour clôturer la position (SL)
+                sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
+                logging.info(f"❌ SL touché pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
+                self.send_email(f"SL touché - {symbol}", f"Le SL a été touché pour {symbol} à {price:.2f}\nPosition clôturée via vente au marché.")
+            except Exception as e:
+                logging.error(f"Erreur clôture du trade SL pour {symbol} : {e}")
+
+        elif price >= trade['tp']:
+            trade['open'] = False
+            try:
+                # ✅ Vente pour prendre profit (TP)
+                sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
+                logging.info(f"✅ TP atteint pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
+                self.send_email(f"TP atteint - {symbol}", f"Le TP a été atteint pour {symbol} à {price:.2f}\nPosition clôturée via vente au marché.")
+            except Exception as e:
+                logging.error(f"Erreur clôture du trade TP pour {symbol} : {e}")
+
+
 
     def has_open_trade(self):
         return any(trade['open'] for trade in self.active_trades.values())
@@ -260,7 +283,7 @@ class AsianSessionTrader:
 def scheduled_task():
     logging.info("\n===== Tâche quotidienne programmée lancée =====")
     trader.analyze_session()
-    trader.execute_post_session_trades()
+    trader.()
     trader.monitor_trades()
 
 @app.route("/")
