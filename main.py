@@ -193,13 +193,13 @@ class AsianSessionTrader:
 
             msg.attach(MIMEText(body, 'plain'))
 
-        try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(sender_email, password)
-                server.sendmail(sender_email, receiver_email, msg.as_string())
-                logging.info("📩 Notification email envoyée.")
-        except Exception as e:
-            logging.error(f"Erreur envoi email : {e}")
+            try:
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                    server.login(sender_email, password)
+                    server.sendmail(sender_email, receiver_email, msg.as_string())
+                    logging.info("📩 Notification email envoyée.")
+            except Exception as e:
+                logging.error(f"Erreur envoi email : {e}")
 
     def manage_take_profit_stop_loss(self, symbol, trade):
     try:
