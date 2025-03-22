@@ -31,15 +31,22 @@ class AsianSessionTrader:
 
     def configure_exchange(self):
         exchange = ccxt.binance({
-            "apiKey": os.getenv("BINANCE_API_KEY"),
-            "secret": os.getenv("BINANCE_API_SECRET"),
-            "enableRateLimit": True,
-        })
-        exchange.set_sandbox_mode(True)
-        exchange.urls['api'] = {
+    'apiKey': 'LisbDeNvATic1cNKkxMCt5lupsA6Ly8TiNhSjEC1GQYXqUn7YTSQbhAC1h0J41yX',
+    'secret': 'xIlgTJaLNAfXZNfXEN6sTWJ8fLwp2H95kcXN5L8qpX1MBukUAwm1TvOO8a0jEXyc',
+    'urls': {
+        'api': {
             'public': 'https://testnet.binance.vision/api',
             'private': 'https://testnet.binance.vision/api',
-        }
+        },
+    },
+    'options': {
+        'adjustForTimeDifference': True,
+        'enableRateLimit': True,
+    },
+})
+
+# Activation du mode sandbox (Testnet)
+exchange.set_sandbox_mode(True)
         return exchange
 
     def update_balance(self):
