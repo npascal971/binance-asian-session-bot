@@ -249,32 +249,31 @@ class AsianSessionTrader:
 
 
     def monitor_trades(self):
-    for symbol, trade in self.active_trades.items():
-        if not trade['open']:
-            continue
+        for symbol, trade in self.active_trades.items():
+            if not trade['open']:
+                continue
 
-        price = self.exchange.fetch_ticker(symbol)['last']
+            price = self.exchange.fetch_ticker(symbol)['last']
 
-        if price <= trade['sl']:
-            trade['open'] = False
-            try:
-                # 🔻 Vente pour clôturer la position (SL)
-                sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
-                logging.info(f"❌ SL touché pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
-                self.send_email(f"SL touché - {symbol}", f"Le SL a été touché pour {symbol} à {price:.2f}\nPosition clôturée via vente au marché.")
-            except Exception as e:
-                logging.error(f"Erreur clôture du trade SL pour {symbol} : {e}")
+            if price <= trade['sl']:
+                trade['open'] = False
+                try:
+                    # 🔻 Vente pour clôturer la position (SL)
+                    sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
+                    logging.info(f"❌ SL touché pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
+                    self.send_email(f"SL touché - {symbol}", f"Le SL a été touché pour {symbol} à {price:.2f}\nPosition clôturée via vente au marché.")
+                except Exception as e:
+                    logging.error(f"Erreur clôture du trade SL pour {symbol} : {e}")
 
-        elif price >= trade['tp']:
-            trade['open'] = False
-            try:
-                # ✅ Vente pour prendre profit (TP)
-                sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
-                logging.info(f"✅ TP atteint pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
-                self.send_email(f"TP atteint - {symbol}", f"Le TP a été atteint pour {symbol} à {price:.2f}\nPosition clôturée via vente au marché.")
-            except Exception as e:
-                logging.error(f"Erreur clôture du trade TP pour {symbol} : {e}")
-
+            elif price >= trade['tp']:
+                trade['open'] = False
+                try:
+                    # ✅ Vente pour prendre profit (TP)
+                    sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
+                    logging.info(f"✅ TP atteint pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
+                    self.send_email(f"TP atteint - {symbol}", f"Le TP a été atteint pour {symbol} à {price:.2f}\nPosition clôturée via vente au marché.")
+                except Exception as e:
+                    logging.error(f"Erreur clôture du trade TP pour {symbol} : {e}")
 
 
     def has_open_trade(self):
