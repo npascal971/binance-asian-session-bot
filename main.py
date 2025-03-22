@@ -68,42 +68,49 @@ class AsianSessionTrader:
 
         return in_asian_session or in_us_session
         
+def detect_order_blocks(self, df, symbol, bullish=True):
+    try:
+        df['body'] = abs(df['close'] - df['open'])
+        df['prev_close'] = df['close'].shift(1)
+        df['prev_open'] = df['open'].shift(1)
 
-    def detect_order_blocks(self, df, bullish=True):
-        try:
-            df['body'] = abs(df['close'] - df['open'])
-            df['prev_close'] = df['close'].shift(1)
-            df['prev_open'] = df['open'].shift(1)
+        # Initialiser ob_candidates à un DataFrame vide
+        ob_candidates = pd.DataFrame()
 
-            # Initialiser ob_candidates à un DataFrame vide
-            ob_candidates = pd.DataFrame()
+        if bullish:
+            ob_candidates = df[(df['open'] < df['close']) &
+                               (df['high'].shift(-1) > df['high']) &
+                               (df['low'].shift(-1) > df['low'])]
+        else:
+            ob_candidates = df[(df['open'] > df['close']) &
+                               (df['low'].shift(-1) < df['low']) &
+                               (df['high'].shift(-1) < df['high'])]
 
-            if bullish:
-                ob_candidates = df[(df['open'] < df['close']) &
-                                   (df['high'].shift(-1) > df['high']) &
-                                   (df['low'].shift(-1) > df['low'])]
-            else:
-                ob_candidates = df[(df['open'] > df['close']) &
-                                   (df['low'].shift(-1) < df['low']) &
-                                   (df['high'].shift(-1) < df['high'])]
+        if not ob_candidates.empty:
+            last_ob = ob_candidates.iloc[-1]
+            ob_timestamp = last_ob.name  # Timestamp de l'Order Block
 
-            if not ob_candidates.empty:
-                last_ob = ob_candidates.iloc[-1]
+            # Vérifier si l'Order Block a déjà été détecté pour ce symbole
+            if ob_timestamp != self.last_ob.get(symbol, {}).get("timestamp"):
                 ob_zone = {
                     "open": last_ob['open'],
                     "close": last_ob['close'],
                     "high": last_ob['high'],
                     "low": last_ob['low'],
-                    "timestamp": last_ob.name
+                    "timestamp": ob_timestamp
                 }
-                logging.info(f"📦 OB détecté ({'Bullish' if bullish else 'Bearish'}) : {ob_zone}")
+                logging.info(f"📦 OB détecté ({'Bullish' if bullish else 'Bearish'}) pour {symbol} : {ob_zone}")
+                self.last_ob[symbol] = ob_zone  # Stocker le dernier OB détecté pour ce symbole
                 return ob_zone
             else:
-                logging.info(f"📦 Aucun OB détecté ({'Bullish' if bullish else 'Bearish'})")
+                logging.info(f"📦 OB déjà traité pour {symbol} (timestamp: {ob_timestamp})")
                 return None
-        except Exception as e:
-            logging.error(f"Erreur détection OB : {e}")
+        else:
+            logging.info(f"📦 Aucun OB détecté pour {symbol} ({'Bullish' if bullish else 'Bearish'})")
             return None
+    except Exception as e:
+        logging.error(f"Erreur détection OB pour {symbol} : {e}")
+        return None
         
     def detect_ltf_structure_shift(self, symbol, timeframe="3m"):
         try:
