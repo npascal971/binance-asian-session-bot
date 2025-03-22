@@ -195,6 +195,34 @@ class AsianSessionTrader:
                 server.send_message(msg)
         except Exception as e:
             logging.error(f"Erreur email : {str(e)}")
+            
+    def run_cycle(self):
+        while True:
+            now = datetime.utcnow()
+            start_time = datetime(now.year, now.month, now.day,
+                                  self.asian_session["start"]["hour"],
+                                  self.asian_session["start"]["minute"])
+            end_time = datetime(now.year, now.month, now.day,
+                                self.asian_session["end"]["hour"],
+                                self.asian_session["end"]["minute"])
+
+            # Cas où la session dépasse minuit
+            if end_time <= start_time:
+                if now < start_time:
+                    start_time = start_time.replace(day=now.day - 1)
+                else:
+                    end_time = end_time.replace(day=now.day + 1)
+
+            if start_time <= now < end_time:
+                if not self.session_data:
+                    logging.info("Début de l'analyse asiatique...")
+                    self.analyze_session()
+            elif now >= end_time:
+                if self.session_data:
+                    logging.info("Execution des trades post-session asiatique...")
+                    self.execute_post_session_trades()
+
+            time.sleep(60)
 
 # Flask API
 app = Flask(__name__)
