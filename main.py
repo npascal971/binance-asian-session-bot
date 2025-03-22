@@ -21,6 +21,8 @@ class AsianSessionTrader:
         self.exchange = self.configure_exchange()
         self.symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT"]
         self.risk_per_trade = 0.01
+        self.tp_percent = 2.0
+        self.sl_percent = 1.0
         self.session_data = {}
         self.active_trades = {}
         self.asian_session = {"start": {"hour": 23, "minute": 0}, "end": {"hour": 10, "minute": 0}}
@@ -76,47 +78,33 @@ class AsianSessionTrader:
     def analyze_session(self):
         try:
             for symbol in self.symbols:
-                # 📈 Télécharger plus de bougies pour avoir un historique suffisant pour MACD/EMA
                 ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", limit=100)
                 df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-
-                # 🕐 Convertir les timestamps pour pouvoir filtrer par heure
                 df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
                 df = df.set_index("datetime")
 
-                # ⏳ Déterminer la plage horaire de la session asiatique actuelle
                 session_start = datetime.utcnow().replace(hour=self.asian_session['start']['hour'], 
                                                           minute=self.asian_session['start']['minute'], 
                                                           second=0, microsecond=0)
                 if datetime.utcnow() < session_start:
                     session_start -= timedelta(days=1)
-                session_end = session_start + timedelta(hours=11)  # Session asiatique dure 11h
+                session_end = session_start + timedelta(hours=11)
 
-                # 📊 Filtrer les données de la session asiatique uniquement
                 df_session = df[(df.index >= session_start) & (df.index <= session_end)]
 
-                # ❗ Optionnel : avertir si trop peu de données dans la session, mais PAS bloquant pour les indicateurs
-                if len(df) < 35:
-                    logging.warning(f"Données globales insuffisantes pour MACD sur {symbol} ({len(df)} lignes)")
-                if len(df_session) < 10:
-                    logging.warning(f"Trop peu de données dans la session asiatique sur {symbol} ({len(df_session)} lignes)")
-
-
                 if len(df["close"]) < 30:
-                    logging.warning(f"Trop peu de données pour MACD sur {symbol} ({len(df)} lignes)")
+                    logging.warning(f"Trop peu de données pour MACD sur {symbol}")
                     continue
 
                 df["vwap"] = (df["high"] + df["low"] + df["close"]) / 3
                 df["ema200"] = ta.ema(df["close"], length=200)
                 df["rsi"] = ta.rsi(df["close"], length=14)
                 macd = ta.macd(df["close"])
-                if macd is None or macd.empty or not all(col in macd.columns for col in ["MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9"]):
-                    logging.warning(f"Erreur MACD pour {symbol} (colonnes manquantes ou données vides)")
+                if macd is None or macd.empty:
                     continue
 
                 macd = macd.dropna()
                 if macd.empty:
-                    logging.warning(f"MACD vide après nettoyage pour {symbol}")
                     continue
 
                 df_ltf = pd.DataFrame(self.exchange.fetch_ohlcv(symbol, timeframe="5m"),
@@ -161,7 +149,6 @@ class AsianSessionTrader:
         except Exception:
             return default
 
-
     def generate_report(self):
         report = "Rapport de Session\n\n"
         for symbol, data in self.session_data.items():
@@ -176,7 +163,6 @@ class AsianSessionTrader:
             report += f"- FVG: {data.get('fvg', 'N/A')}\n"
             report += f"- Structure: {data.get('structure_break', 'N/A')}\n\n"
         return report
-
 
     def save_report_to_file(self, text_report):
         try:
@@ -194,7 +180,6 @@ class AsianSessionTrader:
             logging.error(f"Erreur sauvegarde rapport : {str(e)}")
 
     def send_email(self, subject, body):
-    
         sender_email = os.getenv('EMAIL_ADDRESS')
         receiver_email = sender_email
         password = os.getenv('EMAIL_PASSWORD')
@@ -216,25 +201,20 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur lors de l'envoi de l'e-mail : {e}")
 
-
     def execute_post_session_trades(self):
         for symbol in self.symbols:
             if symbol not in self.session_data:
                 continue
-
             price = self.exchange.fetch_ticker(symbol)['last']
             usdt_balance = self.exchange.fetch_balance()['total']['USDT']
             trade_amount = self.risk_per_trade * usdt_balance / price
-
-            sl = price * 0.99
-            tp = price * 1.02
+            sl = price * (1 - self.sl_percent / 100)
+            tp = price * (1 + self.tp_percent / 100)
 
             try:
-                # ⚡ Envoi de l'ordre réel (testnet) : achat au prix du marché
                 order = self.exchange.create_market_buy_order(symbol, trade_amount)
-                logging.info(f"✅ ORDRE RÉEL TESTNET exécuté pour {symbol} : {order}")
+                logging.info(f"✅ ORDRE exécuté pour {symbol} : {order}")
 
-                # Stockage du trade pour suivi SL/TP
                 self.active_trades[symbol] = {
                     "entry": price,
                     "sl": sl,
@@ -247,40 +227,32 @@ class AsianSessionTrader:
             except Exception as e:
                 logging.error(f"❌ Échec de l'ordre sur {symbol} : {e}")
 
+    def manage_take_profit_stop_loss(self, symbol, trade):
+        try:
+            price = self.exchange.fetch_ticker(symbol)['last']
+            if price >= trade['tp']:
+                trade['open'] = False
+                sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
+                logging.info(f"✅ TP atteint pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
+                self.send_email(f"TP atteint - {symbol}", f"Le TP a été atteint pour {symbol} à {price:.2f}\nPosition clôturée.")
+            elif price <= trade['sl']:
+                trade['open'] = False
+                sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
+                logging.info(f"❌ SL touché pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
+                self.send_email(f"SL touché - {symbol}", f"Le SL a été touché pour {symbol} à {price:.2f}\nPosition clôturée.")
+        except Exception as e:
+            logging.error(f"Erreur gestion TP/SL pour {symbol} : {e}")
 
     def monitor_trades(self):
-        for symbol, trade in self.active_trades.items():
-            if not trade['open']:
-                continue
-
-            price = self.exchange.fetch_ticker(symbol)['last']
-
-            if price <= trade['sl']:
-                trade['open'] = False
-                try:
-                    # 🔻 Vente pour clôturer la position (SL)
-                    sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
-                    logging.info(f"❌ SL touché pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
-                    self.send_email(f"SL touché - {symbol}", f"Le SL a été touché pour {symbol} à {price:.2f}\nPosition clôturée via vente au marché.")
-                except Exception as e:
-                    logging.error(f"Erreur clôture du trade SL pour {symbol} : {e}")
-
-            elif price >= trade['tp']:
-                trade['open'] = False
-                try:
-                    # ✅ Vente pour prendre profit (TP)
-                    sell_order = self.exchange.create_market_sell_order(symbol, trade['amount'])
-                    logging.info(f"✅ TP atteint pour {symbol} à {price:.2f} - Vente exécutée : {sell_order}")
-                    self.send_email(f"TP atteint - {symbol}", f"Le TP a été atteint pour {symbol} à {price:.2f}\nPosition clôturée via vente au marché.")
-                except Exception as e:
-                    logging.error(f"Erreur clôture du trade TP pour {symbol} : {e}")
-
+        for symbol, trade in list(self.active_trades.items()):
+            if trade.get("open"):
+                self.manage_take_profit_stop_loss(symbol, trade)
 
     def has_open_trade(self):
         return any(trade['open'] for trade in self.active_trades.values())
 
 def scheduled_task():
-    logging.info("\n===== Tâche quotidienne programmée lancée =====")
+    logging.info("===== Tâche programmée =====")
     trader.analyze_session()
     trader.execute_post_session_trades()
     trader.monitor_trades()
@@ -298,9 +270,9 @@ def continuous_market_monitor(trader, interval_minutes=5):
     while True:
         now = datetime.utcnow().time()
         if trader.is_within_session(now):
-            logging.info("🔁 Analyse continue pendant la session asiatique...")
+            logging.info("🔁 Analyse pendant session asiatique...")
         else:
-            logging.info("🌐 Analyse continue hors session asiatique...")
+            logging.info("🌐 Analyse hors session asiatique...")
         if not trader.has_open_trade():
             trader.analyze_session()
         time.sleep(interval_minutes * 60)
@@ -310,12 +282,7 @@ if __name__ == "__main__":
     scheduled_task()
     schedule.every().day.at("02:10").do(scheduled_task)
 
-    def schedule_runner():
-        while True:
-            schedule.run_pending()
-            time.sleep(30)
-
-    threading.Thread(target=schedule_runner, daemon=True).start()
+    threading.Thread(target=lambda: schedule.run_pending(), daemon=True).start()
     threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True).start()
     threading.Thread(target=continuous_market_monitor, args=(trader,), daemon=True).start()
 
