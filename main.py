@@ -199,6 +199,11 @@ def scheduled_task():
 @app.route("/")
 def home():
     return "Asian Session Bot is running 🚀", 200
+    
+def monitor_trades_runner(trader):
+    while True:
+        trader.monitor_trades()
+        time.sleep(60)
 
 if __name__ == "__main__":
     trader = AsianSessionTrader()  # 🔥 On instancie UNE FOIS pour le suivi live
