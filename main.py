@@ -86,7 +86,7 @@ class AsianSessionTrader:
             if self.session_data:
                 report_txt = self.generate_report()
                 self.save_report_to_file(report_txt)
-                self.send_email("Rapport de Session", report_txt)
+                # Email supprimé ici volontairement
             else:
                 logging.info("Aucun signal exploitable trouvé. Aucun email envoyé.")
 
@@ -132,6 +132,24 @@ class AsianSessionTrader:
     def execute_post_session_trades(self):
         logging.info("Simulation d'exécution de trades")
 
+        for symbol, data in self.session_data.items():
+            entry_price = data["vwap"]
+            sl_price = entry_price * 0.99  # SL à -1%
+            tp_price = entry_price * 1.02  # TP à +2%
+
+            current_price = data["vwap"]  # Simulation : prix actuel = vwap (peut être remplacé par fetch_ticker)
+            position_closed = None
+
+            if current_price <= sl_price:
+                position_closed = "SL touché"
+            elif current_price >= tp_price:
+                position_closed = "TP touché"
+
+            if position_closed:
+                msg = f"📣 {symbol} - {position_closed}\nEntrée : {entry_price:.2f} USDT\nSL : {sl_price:.2f}\nTP : {tp_price:.2f}"
+                logging.info(msg)
+                self.send_email(subject=f"⚠ TRADE FERMÉ - {symbol}", body=msg)
+
 # Fonction planifiée
 
 def scheduled_task():
@@ -142,10 +160,11 @@ def scheduled_task():
 
 @app.route("/")
 def status():
-    return "<h1>✅ Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique avec SMC</p>"
+    return "<h1> Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique avec SMC</p>"
+
 
 if __name__ == "__main__":
-    schedule.every().day.at("10:30").do(scheduled_task)  # ⏰ Planifié après la session asiatique
+    schedule.every().day.at("10:30").do(scheduled_task)  # Après la session asiatique
 
     def schedule_runner():
         while True:
