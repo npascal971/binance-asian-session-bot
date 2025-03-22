@@ -193,7 +193,7 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur sauvegarde rapport : {str(e)}")
 
-        def send_email(self, subject, body):
+    def send_email(self, subject, body):
     
         sender_email = os.getenv('EMAIL_ADDRESS')
         receiver_email = sender_email
