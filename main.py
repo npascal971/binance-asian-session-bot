@@ -60,11 +60,9 @@ class AsianSessionTrader:
         start_time = timedelta(hours=start['hour'], minutes=start['minute'])
         end_time = timedelta(hours=end['hour'], minutes=end['minute'])
         now_time = timedelta(hours=current_time.hour, minutes=current_time.minute)
-        if start_time < end_time:
-            return start_time <= now_time <= end_time
-        else:
-            return now_time >= start_time or now_time <= end_time
-
+        within_session = start_time <= now_time <= end_time if start_time < end_time else now_time >= start_time or now_time <= end_time
+        logging.info(f"Vérification de l'heure : {current_time} - Dans la session : {within_session}")
+        return within_session
     def detect_order_blocks(self, df, bullish=True):
         try:
             df['body'] = abs(df['close'] - df['open'])
@@ -253,10 +251,11 @@ class AsianSessionTrader:
 
 
 def scheduled_task():
-    logging.info("===== Tâche programmée =====")
+    logging.info("===== Début de la tâche programmée =====")
     trader.analyze_session()
     trader.execute_post_session_trades()
     trader.monitor_trades()
+    logging.info("===== Fin de la tâche programmée =====")
 
 @app.route("/")
 def home():
@@ -278,6 +277,7 @@ def monitor_trades_runner(trader):
 def run_scheduler():
     while True:
         try:
+            logging.info("Scheduler en cours d'exécution...")
             schedule.run_pending()
         except Exception as e:
             logging.error(f"Erreur scheduler : {e}")
