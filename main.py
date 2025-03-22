@@ -86,8 +86,9 @@ class AsianSessionTrader:
 
     def analyze_session(self):
         try:
+            logging.info("Début de l'analyse asiatique...")
             for symbol in self.symbols:
-                ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", since=self.get_session_start())
+                ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1h", limit=50)
                 df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
                 if len(df) < 3:
@@ -100,7 +101,7 @@ class AsianSessionTrader:
                     logging.warning(f"Erreur MACD pour {symbol}")
                     continue
 
-                df_ltf = pd.DataFrame(self.exchange.fetch_ohlcv(symbol, timeframe="5m"),
+                df_ltf = pd.DataFrame(self.exchange.fetch_ohlcv(symbol, timeframe="5m", limit=50),
                                       columns=["timestamp", "open", "high", "low", "close", "volume"])
 
                 ob = self.detect_order_block(df)
@@ -169,14 +170,8 @@ class AsianSessionTrader:
             logging.error(f"Erreur récupération prix {symbol} : {str(e)}")
             return None
 
-    def get_session_start(self):
-        return int(
-            datetime(datetime.utcnow().year, datetime.utcnow().month, datetime.utcnow().day,
-                     self.asian_session["start"]["hour"], self.asian_session["start"]["minute"]).timestamp() * 1000
-        )
-
     def generate_report(self):
-        report = "Rapport de Session\n\n"
+        report = "📊 Rapport de Session\n\n"
         for symbol, data in self.session_data.items():
             report += f"{symbol}\n- HIGH: {data['high']:.2f}\n- LOW: {data['low']:.2f}\n- VWAP: {data['vwap']:.2f}\n- MACD: {data['macd']:.4f}\n"
             report += f"- OB: {data['order_block']}\n- FVG: {data['fvg']}\n- Structure: {data['structure_break']}\n\n"
@@ -191,38 +186,14 @@ class AsianSessionTrader:
             msg.attach(MIMEText(body, "plain"))
             with smtplib.SMTP("smtp.gmail.com", 587) as server:
                 server.starttls()
-                server.login(os.getenv("EMAIL_ADDRESS"), os.getenv("EMAIL_PASSWORD"))
+                server.login(os.getenv("EMAIL_ADDRESS"], os.getenv("EMAIL_PASSWORD"))
                 server.send_message(msg)
         except Exception as e:
             logging.error(f"Erreur email : {str(e)}")
-            
+
     def run_cycle(self):
-        while True:
-            now = datetime.utcnow()
-            start_time = datetime(now.year, now.month, now.day,
-                                  self.asian_session["start"]["hour"],
-                                  self.asian_session["start"]["minute"])
-            end_time = datetime(now.year, now.month, now.day,
-                                self.asian_session["end"]["hour"],
-                                self.asian_session["end"]["minute"])
-
-            # Cas où la session dépasse minuit
-            if end_time <= start_time:
-                if now < start_time:
-                    start_time = start_time.replace(day=now.day - 1)
-                else:
-                    end_time = end_time.replace(day=now.day + 1)
-
-            if start_time <= now < end_time:
-                if not self.session_data:
-                    logging.info("Début de l'analyse asiatique...")
-                    self.analyze_session()
-            elif now >= end_time:
-                if self.session_data:
-                    logging.info("Execution des trades post-session asiatique...")
-                    self.execute_post_session_trades()
-
-            time.sleep(60)
+        self.analyze_session()
+        self.execute_post_session_trades()
 
 # Flask API
 app = Flask(__name__)
