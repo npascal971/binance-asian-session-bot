@@ -45,8 +45,8 @@ class AsianSessionTrader:
     },
 })
 
-# Activation du mode sandbox (Testnet)
-exchange.set_sandbox_mode(True)
+        # Activation du mode sandbox (Testnet)
+        exchange.set_sandbox_mode(True)
         return exchange
 
     def update_balance(self):
