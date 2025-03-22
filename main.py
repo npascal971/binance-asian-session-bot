@@ -175,52 +175,67 @@ class AsianSessionTrader:
             except Exception as e:
                 logging.error(f"Erreur exécution ordre : {e}")
                 
-    def send_trade_notification(self, subject, body):
-            sender_email = os.getenv('EMAIL_ADDRESS')
-            receiver_email = os.getenv('EMAIL_ADDRESS')
-            password = os.getenv('EMAIL_PASSWORD')
+    def send_trade_notification(self, subject, body, trade):
+    sender_email = os.getenv('EMAIL_ADDRESS')
+    receiver_email = os.getenv('EMAIL_ADDRESS')
+    password = os.getenv('EMAIL_PASSWORD')
 
-            msg = MIMEMultipart()
-            msg['From'] = sender_email
-            msg['To'] = receiver_email
-            msg['Subject'] = subject
+    # Calculer le profit ou le drawdown en USD
+    entry_price = trade['entry']
+    exit_price = trade['exit_price']  # Prix de sortie (TP ou SL)
+    amount = trade['amount']
+    profit_usd = (exit_price - entry_price) * amount
+    drawdown_usd = (entry_price - exit_price) * amount
 
-            msg.attach(MIMEText(body, 'plain'))
+    # Ajouter les informations au corps de l'e-mail
+    if profit_usd > 0:
+        body += f"\nProfit réalisé : {profit_usd:.2f} USD"
+    else:
+        body += f"\nDrawdown subi : {drawdown_usd:.2f} USD"
 
-            try:
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                    server.login(sender_email, password)
-                    server.sendmail(sender_email, receiver_email, msg.as_string())
-                    logging.info("📩 Notification email envoyée.")
-            except Exception as e:
-                logging.error(f"Erreur envoi email : {e}")
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(body, 'plain'))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, password)
+            server.sendmail(sender_email, receiver_email, msg.as_string())
+            logging.info("📩 Notification email envoyée.")
+    except Exception as e:
+        logging.error(f"Erreur envoi email : {e}")
 
     def manage_take_profit_stop_loss(self, symbol, trade):
-        try:
-            price = self.exchange.fetch_ticker(symbol)['last']
-            if price >= trade['tp']:
-                duration = datetime.now() - trade["entry_time"]
-                minutes = int(duration.total_seconds() // 60)
-                logging.info(f"✅ TP atteint {symbol} à {price:.2f} | Durée : {minutes} min")
-                trade['open'] = False
-                self.exchange.create_market_sell_order(symbol, trade['amount'])
+    try:
+        price = self.exchange.fetch_ticker(symbol)['last']
+        if price >= trade['tp']:
+            duration = datetime.now() - trade["entry_time"]
+            minutes = int(duration.total_seconds() // 60)
+            logging.info(f"✅ TP atteint {symbol} à {price:.2f} | Durée : {minutes} min")
+            trade['open'] = False
+            trade['exit_price'] = price  # Ajouter le prix de sortie
+            self.exchange.create_market_sell_order(symbol, trade['amount'])
 
-                subject = f"[TP ATTEINT] {symbol}"
-                body = f"✅ Take Profit atteint sur {symbol}\n\nPrix: {price:.2f} USDT\nDurée: {minutes} minutes"
-                self.send_trade_notification(subject, body)
-                return
+            subject = f"[TP ATTEINT] {symbol}"
+            body = f"✅ Take Profit atteint sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes"
+            self.send_trade_notification(subject, body, trade)  # Passer le trade
+            return
 
-            if price <= trade['sl']:
-                duration = datetime.now() - trade["entry_time"]
-                minutes = int(duration.total_seconds() // 60)
-                logging.info(f"🛑 SL touché {symbol} à {price:.2f} | Durée : {minutes} min")
-                trade['open'] = False
-                self.exchange.create_market_sell_order(symbol, trade['amount'])
+        if price <= trade['sl']:
+            duration = datetime.now() - trade["entry_time"]
+            minutes = int(duration.total_seconds() // 60)
+            logging.info(f"🛑 SL touché {symbol} à {price:.2f} | Durée : {minutes} min")
+            trade['open'] = False
+            trade['exit_price'] = price  # Ajouter le prix de sortie
+            self.exchange.create_market_sell_order(symbol, trade['amount'])
 
-                subject = f"[SL TOUCHÉ] {symbol}"
-                body = f"🛑 Stop Loss touché sur {symbol}\n\nPrix: {price:.2f} USDT\nDurée: {minutes} minutes"
-                self.send_trade_notification(subject, body)
-                return
+            subject = f"[SL TOUCHÉ] {symbol}"
+            body = f"🛑 Stop Loss touché sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes"
+            self.send_trade_notification(subject, body, trade)  # Passer le trade
+            return
 
         # Trailing SL
             new_sl = price * (1 - self.trailing_stop_percent / 100)
