@@ -1,4 +1,3 @@
-
 import os
 import time
 import threading
@@ -77,7 +76,8 @@ class AsianSessionTrader:
                 df["ema200"] = ta.ema(df["close"], length=200)
                 df["rsi"] = ta.rsi(df["close"], length=14)
                 macd = ta.macd(df["close"])
-                if macd is None or macd.empty: continue
+                if macd is None or macd.empty:
+                    continue
                 macd = macd.dropna()
 
                 if df["close"].iloc[-1] > df["ema200"].iloc[-1] and df["rsi"].iloc[-1] > 50 and macd.iloc[-1]["MACD_12_26_9"] > 0:
@@ -136,13 +136,11 @@ class AsianSessionTrader:
                 logging.info(f"SL touché {symbol} à {price:.2f}")
                 return
 
-            # Trailing Stop Dynamic Update
             new_sl = price * (1 - self.trailing_stop_percent / 100)
             if new_sl > trade["sl"]:
                 logging.info(f"🔁 Trailing SL mis à jour pour {symbol} : {trade['sl']:.2f} → {new_sl:.2f}")
                 trade["sl"] = new_sl
 
-            # Break-even logic
             if price >= trade["entry"] * (1 + self.break_even_trigger / 100) and trade["sl"] < trade["entry"]:
                 logging.info(f"🔐 Break-even activé pour {symbol} → SL remonté à l'entrée : {trade['entry']:.2f}")
                 trade["sl"] = trade["entry"]
@@ -167,14 +165,28 @@ def home():
 
 def monitor_trades_runner(trader):
     while True:
-        trader.monitor_trades()
+        try:
+            trader.monitor_trades()
+            logging.info("💓 Monitor tick")
+        except Exception as e:
+            logging.error(f"Erreur dans monitor_trades_runner : {e}")
         time.sleep(60)
+
+def run_scheduler():
+    while True:
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            logging.error(f"Erreur scheduler : {e}")
+        time.sleep(10)
 
 if __name__ == "__main__":
     trader = AsianSessionTrader()
     scheduled_task()
     schedule.every().day.at("02:10").do(scheduled_task)
-    threading.Thread(target=lambda: schedule.run_pending(), daemon=True).start()
+
+    threading.Thread(target=run_scheduler, daemon=True).start()
     threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True).start()
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
