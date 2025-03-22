@@ -140,6 +140,10 @@ def scheduled_task():
     trader.analyze_session()
     trader.execute_post_session_trades()
 
+@app.route("/")
+def status():
+    return "<h1>✅ Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique avec SMC</p>"
+
 if __name__ == "__main__":
     schedule.every().day.at("10:30").do(scheduled_task)  # ⏰ Planifié après la session asiatique
 
