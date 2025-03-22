@@ -118,6 +118,8 @@ class AsianSessionTrader:
                     "trailing_stop": sl,
                     "entry_time": datetime.now()
                 }
+                logging.info(f"🎯 Nouveau trade {symbol} | Entrée: {price:.2f} | TP: {tp:.2f} | SL: {sl:.2f}")
+
             except Exception as e:
                 logging.error(f"Erreur exécution ordre : {e}")
 
