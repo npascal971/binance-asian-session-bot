@@ -150,14 +150,30 @@ class AsianSessionTrader:
     def detect_structure_break(self, df):
         return "Structure Break Exemple"
 
+    def safe_fmt(self, value, fmt=":.2f", default="N/A"):
+        try:
+            if pd.isna(value) or value is None:
+                return default
+            return format(value, fmt)
+        except Exception:
+            return default
+
+
     def generate_report(self):
         report = "Rapport de Session\n\n"
         for symbol, data in self.session_data.items():
             report += f"{symbol}\n"
-            report += f"- HIGH: {data['high']:.2f}\n- LOW: {data['low']:.2f}\n- VWAP: {data['vwap']:.2f}\n"
-            report += f"- EMA200: {data['ema200']:.2f}\n- RSI: {data['rsi']:.2f}\n- MACD: {data['macd']:.4f}\n"
-            report += f"- OB: {data['order_block']}\n- FVG: {data['fvg']}\n- Structure: {data['structure_break']}\n\n"
+            report += f"- HIGH: {self.safe_fmt(data.get('high'))}\n"
+            report += f"- LOW: {self.safe_fmt(data.get('low'))}\n"
+            report += f"- VWAP: {self.safe_fmt(data.get('vwap'))}\n"
+            report += f"- EMA200: {self.safe_fmt(data.get('ema200'))}\n"
+            report += f"- RSI: {self.safe_fmt(data.get('rsi'))}\n"
+            report += f"- MACD: {self.safe_fmt(data.get('macd'), ':.4f')}\n"
+            report += f"- OB: {data.get('order_block', 'N/A')}\n"
+            report += f"- FVG: {data.get('fvg', 'N/A')}\n"
+            report += f"- Structure: {data.get('structure_break', 'N/A')}\n\n"
         return report
+
 
     def save_report_to_file(self, text_report):
         try:
