@@ -133,7 +133,7 @@ class AsianSessionTrader:
             logging.error(f"Erreur détection structure LTF {symbol}: {e}")
             return False
 
-    def analyze_session(self):
+def analyze_session(self):
     try:
         for symbol in self.symbols:
             ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", limit=200)
