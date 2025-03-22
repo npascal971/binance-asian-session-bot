@@ -5,7 +5,7 @@ import pandas_ta as ta
 import os
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, Response
 import threading
@@ -16,6 +16,7 @@ from email.mime.multipart import MIMEMultipart
 # Chargement des variables d'environnement
 load_dotenv()
 
+# Configuration des logs
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -54,27 +55,66 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur de solde : {str(e)}")
 
+    def detect_order_block(self, df):
+        try:
+            last_bullish = df[(df['close'] > df['open'])].iloc[-2]
+            last_bearish = df[(df['close'] < df['open'])].iloc[-2]
+            if df.iloc[-1]['close'] < last_bullish['low']:
+                return {"type": "bearish", "price": last_bullish['high']}
+            elif df.iloc[-1]['close'] > last_bearish['high']:
+                return {"type": "bullish", "price": last_bearish['low']}
+        except:
+            return None
+
+    def detect_fvg(self, df):
+        try:
+            if df.iloc[-3]['high'] < df.iloc[-1]['low']:
+                return {"type": "bullish", "zone": (df.iloc[-3]['high'], df.iloc[-1]['low'])}
+            elif df.iloc[-3]['low'] > df.iloc[-1]['high']:
+                return {"type": "bearish", "zone": (df.iloc[-1]['high'], df.iloc[-3]['low'])}
+        except:
+            return None
+
+    def detect_structure_break(self, df):
+        try:
+            if df.iloc[-3]['high'] < df.iloc[-2]['high'] and df.iloc[-2]['high'] > df.iloc[-1]['high']:
+                return "CHoCH possible (bearish)"
+            if df.iloc[-3]['low'] > df.iloc[-2]['low'] and df.iloc[-2]['low'] < df.iloc[-1]['low']:
+                return "CHoCH possible (bullish)"
+        except:
+            return None
+
     def analyze_session(self):
         try:
             for symbol in self.symbols:
                 ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", since=self.get_session_start())
                 df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-                if len(df) < 2:
+                if len(df) < 3:
                     logging.warning(f"Pas assez de données pour {symbol} (seulement {len(df)} bougies)")
                     continue
 
                 df["vwap"] = (df["high"] + df["low"] + df["close"]) / 3
                 macd = ta.macd(df["close"])
                 if macd is None or "MACD_12_26_9" not in macd.columns:
-                    logging.warning(f"Erreur calcul MACD pour {symbol}")
+                    logging.warning(f"Erreur MACD pour {symbol}")
                     continue
+
+                df_ltf = pd.DataFrame(self.exchange.fetch_ohlcv(symbol, timeframe="5m"),
+                                      columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+                ob = self.detect_order_block(df)
+                fvg = self.detect_fvg(df)
+                structure = self.detect_structure_break(df_ltf)
 
                 self.session_data[symbol] = {
                     "high": df["high"].max(),
                     "low": df["low"].min(),
                     "vwap": df["vwap"].mean(),
                     "macd": macd.iloc[-1]["MACD_12_26_9"],
+                    "order_block": ob,
+                    "fvg": fvg,
+                    "structure_break": structure,
                 }
 
             logging.info("Analyse de session terminée")
@@ -85,7 +125,7 @@ class AsianSessionTrader:
                 logging.info("Aucun signal exploitable trouvé. Aucun email envoyé.")
 
         except Exception as e:
-            logging.error(f"Erreur d'analyse : {str(e)}")
+            logging.error(f"Erreur analyse session : {str(e)}")
 
     def execute_post_session_trades(self):
         try:
@@ -94,33 +134,16 @@ class AsianSessionTrader:
                 if current_price is None:
                     continue
 
-                # Vérification des conditions d'achat SMC simplifiées
-                if current_price <= data["low"]:
-                    self.place_order(symbol, "buy", current_price)
-                elif current_price >= data["high"]:
-                    self.place_order(symbol, "sell", current_price)
+                if data["structure_break"] and data["order_block"]:
+                    if data["order_block"]["type"] == "bullish" and current_price >= data["order_block"]["price"]:
+                        self.place_order(symbol, "buy", current_price)
+                    elif data["order_block"]["type"] == "bearish" and current_price <= data["order_block"]["price"]:
+                        self.place_order(symbol, "sell", current_price)
 
             self.session_data = {}
             self.update_balance()
         except Exception as e:
-            logging.error(f"Erreur exécution des trades : {str(e)}")
-
-    def run_cycle(self):
-        while True:
-            now = datetime.utcnow()
-            start_time = datetime(now.year, now.month, now.day, self.asian_session["start"]["hour"], self.asian_session["start"]["minute"])
-            end_time = start_time + timedelta(hours=11)
-
-            if start_time <= now < end_time:
-                if not self.session_data:
-                    logging.info("Debut de l'analyse...")
-                    self.analyze_session()
-            elif now >= end_time:
-                if self.session_data:
-                    logging.info("Execution des trades post-session...")
-                    self.execute_post_session_trades()
-
-            time.sleep(60)
+            logging.error(f"Erreur exécution trade : {str(e)}")
 
     def place_order(self, symbol, side, price):
         try:
@@ -147,13 +170,16 @@ class AsianSessionTrader:
             return None
 
     def get_session_start(self):
-        session_start = datetime.utcnow().replace(hour=self.asian_session["start"]["hour"], minute=self.asian_session["start"]["minute"], second=0, microsecond=0)
-        return int(session_start.timestamp() * 1000)
+        return int(
+            datetime(datetime.utcnow().year, datetime.utcnow().month, datetime.utcnow().day,
+                     self.asian_session["start"]["hour"], self.asian_session["start"]["minute"]).timestamp() * 1000
+        )
 
     def generate_report(self):
         report = "Rapport de Session\n\n"
         for symbol, data in self.session_data.items():
-            report += f"{symbol}\n- HIGH: {data['high']:.2f}\n- LOW: {data['low']:.2f}\n- VWAP: {data['vwap']:.2f}\n- MACD: {data['macd']:.4f}\n\n"
+            report += f"{symbol}\n- HIGH: {data['high']:.2f}\n- LOW: {data['low']:.2f}\n- VWAP: {data['vwap']:.2f}\n- MACD: {data['macd']:.4f}\n"
+            report += f"- OB: {data['order_block']}\n- FVG: {data['fvg']}\n- Structure: {data['structure_break']}\n\n"
         return report
 
     def send_email(self, subject, body):
@@ -163,21 +189,19 @@ class AsianSessionTrader:
             msg["To"] = os.getenv("EMAIL_ADDRESS")
             msg["Subject"] = subject
             msg.attach(MIMEText(body, "plain"))
-
             with smtplib.SMTP("smtp.gmail.com", 587) as server:
                 server.starttls()
                 server.login(os.getenv("EMAIL_ADDRESS"), os.getenv("EMAIL_PASSWORD"))
                 server.send_message(msg)
-
         except Exception as e:
-            logging.error(f"Erreur envoi email : {str(e)}")
+            logging.error(f"Erreur email : {str(e)}")
 
 # Flask API
 app = Flask(__name__)
 
 @app.route("/")
 def status():
-    html = "<h1>Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique</p>"
+    html = "<h1>Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique avec SMC</p>"
     return Response(html, content_type="text/html; charset=utf-8")
 
 def run_bot():
