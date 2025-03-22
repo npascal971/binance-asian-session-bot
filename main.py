@@ -19,6 +19,7 @@ class AsianSessionTrader:
         self.symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT"]
         self.risk_per_trade = 0.01
         self.session_data = {}
+        self.active_trades = {}
         self.asian_session = {"start": {"hour": 23, "minute": 0}, "end": {"hour": 10, "minute": 0}}
 
         if not os.path.exists("reports"):
@@ -29,7 +30,17 @@ class AsianSessionTrader:
         logging.info(f"UTC maintenant : {datetime.utcnow()}")
 
     def configure_exchange(self):
-        return ccxt.binance({"enableRateLimit": True})
+        exchange = ccxt.binance({
+            "apiKey": os.getenv("BINANCE_API_KEY"),
+            "secret": os.getenv("BINANCE_API_SECRET"),
+            "enableRateLimit": True,
+        })
+        exchange.set_sandbox_mode(True)
+        exchange.urls['api'] = {
+            'public': 'https://testnet.binance.vision/api',
+            'private': 'https://testnet.binance.vision/api',
+        }
+        return exchange
 
     def update_balance(self):
         balance = self.exchange.fetch_balance()
@@ -82,13 +93,7 @@ class AsianSessionTrader:
                 }
 
             logging.info("Analyse de session terminée")
-
-            if self.session_data:
-                report_txt = self.generate_report()
-                self.save_report_to_file(report_txt)
-                # Email supprimé ici volontairement
-            else:
-                logging.info("Aucun signal exploitable trouvé. Aucun email envoyé.")
+            self.save_report_to_file(self.generate_report())
 
         except Exception as e:
             logging.error(f"Erreur analyse session : {str(e)}")
@@ -130,42 +135,54 @@ class AsianSessionTrader:
         logging.info(f"Email envoyé - Sujet: {subject}")
 
     def execute_post_session_trades(self):
-        logging.info("Simulation d'exécution de trades")
+        for symbol in self.symbols:
+            if symbol not in self.session_data:
+                continue
 
-        for symbol, data in self.session_data.items():
-            entry_price = data["vwap"]
-            sl_price = entry_price * 0.99  # SL à -1%
-            tp_price = entry_price * 1.02  # TP à +2%
+            price = self.exchange.fetch_ticker(symbol)['last']
+            trade_amount = self.risk_per_trade * self.exchange.fetch_balance()['total']['USDT'] / price
 
-            current_price = data["vwap"]  # Simulation : prix actuel = vwap (peut être remplacé par fetch_ticker)
-            position_closed = None
+            sl = price * 0.99  # SL à -1%
+            tp = price * 1.02  # TP à +2%
 
-            if current_price <= sl_price:
-                position_closed = "SL touché"
-            elif current_price >= tp_price:
-                position_closed = "TP touché"
+            self.active_trades[symbol] = {
+                "entry": price,
+                "sl": sl,
+                "tp": tp,
+                "amount": trade_amount,
+                "open": True
+            }
 
-            if position_closed:
-                msg = f"📣 {symbol} - {position_closed}\nEntrée : {entry_price:.2f} USDT\nSL : {sl_price:.2f}\nTP : {tp_price:.2f}"
-                logging.info(msg)
-                self.send_email(subject=f"⚠ TRADE FERMÉ - {symbol}", body=msg)
+            logging.info(f"SIMULATION : Achat {trade_amount:.4f} {symbol} à {price:.2f} (SL: {sl:.2f}, TP: {tp:.2f})")
 
-# Fonction planifiée
+    def monitor_trades(self):
+        for symbol, trade in self.active_trades.items():
+            if not trade['open']:
+                continue
+
+            price = self.exchange.fetch_ticker(symbol)['last']
+
+            if price <= trade['sl']:
+                trade['open'] = False
+                logging.info(f"SL touché pour {symbol} à {price:.2f} ❌")
+                self.send_email(f"SL touché - {symbol}", f"Le SL a été touché pour {symbol} à {price:.2f}")
+            elif price >= trade['tp']:
+                trade['open'] = False
+                logging.info(f"TP touché pour {symbol} à {price:.2f} ✅")
+                self.send_email(f"TP atteint - {symbol}", f"Le TP a été atteint pour {symbol} à {price:.2f}")
+
+# Tâche planifiée
 
 def scheduled_task():
     logging.info("\n===== Tâche quotidienne programmée lancée =====")
     trader = AsianSessionTrader()
     trader.analyze_session()
     trader.execute_post_session_trades()
-
-@app.route("/")
-def status():
-    return "<h1> Trading Bot Actif</h1><p>Stratégie : Post-Session Asiatique avec SMC</p>"
-
+    trader.monitor_trades()
 
 if __name__ == "__main__":
     scheduled_task()
-    schedule.every().day.at("10:30").do(scheduled_task)  # Après la session asiatique
+    schedule.every().day.at("02:10").do(scheduled_task)
 
     def schedule_runner():
         while True:
