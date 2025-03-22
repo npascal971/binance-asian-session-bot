@@ -8,6 +8,9 @@ import pandas as pd
 import pandas_ta as ta
 import ccxt
 from flask import Flask
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 
@@ -191,10 +194,7 @@ class AsianSessionTrader:
             logging.error(f"Erreur sauvegarde rapport : {str(e)}")
 
         def send_email(self, subject, body):
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-
+    
         sender_email = os.getenv('EMAIL_ADDRESS')
         receiver_email = sender_email
         password = os.getenv('EMAIL_PASSWORD')
