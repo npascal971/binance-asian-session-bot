@@ -75,10 +75,11 @@ class AsianSessionTrader:
                 df["ema200"] = ta.ema(df["close"], length=200)
                 df["rsi"] = ta.rsi(df["close"], length=14)
                 macd = ta.macd(df["close"])
-
                 if macd is None or "MACD_12_26_9" not in macd.columns:
                     logging.warning(f"Erreur MACD pour {symbol}")
                     continue
+                    
+                macd_value = macd["MACD_12_26_9"].iloc[-1] if not macd.empty else None
 
                 df_ltf = pd.DataFrame(self.exchange.fetch_ohlcv(symbol, timeframe="5m"),
                                       columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -186,6 +187,10 @@ def scheduled_task():
     trader.analyze_session()
     trader.execute_post_session_trades()
     trader.monitor_trades()
+
+@app.route("/")
+def home():
+    return "Asian Session Bot is running 🚀", 200
 
 if __name__ == "__main__":
     scheduled_task()
