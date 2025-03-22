@@ -165,12 +165,11 @@ def home():
 
 def monitor_trades_runner(trader):
     while True:
-        try:
-            trader.monitor_trades()
-            logging.info("💓 Monitor tick")
-        except Exception as e:
-            logging.error(f"Erreur dans monitor_trades_runner : {e}")
+        open_trades = len([t for t in trader.active_trades.values() if t.get("open")])
+        logging.info(f"💓 Monitor tick | Trades actifs : {open_trades}")
+        trader.monitor_trades()
         time.sleep(60)
+
 
 def run_scheduler():
     while True:
