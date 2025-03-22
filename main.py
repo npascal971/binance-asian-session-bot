@@ -176,37 +176,37 @@ class AsianSessionTrader:
                 logging.error(f"Erreur exécution ordre : {e}")
                 
     def send_trade_notification(self, subject, body, trade):
-    sender_email = os.getenv('EMAIL_ADDRESS')
-    receiver_email = os.getenv('EMAIL_ADDRESS')
-    password = os.getenv('EMAIL_PASSWORD')
+        sender_email = os.getenv('EMAIL_ADDRESS')
+        receiver_email = os.getenv('EMAIL_ADDRESS')
+        password = os.getenv('EMAIL_PASSWORD')
 
-    # Calculer le profit ou le drawdown en USD
-    entry_price = trade['entry']
-    exit_price = trade['exit_price']  # Prix de sortie (TP ou SL)
-    amount = trade['amount']
-    profit_usd = (exit_price - entry_price) * amount
-    drawdown_usd = (entry_price - exit_price) * amount
+        # Calculer le profit ou le drawdown en USD
+        entry_price = trade['entry']
+        exit_price = trade['exit_price']  # Prix de sortie (TP ou SL)
+        amount = trade['amount']
+        profit_usd = (exit_price - entry_price) * amount
+        drawdown_usd = (entry_price - exit_price) * amount
 
-    # Ajouter les informations au corps de l'e-mail
-    if profit_usd > 0:
-        body += f"\nProfit réalisé : {profit_usd:.2f} USD"
-    else:
-        body += f"\nDrawdown subi : {drawdown_usd:.2f} USD"
+        # Ajouter les informations au corps de l'e-mail
+        if profit_usd > 0:
+            body += f"\nProfit réalisé : {profit_usd:.2f} USD"
+        else:
+            body += f"\nDrawdown subi : {drawdown_usd:.2f} USD"
 
-    msg = MIMEMultipart()
-    msg['From'] = sender_email
-    msg['To'] = receiver_email
-    msg['Subject'] = subject
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = receiver_email
+        msg['Subject'] = subject
 
-    msg.attach(MIMEText(body, 'plain'))
+        msg.attach(MIMEText(body, 'plain'))
 
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, password)
-            server.sendmail(sender_email, receiver_email, msg.as_string())
-            logging.info("📩 Notification email envoyée.")
-    except Exception as e:
-        logging.error(f"Erreur envoi email : {e}")
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(sender_email, password)
+                server.sendmail(sender_email, receiver_email, msg.as_string())
+                logging.info("📩 Notification email envoyée.")
+        except Exception as e:
+            logging.error(f"Erreur envoi email : {e}")
 
     def manage_take_profit_stop_loss(self, symbol, trade):
     try:
