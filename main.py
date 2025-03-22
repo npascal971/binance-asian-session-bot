@@ -67,9 +67,10 @@ class AsianSessionTrader:
                 ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", since=self.get_session_start())
                 df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-                if len(df) < 3:
-                    logging.warning(f"Pas assez de données pour {symbol} (seulement {len(df)} bougies)")
+                if len(df["close"]) < 30:
+                    logging.warning(f"Trop peu de données pour MACD sur {symbol} ({len(df)} lignes)")
                     continue
+
 
                 df["vwap"] = (df["high"] + df["low"] + df["close"]) / 3
                 df["ema200"] = ta.ema(df["close"], length=200)
