@@ -28,7 +28,7 @@ class AsianSessionTrader:
         self.session_data = {}
         self.active_trades = {}
         self.asian_session = {"start": {"hour": 23, "minute": 0}, "end": {"hour": 10, "minute": 0}}
-
+        self.us_session = {"start": {"hour": 14, "minute": 0}, "end": {"hour": 21, "minute": 0}}
         if not os.path.exists("reports"):
             os.makedirs("reports")
 
@@ -55,13 +55,17 @@ class AsianSessionTrader:
         logging.info(f"Solde actuel : {usdt_balance} USDT")
 
     def is_within_session(self, current_time):
-        start = self.asian_session['end']  # 10h00 (fin de la session asiatique)
-        end = self.us_session['end']       # 17h00 (fin de la session US)
-        start_time = timedelta(hours=start['hour'], minutes=start['minute'])
-        end_time = timedelta(hours=end['hour'], minutes=end['minute'])
+        # Vérifie si l'heure actuelle est dans la session asiatique ou US
+        asian_start = timedelta(hours=self.asian_session['start']['hour'], minutes=self.asian_session['start']['minute'])
+        asian_end = timedelta(hours=self.asian_session['end']['hour'], minutes=self.asian_session['end']['minute'])
+        us_start = timedelta(hours=self.us_session['start']['hour'], minutes=self.us_session['start']['minute'])
+        us_end = timedelta(hours=self.us_session['end']['hour'], minutes=self.us_session['end']['minute'])
         now_time = timedelta(hours=current_time.hour, minutes=current_time.minute)
 
-        return start_time <= now_time <= end_time
+        in_asian_session = asian_start <= now_time <= asian_end if asian_start < asian_end else now_time >= asian_start or now_time <= asian_end
+        in_us_session = us_start <= now_time <= us_end if us_start < us_end else now_time >= us_start or now_time <= us_end
+
+        return in_asian_session or in_us_session
     def detect_order_blocks(self, df, bullish=True):
         try:
             df['body'] = abs(df['close'] - df['open'])
