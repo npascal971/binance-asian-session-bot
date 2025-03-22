@@ -31,19 +31,21 @@ class AsianSessionTrader:
 
     def configure_exchange(self):
         exchange = ccxt.binance({
-            'apiKey': 'YOUR_API_KEY',
-            'secret': 'YOUR_SECRET_KEY',
-            'urls': {
-                'api': {
-                    'public': 'https://testnet.binance.vision/api',
-                    'private': 'https://testnet.binance.vision/api',
-                },
-            },
-            'options': {
-                'adjustForTimeDifference': True,
-                'enableRateLimit': True,
-            },
-        })
+    'apiKey': 'LisbDeNvATic1cNKkxMCt5lupsA6Ly8TiNhSjEC1GQYXqUn7YTSQbhAC1h0J41yX',
+    'secret': 'xIlgTJaLNAfXZNfXEN6sTWJ8fLwp2H95kcXN5L8qpX1MBukUAwm1TvOO8a0jEXyc',
+    'urls': {
+        'api': {
+            'public': 'https://testnet.binance.vision/api',
+            'private': 'https://testnet.binance.vision/api',
+        },
+    },
+    'options': {
+        'adjustForTimeDifference': True,
+        'enableRateLimit': True,
+    },
+})
+
+        # Activation du mode sandbox (Testnet)
         exchange.set_sandbox_mode(True)
         return exchange
 
@@ -59,17 +61,6 @@ class AsianSessionTrader:
             start_time -= timedelta(days=1)
         return int(start_time.timestamp() * 1000)
 
-    def is_within_session(self, current_time):
-        start = self.asian_session['start']
-        end = self.asian_session['end']
-        start_time = timedelta(hours=start['hour'], minutes=start['minute'])
-        end_time = timedelta(hours=end['hour'], minutes=end['minute'])
-        now_time = timedelta(hours=current_time.hour, minutes=current_time.minute)
-        if start_time < end_time:
-            return start_time <= now_time <= end_time
-        else:
-            return now_time >= start_time or now_time <= end_time
-
     def analyze_session(self):
         try:
             for symbol in self.symbols:
@@ -80,6 +71,7 @@ class AsianSessionTrader:
                     logging.warning(f"Trop peu de données pour MACD sur {symbol} ({len(df)} lignes)")
                     continue
 
+
                 df["vwap"] = (df["high"] + df["low"] + df["close"]) / 3
                 df["ema200"] = ta.ema(df["close"], length=200)
                 df["rsi"] = ta.rsi(df["close"], length=14)
@@ -88,10 +80,14 @@ class AsianSessionTrader:
                     logging.warning(f"Erreur MACD pour {symbol} (colonnes manquantes ou données vides)")
                     continue
 
+# Nettoyage des NaN et utilisation du dernier MACD valide
                 macd = macd.dropna()
                 if macd.empty:
                     logging.warning(f"MACD vide après nettoyage pour {symbol}")
                     continue
+
+                macd_value = macd["MACD_12_26_9"].iloc[-1]
+
 
                 df_ltf = pd.DataFrame(self.exchange.fetch_ohlcv(symbol, timeframe="5m"),
                                       columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -162,8 +158,8 @@ class AsianSessionTrader:
             price = self.exchange.fetch_ticker(symbol)['last']
             trade_amount = self.risk_per_trade * self.exchange.fetch_balance()['total']['USDT'] / price
 
-            sl = price * 0.99
-            tp = price * 1.02
+            sl = price * 0.99  # SL à -1%
+            tp = price * 1.02  # TP à +2%
 
             self.active_trades[symbol] = {
                 "entry": price,
@@ -191,11 +187,11 @@ class AsianSessionTrader:
                 logging.info(f"TP touché pour {symbol} à {price:.2f} ✅")
                 self.send_email(f"TP atteint - {symbol}", f"Le TP a été atteint pour {symbol} à {price:.2f}")
 
-    def has_open_trade(self):
-        return any(trade['open'] for trade in self.active_trades.values())
+# Tâche planifiée
 
 def scheduled_task():
     logging.info("\n===== Tâche quotidienne programmée lancée =====")
+    trader = AsianSessionTrader()
     trader.analyze_session()
     trader.execute_post_session_trades()
     trader.monitor_trades()
@@ -203,25 +199,14 @@ def scheduled_task():
 @app.route("/")
 def home():
     return "Asian Session Bot is running 🚀", 200
-
+    
 def monitor_trades_runner(trader):
     while True:
         trader.monitor_trades()
         time.sleep(60)
 
-def continuous_market_monitor(trader, interval_minutes=5):
-    while True:
-        now = datetime.utcnow().time()
-        if trader.is_within_session(now):
-            logging.info("🔁 Analyse continue pendant la session asiatique...")
-        else:
-            logging.info("🌐 Analyse continue hors session asiatique...")
-        if not trader.has_open_trade():
-            trader.analyze_session()
-        time.sleep(interval_minutes * 60)
-
 if __name__ == "__main__":
-    trader = AsianSessionTrader()
+    trader = AsianSessionTrader()  # 🔥 On instancie UNE FOIS pour le suivi live
     scheduled_task()
     schedule.every().day.at("02:10").do(scheduled_task)
 
@@ -230,9 +215,13 @@ if __name__ == "__main__":
             schedule.run_pending()
             time.sleep(30)
 
-    threading.Thread(target=schedule_runner, daemon=True).start()
-    threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True).start()
-    threading.Thread(target=continuous_market_monitor, args=(trader,), daemon=True).start()
+    # Thread pour les tâches programmées (analyse + placement des trades)
+    bot_thread = threading.Thread(target=schedule_runner, daemon=True)
+    bot_thread.start()
+
+    # Thread pour surveiller les trades actifs en continu
+    monitor_thread = threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True)
+    monitor_thread.start()
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
