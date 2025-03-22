@@ -202,31 +202,31 @@ class AsianSessionTrader:
                 logging.error(f"Erreur envoi email : {e}")
 
     def manage_take_profit_stop_loss(self, symbol, trade):
-    try:
-        price = self.exchange.fetch_ticker(symbol)['last']
-        if price >= trade['tp']:
-            duration = datetime.now() - trade["entry_time"]
-            minutes = int(duration.total_seconds() // 60)
-            logging.info(f"✅ TP atteint {symbol} à {price:.2f} | Durée : {minutes} min")
-            trade['open'] = False
-            self.exchange.create_market_sell_order(symbol, trade['amount'])
+        try:
+            price = self.exchange.fetch_ticker(symbol)['last']
+            if price >= trade['tp']:
+                duration = datetime.now() - trade["entry_time"]
+                minutes = int(duration.total_seconds() // 60)
+                logging.info(f"✅ TP atteint {symbol} à {price:.2f} | Durée : {minutes} min")
+                trade['open'] = False
+                self.exchange.create_market_sell_order(symbol, trade['amount'])
 
-            subject = f"[TP ATTEINT] {symbol}"
-            body = f"✅ Take Profit atteint sur {symbol}\n\nPrix: {price:.2f} USDT\nDurée: {minutes} minutes"
-            self.send_trade_notification(subject, body)
-            return
+                subject = f"[TP ATTEINT] {symbol}"
+                body = f"✅ Take Profit atteint sur {symbol}\n\nPrix: {price:.2f} USDT\nDurée: {minutes} minutes"
+                self.send_trade_notification(subject, body)
+                return
 
-        if price <= trade['sl']:
-            duration = datetime.now() - trade["entry_time"]
-            minutes = int(duration.total_seconds() // 60)
-            logging.info(f"🛑 SL touché {symbol} à {price:.2f} | Durée : {minutes} min")
-            trade['open'] = False
-            self.exchange.create_market_sell_order(symbol, trade['amount'])
+            if price <= trade['sl']:
+                duration = datetime.now() - trade["entry_time"]
+                minutes = int(duration.total_seconds() // 60)
+                logging.info(f"🛑 SL touché {symbol} à {price:.2f} | Durée : {minutes} min")
+                trade['open'] = False
+                self.exchange.create_market_sell_order(symbol, trade['amount'])
 
-            subject = f"[SL TOUCHÉ] {symbol}"
-            body = f"🛑 Stop Loss touché sur {symbol}\n\nPrix: {price:.2f} USDT\nDurée: {minutes} minutes"
-            self.send_trade_notification(subject, body)
-            return
+                subject = f"[SL TOUCHÉ] {symbol}"
+                body = f"🛑 Stop Loss touché sur {symbol}\n\nPrix: {price:.2f} USDT\nDurée: {minutes} minutes"
+                self.send_trade_notification(subject, body)
+                return
 
         # Trailing SL
         new_sl = price * (1 - self.trailing_stop_percent / 100)
