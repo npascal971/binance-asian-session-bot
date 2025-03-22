@@ -75,11 +75,18 @@ class AsianSessionTrader:
                 df["ema200"] = ta.ema(df["close"], length=200)
                 df["rsi"] = ta.rsi(df["close"], length=14)
                 macd = ta.macd(df["close"])
-                if macd is None or "MACD_12_26_9" not in macd.columns:
-                    logging.warning(f"Erreur MACD pour {symbol}")
+                if macd is None or macd.empty or not all(col in macd.columns for col in ["MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9"]):
+                    logging.warning(f"Erreur MACD pour {symbol} (colonnes manquantes ou données vides)")
                     continue
-                    
-                macd_value = macd["MACD_12_26_9"].iloc[-1] if not macd.empty else None
+
+# Nettoyage des NaN et utilisation du dernier MACD valide
+                macd = macd.dropna()
+                if macd.empty:
+                    logging.warning(f"MACD vide après nettoyage pour {symbol}")
+                    continue
+
+                macd_value = macd["MACD_12_26_9"].iloc[-1]
+
 
                 df_ltf = pd.DataFrame(self.exchange.fetch_ohlcv(symbol, timeframe="5m"),
                                       columns=["timestamp", "open", "high", "low", "close", "volume"])
