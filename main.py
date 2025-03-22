@@ -164,6 +164,7 @@ def status():
 
 
 if __name__ == "__main__":
+    scheduled_task()
     schedule.every().day.at("10:30").do(scheduled_task)  # Après la session asiatique
 
     def schedule_runner():
