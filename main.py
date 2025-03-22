@@ -282,7 +282,7 @@ class AsianSessionTrader:
 def scheduled_task():
     logging.info("\n===== Tâche quotidienne programmée lancée =====")
     trader.analyze_session()
-    trader.()
+    trader.execute_post_session_trades()
     trader.monitor_trades()
 
 @app.route("/")
