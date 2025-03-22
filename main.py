@@ -145,8 +145,8 @@ class AsianSessionTrader:
                     continue
                 macd = macd.dropna()
 
-                trend_ok = df["close"].iloc[-1] > df["ema200"].iloc[-1] and df["rsi"].iloc[-1] > 50 and macd.iloc[-1]["MACD_12_26_9"] > 0
-
+                trend_ok = (df["close"].iloc[-1] > df["ema200"].iloc[-1]) and (df["rsi"].iloc[-1] > 45) and (macd.iloc[-1]["MACD_12_26_9"] > -10)
+                logging.info(f"Tendance non confirmée pour {symbol} : RSI = {df['rsi'].iloc[-1]}, MACD = {macd.iloc[-1]['MACD_12_26_9']}")
                 logging.info(f"EMA200 pour {symbol} : {df['ema200'].iloc[-1]}")
                 logging.info(f"RSI pour {symbol} : {df['rsi'].iloc[-1]}")
                 logging.info(f"MACD pour {symbol} : {macd.iloc[-1]['MACD_12_26_9']}")
