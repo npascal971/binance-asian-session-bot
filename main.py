@@ -239,17 +239,17 @@ class AsianSessionTrader:
 
         # Trailing SL
             new_sl = price * (1 - self.trailing_stop_percent / 100)
-                if new_sl > trade["sl"]:
-                    logging.info(f"🔁 Trailing SL mis à jour pour {symbol} : {trade['sl']:.2f} → {new_sl:.2f}")
-                    trade["sl"] = new_sl
+            if new_sl > trade["sl"]:
+                logging.info(f"🔁 Trailing SL mis à jour pour {symbol} : {trade['sl']:.2f} → {new_sl:.2f}")
+                trade["sl"] = new_sl
 
         # Break-even
-                if price >= trade["entry"] * (1 + self.break_even_trigger / 100) and trade["sl"] < trade["entry"]:
-                    logging.info(f"🔐 Break-even activé pour {symbol} → SL remonté à l'entrée : {trade['entry']:.2f}")
-                    trade["sl"] = trade["entry"]
+            if price >= trade["entry"] * (1 + self.break_even_trigger / 100) and trade["sl"] < trade["entry"]:
+                logging.info(f"🔐 Break-even activé pour {symbol} → SL remonté à l'entrée : {trade['entry']:.2f}")
+                trade["sl"] = trade["entry"]
 
-            except Exception as e:
-                logging.error(f"Erreur SL/TP dynamique : {e}")
+        except Exception as e:
+            logging.error(f"Erreur SL/TP dynamique : {e}")
 
 
     def monitor_trades(self):
