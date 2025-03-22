@@ -134,33 +134,37 @@ class AsianSessionTrader:
             return False
 
     def analyze_session(self):
-        try:
-            for symbol in self.symbols:
-                ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", limit=200)
-                df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
-                df.set_index("datetime", inplace=True)
+    try:
+        for symbol in self.symbols:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", limit=200)
+            df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df.set_index("datetime", inplace=True)
 
-                df["ema200"] = ta.ema(df["close"], length=200)
-                df["rsi"] = ta.rsi(df["close"], length=14)
-                macd = ta.macd(df["close"])
-                if macd is None or macd.empty:
-                    continue
-                macd = macd.dropna()
+            df["ema200"] = ta.ema(df["close"], length=200)
+            df["rsi"] = ta.rsi(df["close"], length=14)
+            macd = ta.macd(df["close"])
+            if macd is None or macd.empty:
+                continue
+            macd = macd.dropna()
 
-                trend_ok = df["close"].iloc[-1] > df["ema200"].iloc[-1] and df["rsi"].iloc[-1] > 50 and macd.iloc[-1]["MACD_12_26_9"] > 0
+            trend_ok = df["close"].iloc[-1] > df["ema200"].iloc[-1] and df["rsi"].iloc[-1] > 50 and macd.iloc[-1]["MACD_12_26_9"] > 0
 
-                ob = self.detect_order_blocks(df, symbol, bullish=trend_ok)
+            logging.info(f"EMA200 pour {symbol} : {df['ema200'].iloc[-1]}")
+            logging.info(f"RSI pour {symbol} : {df['rsi'].iloc[-1]}")
+            logging.info(f"MACD pour {symbol} : {macd.iloc[-1]['MACD_12_26_9']}")
 
-                self.session_data[symbol] = {
-                    "ema200": df["ema200"].iloc[-1],
-                    "rsi": df["rsi"].iloc[-1],
-                    "macd": macd.iloc[-1]["MACD_12_26_9"],
-                    "trend_ok": trend_ok,
-                    "order_block": ob
-                }
-        except Exception as e:
-            logging.error(f"Erreur analyse session : {str(e)}")
+            ob = self.detect_order_blocks(df, symbol, bullish=trend_ok)
+
+            self.session_data[symbol] = {
+                "ema200": df["ema200"].iloc[-1],
+                "rsi": df["rsi"].iloc[-1],
+                "macd": macd.iloc[-1]["MACD_12_26_9"],
+                "trend_ok": trend_ok,
+                "order_block": ob
+            }
+    except Exception as e:
+        logging.error(f"Erreur analyse session : {str(e)}")
 
     # ... (le reste de votre code)
 
