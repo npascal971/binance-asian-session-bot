@@ -73,8 +73,31 @@ class AsianSessionTrader:
     def analyze_session(self):
         try:
             for symbol in self.symbols:
-                ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", since=self.get_session_start())
+                # 📈 Télécharger plus de bougies pour avoir un historique suffisant pour MACD/EMA
+                ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", limit=100)
                 df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+                # 🕐 Convertir les timestamps pour pouvoir filtrer par heure
+                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df = df.set_index("datetime")
+
+                # ⏳ Déterminer la plage horaire de la session asiatique actuelle
+                session_start = datetime.utcnow().replace(hour=self.asian_session['start']['hour'], 
+                                                          minute=self.asian_session['start']['minute'], 
+                                                          second=0, microsecond=0)
+                if datetime.utcnow() < session_start:
+                    session_start -= timedelta(days=1)
+                session_end = session_start + timedelta(hours=11)  # Session asiatique dure 11h
+
+                # 📊 Filtrer les données de la session asiatique uniquement
+                df_session = df[(df.index >= session_start) & (df.index <= session_end)]
+
+                # ❗ Optionnel : avertir si trop peu de données dans la session, mais PAS bloquant pour les indicateurs
+                if len(df) < 35:
+                    logging.warning(f"Données globales insuffisantes pour MACD sur {symbol} ({len(df)} lignes)")
+                if len(df_session) < 10:
+                    logging.warning(f"Trop peu de données dans la session asiatique sur {symbol} ({len(df_session)} lignes)")
+
 
                 if len(df["close"]) < 30:
                     logging.warning(f"Trop peu de données pour MACD sur {symbol} ({len(df)} lignes)")
