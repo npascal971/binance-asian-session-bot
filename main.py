@@ -67,51 +67,51 @@ class AsianSessionTrader:
         in_us_session = us_start <= now_time <= us_end if us_start < us_end else now_time >= us_start or now_time <= us_end
 
         return in_asian_session or in_us_session
-        
-def detect_order_blocks(self, df, symbol, bullish=True):
-    try:
-        df['body'] = abs(df['close'] - df['open'])
-        df['prev_close'] = df['close'].shift(1)
-        df['prev_open'] = df['open'].shift(1)
 
-        # Initialiser ob_candidates à un DataFrame vide
-        ob_candidates = pd.DataFrame()
+    def detect_order_blocks(self, df, symbol, bullish=True):
+        try:
+            df['body'] = abs(df['close'] - df['open'])
+            df['prev_close'] = df['close'].shift(1)
+            df['prev_open'] = df['open'].shift(1)
 
-        if bullish:
-            ob_candidates = df[(df['open'] < df['close']) &
-                               (df['high'].shift(-1) > df['high']) &
-                               (df['low'].shift(-1) > df['low'])]
-        else:
-            ob_candidates = df[(df['open'] > df['close']) &
-                               (df['low'].shift(-1) < df['low']) &
-                               (df['high'].shift(-1) < df['high'])]
+            # Initialiser ob_candidates à un DataFrame vide
+            ob_candidates = pd.DataFrame()
 
-        if not ob_candidates.empty:
-            last_ob = ob_candidates.iloc[-1]
-            ob_timestamp = last_ob.name  # Timestamp de l'Order Block
-
-            # Vérifier si l'Order Block a déjà été détecté pour ce symbole
-            if ob_timestamp != self.last_ob.get(symbol, {}).get("timestamp"):
-                ob_zone = {
-                    "open": last_ob['open'],
-                    "close": last_ob['close'],
-                    "high": last_ob['high'],
-                    "low": last_ob['low'],
-                    "timestamp": ob_timestamp
-                }
-                logging.info(f"📦 OB détecté ({'Bullish' if bullish else 'Bearish'}) pour {symbol} : {ob_zone}")
-                self.last_ob[symbol] = ob_zone  # Stocker le dernier OB détecté pour ce symbole
-                return ob_zone
+            if bullish:
+                ob_candidates = df[(df['open'] < df['close']) &
+                                   (df['high'].shift(-1) > df['high']) &
+                                   (df['low'].shift(-1) > df['low'])]
             else:
-                logging.info(f"📦 OB déjà traité pour {symbol} (timestamp: {ob_timestamp})")
+                ob_candidates = df[(df['open'] > df['close']) &
+                                   (df['low'].shift(-1) < df['low']) &
+                                   (df['high'].shift(-1) < df['high'])]
+
+            if not ob_candidates.empty:
+                last_ob = ob_candidates.iloc[-1]
+                ob_timestamp = last_ob.name  # Timestamp de l'Order Block
+
+                # Vérifier si l'Order Block a déjà été détecté pour ce symbole
+                if ob_timestamp != self.last_ob.get(symbol, {}).get("timestamp"):
+                    ob_zone = {
+                        "open": last_ob['open'],
+                        "close": last_ob['close'],
+                        "high": last_ob['high'],
+                        "low": last_ob['low'],
+                        "timestamp": ob_timestamp
+                    }
+                    logging.info(f"📦 OB détecté ({'Bullish' if bullish else 'Bearish'}) pour {symbol} : {ob_zone}")
+                    self.last_ob[symbol] = ob_zone  # Stocker le dernier OB détecté pour ce symbole
+                    return ob_zone
+                else:
+                    logging.info(f"📦 OB déjà traité pour {symbol} (timestamp: {ob_timestamp})")
+                    return None
+            else:
+                logging.info(f"📦 Aucun OB détecté pour {symbol} ({'Bullish' if bullish else 'Bearish'})")
                 return None
-        else:
-            logging.info(f"📦 Aucun OB détecté pour {symbol} ({'Bullish' if bullish else 'Bearish'})")
+        except Exception as e:
+            logging.error(f"Erreur détection OB pour {symbol} : {e}")
             return None
-    except Exception as e:
-        logging.error(f"Erreur détection OB pour {symbol} : {e}")
-        return None
-        
+
     def detect_ltf_structure_shift(self, symbol, timeframe="3m"):
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=50)
@@ -150,7 +150,7 @@ def detect_order_blocks(self, df, symbol, bullish=True):
 
                 trend_ok = df["close"].iloc[-1] > df["ema200"].iloc[-1] and df["rsi"].iloc[-1] > 50 and macd.iloc[-1]["MACD_12_26_9"] > 0
 
-                ob = self.detect_order_blocks(df, bullish=trend_ok)
+                ob = self.detect_order_blocks(df, symbol, bullish=trend_ok)
 
                 self.session_data[symbol] = {
                     "ema200": df["ema200"].iloc[-1],
@@ -161,6 +161,8 @@ def detect_order_blocks(self, df, symbol, bullish=True):
                 }
         except Exception as e:
             logging.error(f"Erreur analyse session : {str(e)}")
+
+    # ... (le reste de votre code)
 
     def execute_post_session_trades(self):
         for symbol in self.symbols:
