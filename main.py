@@ -201,6 +201,7 @@ def home():
     return "Asian Session Bot is running 🚀", 200
 
 if __name__ == "__main__":
+    trader = AsianSessionTrader()  # 🔥 On instancie UNE FOIS pour le suivi live
     scheduled_task()
     schedule.every().day.at("02:10").do(scheduled_task)
 
@@ -209,8 +210,13 @@ if __name__ == "__main__":
             schedule.run_pending()
             time.sleep(30)
 
+    # Thread pour les tâches programmées (analyse + placement des trades)
     bot_thread = threading.Thread(target=schedule_runner, daemon=True)
     bot_thread.start()
+
+    # Thread pour surveiller les trades actifs en continu
+    monitor_thread = threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True)
+    monitor_thread.start()
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
