@@ -115,7 +115,8 @@ class AsianSessionTrader:
                     "amount": trade_amount,
                     "order_id": order['id'],
                     "open": True,
-                    "trailing_stop": sl
+                    "trailing_stop": sl,
+                    "entry_time": datetime.now()
                 }
             except Exception as e:
                 logging.error(f"Erreur exécution ordre : {e}")
@@ -125,15 +126,19 @@ class AsianSessionTrader:
             price = self.exchange.fetch_ticker(symbol)['last']
 
             if price >= trade['tp']:
+                duration = datetime.now() - trade["entry_time"]
+                minutes = int(duration.total_seconds() // 60)
+                logging.info(f"✅ TP atteint {symbol} à {price:.2f} | Durée : {minutes} min")
                 trade['open'] = False
                 self.exchange.create_market_sell_order(symbol, trade['amount'])
-                logging.info(f"TP atteint {symbol} à {price:.2f}")
                 return
 
             if price <= trade['sl']:
+                duration = datetime.now() - trade["entry_time"]
+                minutes = int(duration.total_seconds() // 60)
+                logging.info(f"🛑 SL touché {symbol} à {price:.2f} | Durée : {minutes} min")
                 trade['open'] = False
                 self.exchange.create_market_sell_order(symbol, trade['amount'])
-                logging.info(f"SL touché {symbol} à {price:.2f}")
                 return
 
             new_sl = price * (1 - self.trailing_stop_percent / 100)
@@ -165,11 +170,16 @@ def home():
 
 def monitor_trades_runner(trader):
     while True:
-        open_trades = len([t for t in trader.active_trades.values() if t.get("open")])
-        logging.info(f"💓 Monitor tick | Trades actifs : {open_trades}")
+        open_trades = [t for t in trader.active_trades.values() if t.get("open")]
+        if open_trades:
+            for trade in open_trades:
+                duration = datetime.now() - trade["entry_time"]
+                minutes = int(duration.total_seconds() // 60)
+                logging.info(f"💓 Monitor tick | Trades actifs : {len(open_trades)} | Durée trade actif : {minutes} min")
+        else:
+            logging.info("💓 Monitor tick | Trades actifs : 0")
         trader.monitor_trades()
         time.sleep(60)
-
 
 def run_scheduler():
     while True:
