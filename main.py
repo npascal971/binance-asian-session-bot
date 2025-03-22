@@ -55,14 +55,13 @@ class AsianSessionTrader:
         logging.info(f"Solde actuel : {usdt_balance} USDT")
 
     def is_within_session(self, current_time):
-        start = self.asian_session['start']
-        end = self.asian_session['end']
+        start = self.asian_session['end']  # 10h00 (fin de la session asiatique)
+        end = self.us_session['end']       # 17h00 (fin de la session US)
         start_time = timedelta(hours=start['hour'], minutes=start['minute'])
         end_time = timedelta(hours=end['hour'], minutes=end['minute'])
         now_time = timedelta(hours=current_time.hour, minutes=current_time.minute)
-        within_session = start_time <= now_time <= end_time if start_time < end_time else now_time >= start_time or now_time <= end_time
-        logging.info(f"Vérification de l'heure : {current_time} - Dans la session : {within_session}")
-        return within_session
+
+        return start_time <= now_time <= end_time
     def detect_order_blocks(self, df, bullish=True):
         try:
             df['body'] = abs(df['close'] - df['open'])
@@ -276,12 +275,17 @@ def monitor_trades_runner(trader):
 
 def run_scheduler():
     while True:
-        try:
-            logging.info("Scheduler en cours d'exécution...")
-            schedule.run_pending()
-        except Exception as e:
-            logging.error(f"Erreur scheduler : {e}")
-        time.sleep(10)
+        current_time = datetime.now()
+        if trader.is_within_session(current_time):  # Vérifie si l'heure est entre 10h00 et 17h00
+            logging.info("===== Début de la tâche programmée =====")
+            trader.analyze_session()
+            trader.execute_post_session_trades()
+            trader.monitor_trades()
+            logging.info("===== Fin de la tâche programmée =====")
+        else:
+            logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
+        
+        time.sleep(60)  # Attendre 1 minute avant de vérifier à nouveau
 
 if __name__ == "__main__":
     trader = AsianSessionTrader()
