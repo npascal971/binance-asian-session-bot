@@ -186,7 +186,7 @@ class AsianSessionTrader:
             msg.attach(MIMEText(body, "plain"))
             with smtplib.SMTP("smtp.gmail.com", 587) as server:
                 server.starttls()
-                server.login(os.getenv("EMAIL_ADDRESS"], os.getenv("EMAIL_PASSWORD"))
+                server.login(os.getenv("EMAIL_ADDRESS"), os.getenv("EMAIL_PASSWORD"))
                 server.send_message(msg)
         except Exception as e:
             logging.error(f"Erreur email : {str(e)}")
