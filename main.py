@@ -65,6 +65,59 @@ class AsianSessionTrader:
         else:
             return now_time >= start_time or now_time <= end_time
 
+    def detect_order_blocks(self, df, bullish=True):
+        try:
+            df['body'] = abs(df['close'] - df['open'])
+            df['prev_close'] = df['close'].shift(1)
+            df['prev_open'] = df['open'].shift(1)
+
+            if bullish:
+                ob_candidates = df[(df['open'] < df['close']) &
+                                   (df['high'].shift(-1) > df['high']) &
+                                   (df['low'].shift(-1) > df['low'])]
+            else:
+                ob_candidates = df[(df['open'] > df['close']) &
+                                   (df['low'].shift(-1) < df['low']) &
+                                   (df['high'].shift(-1) < df['high'])]
+
+            if not ob_candidates.empty:
+                last_ob = ob_candidates.iloc[-1]
+                ob_zone = {
+                    "open": last_ob['open'],
+                    "close": last_ob['close'],
+                    "high": last_ob['high'],
+                    "low": last_ob['low'],
+                    "timestamp": last_ob.name
+                }
+                logging.info(f"📦 OB détecté ({'Bullish' if bullish else 'Bearish'}) : {ob_zone}")
+                return ob_zone
+            else:
+                return None
+        except Exception as e:
+            logging.error(f"Erreur détection OB : {e}")
+            return None
+
+    def detect_ltf_structure_shift(self, symbol, timeframe="3m"):
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=50)
+            df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df.set_index("datetime", inplace=True)
+
+            df['higher_high'] = df['high'] > df['high'].shift(1)
+            df['lower_low'] = df['low'] < df['low'].shift(1)
+
+            hh_detected = df['higher_high'].iloc[-2] and not df['higher_high'].iloc[-1]
+            ll_detected = df['lower_low'].iloc[-2] and not df['lower_low'].iloc[-1]
+
+            if hh_detected and ll_detected:
+                logging.info(f"🌀 {symbol} → Possible CHoCH détecté (retournement)")
+                return True
+            return False
+        except Exception as e:
+            logging.error(f"Erreur détection structure LTF {symbol}: {e}")
+            return False
+
     def analyze_session(self):
         try:
             for symbol in self.symbols:
@@ -80,15 +133,17 @@ class AsianSessionTrader:
                     continue
                 macd = macd.dropna()
 
-                if df["close"].iloc[-1] > df["ema200"].iloc[-1] and df["rsi"].iloc[-1] > 50 and macd.iloc[-1]["MACD_12_26_9"] > 0:
-                    self.session_data[symbol] = {
-                        "ema200": df["ema200"].iloc[-1],
-                        "rsi": df["rsi"].iloc[-1],
-                        "macd": macd.iloc[-1]["MACD_12_26_9"],
-                        "trend_ok": True
-                    }
-                else:
-                    self.session_data[symbol] = {"trend_ok": False}
+                trend_ok = df["close"].iloc[-1] > df["ema200"].iloc[-1] and df["rsi"].iloc[-1] > 50 and macd.iloc[-1]["MACD_12_26_9"] > 0
+
+                ob = self.detect_order_blocks(df, bullish=trend_ok)
+
+                self.session_data[symbol] = {
+                    "ema200": df["ema200"].iloc[-1],
+                    "rsi": df["rsi"].iloc[-1],
+                    "macd": macd.iloc[-1]["MACD_12_26_9"],
+                    "trend_ok": trend_ok,
+                    "order_block": ob
+                }
         except Exception as e:
             logging.error(f"Erreur analyse session : {str(e)}")
 
@@ -97,6 +152,10 @@ class AsianSessionTrader:
             data = self.session_data.get(symbol, {})
             if not data.get("trend_ok"):
                 logging.info(f"Pas d'entrée pour {symbol} - tendance non confirmée.")
+                continue
+
+            if not self.detect_ltf_structure_shift(symbol, timeframe="3m"):
+                logging.info(f"⚠️ {symbol} - Structure LTF pas encore confirmée, on attend")
                 continue
 
             price = self.exchange.fetch_ticker(symbol)['last']
@@ -119,14 +178,12 @@ class AsianSessionTrader:
                     "entry_time": datetime.now()
                 }
                 logging.info(f"🎯 Nouveau trade {symbol} | Entrée: {price:.2f} | TP: {tp:.2f} | SL: {sl:.2f}")
-
             except Exception as e:
                 logging.error(f"Erreur exécution ordre : {e}")
 
     def manage_take_profit_stop_loss(self, symbol, trade):
         try:
             price = self.exchange.fetch_ticker(symbol)['last']
-
             if price >= trade['tp']:
                 duration = datetime.now() - trade["entry_time"]
                 minutes = int(duration.total_seconds() // 60)
@@ -159,6 +216,10 @@ class AsianSessionTrader:
         for symbol, trade in list(self.active_trades.items()):
             if trade.get("open"):
                 self.manage_take_profit_stop_loss(symbol, trade)
+
+# Les autres fonctions restent inchangées...
+# (scheduled_task, monitor_trades_runner, run_scheduler, Flask app etc.)
+
 
 def scheduled_task():
     logging.info("===== Tâche programmée =====")
