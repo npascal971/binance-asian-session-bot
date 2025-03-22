@@ -33,7 +33,7 @@ class AsianSessionTrader:
             os.makedirs("reports")
 
         self.update_balance()
-        self.last_ob = {} 
+        self.last_ob = {}
 
     def configure_exchange(self):
         exchange = ccxt.binance({
@@ -56,7 +56,6 @@ class AsianSessionTrader:
         logging.info(f"Solde actuel : {usdt_balance} USDT")
 
     def is_within_session(self, current_time):
-        # Vérifie si l'heure actuelle est dans la session asiatique ou US
         asian_start = timedelta(hours=self.asian_session['start']['hour'], minutes=self.asian_session['start']['minute'])
         asian_end = timedelta(hours=self.asian_session['end']['hour'], minutes=self.asian_session['end']['minute'])
         us_start = timedelta(hours=self.us_session['start']['hour'], minutes=self.us_session['start']['minute'])
@@ -74,7 +73,6 @@ class AsianSessionTrader:
             df['prev_close'] = df['close'].shift(1)
             df['prev_open'] = df['open'].shift(1)
 
-            # Initialiser ob_candidates à un DataFrame vide
             ob_candidates = pd.DataFrame()
 
             if bullish:
@@ -88,9 +86,8 @@ class AsianSessionTrader:
 
             if not ob_candidates.empty:
                 last_ob = ob_candidates.iloc[-1]
-                ob_timestamp = last_ob.name  # Timestamp de l'Order Block
+                ob_timestamp = last_ob.name
 
-                # Vérifier si l'Order Block a déjà été détecté pour ce symbole
                 if ob_timestamp != self.last_ob.get(symbol, {}).get("timestamp"):
                     ob_zone = {
                         "open": last_ob['open'],
@@ -100,7 +97,7 @@ class AsianSessionTrader:
                         "timestamp": ob_timestamp
                     }
                     logging.info(f"📦 OB détecté ({'Bullish' if bullish else 'Bearish'}) pour {symbol} : {ob_zone}")
-                    self.last_ob[symbol] = ob_zone  # Stocker le dernier OB détecté pour ce symbole
+                    self.last_ob[symbol] = ob_zone
                     return ob_zone
                 else:
                     logging.info(f"📦 OB déjà traité pour {symbol} (timestamp: {ob_timestamp})")
@@ -133,40 +130,38 @@ class AsianSessionTrader:
             logging.error(f"Erreur détection structure LTF {symbol}: {e}")
             return False
 
-def analyze_session(self):
-    try:
-        for symbol in self.symbols:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", limit=200)
-            df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df.set_index("datetime", inplace=True)
+    def analyze_session(self):
+        try:
+            for symbol in self.symbols:
+                ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", limit=200)
+                df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df.set_index("datetime", inplace=True)
 
-            df["ema200"] = ta.ema(df["close"], length=200)
-            df["rsi"] = ta.rsi(df["close"], length=14)
-            macd = ta.macd(df["close"])
-            if macd is None or macd.empty:
-                continue
-            macd = macd.dropna()
+                df["ema200"] = ta.ema(df["close"], length=200)
+                df["rsi"] = ta.rsi(df["close"], length=14)
+                macd = ta.macd(df["close"])
+                if macd is None or macd.empty:
+                    continue
+                macd = macd.dropna()
 
-            trend_ok = df["close"].iloc[-1] > df["ema200"].iloc[-1] and df["rsi"].iloc[-1] > 50 and macd.iloc[-1]["MACD_12_26_9"] > 0
+                trend_ok = df["close"].iloc[-1] > df["ema200"].iloc[-1] and df["rsi"].iloc[-1] > 50 and macd.iloc[-1]["MACD_12_26_9"] > 0
 
-            logging.info(f"EMA200 pour {symbol} : {df['ema200'].iloc[-1]}")
-            logging.info(f"RSI pour {symbol} : {df['rsi'].iloc[-1]}")
-            logging.info(f"MACD pour {symbol} : {macd.iloc[-1]['MACD_12_26_9']}")
+                logging.info(f"EMA200 pour {symbol} : {df['ema200'].iloc[-1]}")
+                logging.info(f"RSI pour {symbol} : {df['rsi'].iloc[-1]}")
+                logging.info(f"MACD pour {symbol} : {macd.iloc[-1]['MACD_12_26_9']}")
 
-            ob = self.detect_order_blocks(df, symbol, bullish=trend_ok)
+                ob = self.detect_order_blocks(df, symbol, bullish=trend_ok)
 
-            self.session_data[symbol] = {
-                "ema200": df["ema200"].iloc[-1],
-                "rsi": df["rsi"].iloc[-1],
-                "macd": macd.iloc[-1]["MACD_12_26_9"],
-                "trend_ok": trend_ok,
-                "order_block": ob
-            }
-    except Exception as e:
-        logging.error(f"Erreur analyse session : {str(e)}")
-
-    # ... (le reste de votre code)
+                self.session_data[symbol] = {
+                    "ema200": df["ema200"].iloc[-1],
+                    "rsi": df["rsi"].iloc[-1],
+                    "macd": macd.iloc[-1]["MACD_12_26_9"],
+                    "trend_ok": trend_ok,
+                    "order_block": ob
+                }
+        except Exception as e:
+            logging.error(f"Erreur analyse session : {str(e)}")
 
     def execute_post_session_trades(self):
         for symbol in self.symbols:
@@ -201,20 +196,18 @@ def analyze_session(self):
                 logging.info(f"🎯 Nouveau trade {symbol} | Entrée: {price:.2f} | TP: {tp:.2f} | SL: {sl:.2f}")
             except Exception as e:
                 logging.error(f"Erreur exécution ordre : {e}")
-                
+
     def send_trade_notification(self, subject, body, trade):
         sender_email = os.getenv('EMAIL_ADDRESS')
         receiver_email = os.getenv('EMAIL_ADDRESS')
         password = os.getenv('EMAIL_PASSWORD')
 
-        # Calculer le profit ou le drawdown en USD
         entry_price = trade['entry']
-        exit_price = trade['exit_price']  # Prix de sortie (TP ou SL)
+        exit_price = trade['exit_price']
         amount = trade['amount']
         profit_usd = (exit_price - entry_price) * amount
         drawdown_usd = (entry_price - exit_price) * amount
 
-        # Ajouter les informations au corps de l'e-mail
         if profit_usd > 0:
             body += f"\nProfit réalisé : {profit_usd:.2f} USD"
         else:
@@ -243,12 +236,12 @@ def analyze_session(self):
                 minutes = int(duration.total_seconds() // 60)
                 logging.info(f"✅ TP atteint {symbol} à {price:.2f} | Durée : {minutes} min")
                 trade['open'] = False
-                trade['exit_price'] = price  # Ajouter le prix de sortie
+                trade['exit_price'] = price
                 self.exchange.create_market_sell_order(symbol, trade['amount'])
 
                 subject = f"[TP ATTEINT] {symbol}"
                 body = f"✅ Take Profit atteint sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes"
-                self.send_trade_notification(subject, body, trade)  # Passer le trade
+                self.send_trade_notification(subject, body, trade)
                 return
 
             if price <= trade['sl']:
@@ -256,21 +249,19 @@ def analyze_session(self):
                 minutes = int(duration.total_seconds() // 60)
                 logging.info(f"🛑 SL touché {symbol} à {price:.2f} | Durée : {minutes} min")
                 trade['open'] = False
-                trade['exit_price'] = price  # Ajouter le prix de sortie
+                trade['exit_price'] = price
                 self.exchange.create_market_sell_order(symbol, trade['amount'])
 
                 subject = f"[SL TOUCHÉ] {symbol}"
                 body = f"🛑 Stop Loss touché sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes"
-                self.send_trade_notification(subject, body, trade)  # Passer le trade
+                self.send_trade_notification(subject, body, trade)
                 return
 
-        # Trailing SL
             new_sl = price * (1 - self.trailing_stop_percent / 100)
             if new_sl > trade["sl"]:
                 logging.info(f"🔁 Trailing SL mis à jour pour {symbol} : {trade['sl']:.2f} → {new_sl:.2f}")
                 trade["sl"] = new_sl
 
-        # Break-even
             if price >= trade["entry"] * (1 + self.break_even_trigger / 100) and trade["sl"] < trade["entry"]:
                 logging.info(f"🔐 Break-even activé pour {symbol} → SL remonté à l'entrée : {trade['entry']:.2f}")
                 trade["sl"] = trade["entry"]
@@ -278,15 +269,10 @@ def analyze_session(self):
         except Exception as e:
             logging.error(f"Erreur SL/TP dynamique : {e}")
 
-
     def monitor_trades(self):
         for symbol, trade in list(self.active_trades.items()):
             if trade.get("open"):
                 self.manage_take_profit_stop_loss(symbol, trade)
-
-# Les autres fonctions restent inchangées...
-# (scheduled_task, monitor_trades_runner, run_scheduler, Flask app etc.)
-
 
 def scheduled_task():
     logging.info("===== Début de la tâche programmée =====")
@@ -315,7 +301,7 @@ def monitor_trades_runner(trader):
 def run_scheduler():
     while True:
         current_time = datetime.now()
-        if trader.is_within_session(current_time):  # Vérifie si l'heure est entre 10h00 et 17h00
+        if trader.is_within_session(current_time):
             logging.info("===== Début de la tâche programmée =====")
             trader.analyze_session()
             trader.execute_post_session_trades()
@@ -324,7 +310,7 @@ def run_scheduler():
         else:
             logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
         
-        time.sleep(300)  # Attendre 5 minute avant de vérifier à nouveau
+        time.sleep(300)
 
 if __name__ == "__main__":
     trader = AsianSessionTrader()
