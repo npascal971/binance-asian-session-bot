@@ -56,16 +56,60 @@ class AsianSessionTrader:
         logging.info(f"Solde actuel : {usdt_balance} USDT")
 
     def is_within_session(self, current_time):
+        # Vérifie uniquement si l'heure actuelle est dans la session asiatique
         asian_start = timedelta(hours=self.asian_session['start']['hour'], minutes=self.asian_session['start']['minute'])
         asian_end = timedelta(hours=self.asian_session['end']['hour'], minutes=self.asian_session['end']['minute'])
-        us_start = timedelta(hours=self.us_session['start']['hour'], minutes=self.us_session['start']['minute'])
-        us_end = timedelta(hours=self.us_session['end']['hour'], minutes=self.us_session['end']['minute'])
         now_time = timedelta(hours=current_time.hour, minutes=current_time.minute)
 
-        in_asian_session = asian_start <= now_time <= asian_end if asian_start < asian_end else now_time >= asian_start or now_time <= asian_end
-        in_us_session = us_start <= now_time <= us_end if us_start < us_end else now_time >= us_start or now_time <= us_end
+        # Gestion du cas où la session asiatique traverse minuit
+        if asian_start < asian_end:
+            in_asian_session = asian_start <= now_time <= asian_end
+        else:
+            in_asian_session = now_time >= asian_start or now_time <= asian_end
 
-        return in_asian_session or in_us_session
+        return in_asian_session
+
+    def get_asian_session_range(self, symbol):
+        try:
+            # Récupérer les données OHLCV pour la session asiatique
+            ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", limit=12)  # 12 heures pour couvrir la session asiatique
+            df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df.set_index("datetime", inplace=True)
+
+            # Filtrer pour ne garder que les heures de la session asiatique
+            asian_start_hour = self.asian_session['start']['hour']
+            asian_end_hour = self.asian_session['end']['hour']
+            df_asian = df.between_time(f"{asian_start_hour}:00", f"{asian_end_hour}:00")
+
+            # Repérer le high et le low de la session asiatique
+            asian_high = df_asian['high'].max()
+            asian_low = df_asian['low'].min()
+
+            logging.info(f"📊 Asian Range pour {symbol} : High = {asian_high}, Low = {asian_low}")
+            return asian_high, asian_low
+        except Exception as e:
+            logging.error(f"Erreur calcul Asian Range pour {symbol} : {e}")
+            return None, None
+
+    def is_price_near_liquidity_zone(self, symbol, price, asian_high, asian_low, threshold=0.005):
+        try:
+            # Calculer la distance en pourcentage par rapport au high et low de la session asiatique
+            distance_to_high = abs(price - asian_high) / asian_high
+            distance_to_low = abs(price - asian_low) / asian_low
+
+            # Vérifier si le prix est proche d'une zone de liquidité
+            if distance_to_high <= threshold:
+                logging.info(f"🎯 Prix proche du high de la session asiatique pour {symbol} : {asian_high}")
+                return True
+            elif distance_to_low <= threshold:
+                logging.info(f"🎯 Prix proche du low de la session asiatique pour {symbol} : {asian_low}")
+                return True
+            else:
+                return False
+        except Exception as e:
+            logging.error(f"Erreur vérification zones de liquidité pour {symbol} : {e}")
+            return False
 
     def detect_order_blocks(self, df, symbol, bullish=True):
         try:
@@ -109,7 +153,7 @@ class AsianSessionTrader:
             logging.error(f"Erreur détection OB pour {symbol} : {e}")
             return None
 
-    def detect_ltf_structure_shift(self, symbol, timeframe="3m"):
+    def detect_ltf_structure_shift(self, symbol, timeframe="5m"):
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=50)
             df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -145,11 +189,14 @@ class AsianSessionTrader:
                     continue
                 macd = macd.dropna()
 
-                trend_ok = (df["close"].iloc[-1] > df["ema200"].iloc[-1]) and (df["rsi"].iloc[-1] > 45) and (macd.iloc[-1]["MACD_12_26_9"] > -10)
-                logging.info(f"Tendance non confirmée pour {symbol} : RSI = {df['rsi'].iloc[-1]}, MACD = {macd.iloc[-1]['MACD_12_26_9']}")
+                trend_ok = (df["close"].iloc[-1] > df["ema200"].iloc[-1]) and \
+                           (df["rsi"].iloc[-1] > 45) and \
+                           (macd.iloc[-1]["MACD_12_26_9"] > -10)
+
                 logging.info(f"EMA200 pour {symbol} : {df['ema200'].iloc[-1]}")
                 logging.info(f"RSI pour {symbol} : {df['rsi'].iloc[-1]}")
                 logging.info(f"MACD pour {symbol} : {macd.iloc[-1]['MACD_12_26_9']}")
+                logging.info(f"Tendance pour {symbol} : {'OK' if trend_ok else 'Non confirmée'}")
 
                 ob = self.detect_order_blocks(df, symbol, bullish=trend_ok)
 
@@ -170,11 +217,23 @@ class AsianSessionTrader:
                 logging.info(f"Pas d'entrée pour {symbol} - tendance non confirmée.")
                 continue
 
-            if not self.detect_ltf_structure_shift(symbol, timeframe="3m"):
+            # Récupérer le high et le low de la session asiatique
+            asian_high, asian_low = self.get_asian_session_range(symbol)
+            if asian_high is None or asian_low is None:
+                continue
+
+            # Vérifier si le prix est proche d'une zone de liquidité
+            price = self.exchange.fetch_ticker(symbol)['last']
+            if not self.is_price_near_liquidity_zone(symbol, price, asian_high, asian_low):
+                logging.info(f"⚠️ {symbol} - Prix pas proche des zones de liquidité, on attend")
+                continue
+
+            # Vérifier un retournement de structure en LTF
+            if not self.detect_ltf_structure_shift(symbol, timeframe="5m"):
                 logging.info(f"⚠️ {symbol} - Structure LTF pas encore confirmée, on attend")
                 continue
 
-            price = self.exchange.fetch_ticker(symbol)['last']
+            # Passer l'ordre
             usdt_balance = self.exchange.fetch_balance()['total']['USDT']
             trade_amount = self.risk_per_trade * usdt_balance / price
             sl = price * (1 - self.sl_percent / 100)
@@ -287,7 +346,7 @@ def home():
 
 def monitor_trades_runner(trader):
     while True:
-        open_trades = [t for t in trader.active_trades.values() if t.get("open")]
+        open_trades = [t for t in trader.active_trades.values() if t.get("open")]       
         if open_trades:
             for trade in open_trades:
                 duration = datetime.now() - trade["entry_time"]
