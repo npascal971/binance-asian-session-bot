@@ -42,16 +42,21 @@ def monitor_trades_runner(trader):
 # Define the run_scheduler function
 def run_scheduler(trader):
     while True:
-        current_time = datetime.now()
-        if trader.is_within_session(current_time):
-            logging.info("===== Début de la tâche programmée =====")
-            trader.analyze_session()
-            trader.execute_post_session_trades()
-            trader.monitor_trades()
-            logging.info("===== Fin de la tâche programmée =====")
-        else:
-            logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
-        time.sleep(60)
+        try:
+            current_time = datetime.now()
+            if trader.is_within_session(current_time):
+                logging.info("===== Début de la tâche programmée =====")
+                trader.analyze_session()
+                trader.execute_post_session_trades()
+                trader.monitor_trades()
+                logging.info("===== Fin de la tâche programmée =====")
+            else:
+                logging.info("En dehors des heures de trading.")
+            time.sleep(60)
+        except Exception as e:
+            logging.error(f"💥 Erreur dans run_scheduler : {e}")
+            time.sleep(10)
+
         
 class AsianSessionTrader:
     def __init__(self):
