@@ -28,7 +28,8 @@ class AsianSessionTrader:
         self.session_data = {}
         self.active_trades = {}
         self.asian_session = {"start": {"hour": 23, "minute": 0}, "end": {"hour": 10, "minute": 0}}
-        self.us_session = {"start": {"hour": 10, "minute": 0}, "end": {"hour": 17, "minute": 0}}
+        self.us_session = {"start": {"hour": 14, "minute": 0}, "end": {"hour": 21, "minute": 0}}
+        self.trading_hours = {"start": {"hour": 10, "minute": 0}, "end": {"hour": 17, "minute": 0}}
         if not os.path.exists("reports"):
             os.makedirs("reports")
 
@@ -56,18 +57,18 @@ class AsianSessionTrader:
         logging.info(f"Solde actuel : {usdt_balance} USDT")
 
     def is_within_session(self, current_time):
-        # Vérifie uniquement si l'heure actuelle est dans la session asiatique
-        asian_start = timedelta(hours=self.asian_session['start']['hour'], minutes=self.asian_session['start']['minute'])
-        asian_end = timedelta(hours=self.asian_session['end']['hour'], minutes=self.asian_session['end']['minute'])
+        # Vérifie si l'heure actuelle est dans la plage horaire de trading (10h00-17h00)
+        trading_start = timedelta(hours=self.trading_hours['start']['hour'], minutes=self.trading_hours['start']['minute'])
+        trading_end = timedelta(hours=self.trading_hours['end']['hour'], minutes=self.trading_hours['end']['minute'])
         now_time = timedelta(hours=current_time.hour, minutes=current_time.minute)
 
-        # Gestion du cas où la session asiatique traverse minuit
-        if asian_start < asian_end:
-            in_asian_session = asian_start <= now_time <= asian_end
+    # Gestion du cas où la plage horaire traverse minuit
+        if trading_start < trading_end:
+            in_trading_hours = trading_start <= now_time <= trading_end
         else:
-            in_asian_session = now_time >= asian_start or now_time <= asian_end
+            in_trading_hours = now_time >= trading_start or now_time <= trading_end
 
-        return in_asian_session
+        return in_trading_hours
 
     def get_asian_session_range(self, symbol):
         try:
@@ -363,14 +364,14 @@ def monitor_trades_runner(trader):
         trader.monitor_trades()
         time.sleep(60)
 
-def run_scheduler():
+def run_scheduler(self):
     while True:
         current_time = datetime.now()
-        if trader.is_within_session(current_time):
+        if self.is_within_session(current_time):
             logging.info("===== Début de la tâche programmée =====")
-            trader.analyze_session()
-            trader.execute_post_session_trades()
-            trader.monitor_trades()
+            self.analyze_session()
+            self.execute_post_session_trades()
+            self.monitor_trades()
             logging.info("===== Fin de la tâche programmée =====")
         else:
             logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
