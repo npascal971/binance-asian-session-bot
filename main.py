@@ -257,82 +257,67 @@ class AsianSessionTrader:
                 logging.info(f"🎯 Nouveau trade {symbol} | Entrée: {price:.2f} | TP: {tp:.2f} | SL: {sl:.2f}")
             except Exception as e:
                 logging.error(f"Erreur exécution ordre : {e}")
+def send_trade_notification(self, subject, body, trade):
+    sender_email = os.getenv('EMAIL_ADDRESS')
+    receiver_email = os.getenv('EMAIL_ADDRESS')
+    password = os.getenv('EMAIL_PASSWORD')
 
-    def send_trade_notification(self, subject, body, trade):
-        sender_email = os.getenv('EMAIL_ADDRESS')
-        receiver_email = os.getenv('EMAIL_ADDRESS')
-        password = os.getenv('EMAIL_PASSWORD')
+    entry_price = trade['entry']
+    exit_price = trade.get('exit_price', entry_price)  # Utiliser entry_price par défaut si exit_price n'est pas défini
+    amount = trade['amount']
+    profit_usd = (exit_price - entry_price) * amount
+    drawdown_usd = (entry_price - exit_price) * amount
 
-        entry_price = trade['entry']
-        exit_price = trade['exit_price']
-        amount = trade['amount']
-        profit_usd = (exit_price - entry_price) * amount
-        drawdown_usd = (entry_price - exit_price) * amount
+    # Ajouter le profit ou le drawdown au corps de l'e-mail
+    if profit_usd > 0:
+        body += f"\nProfit réalisé : {profit_usd:.2f} USD"
+        logging.info(f"💰 Profit réalisé pour le trade : {profit_usd:.2f} USD")
+    else:
+        body += f"\nDrawdown subi : {drawdown_usd:.2f} USD"
+        logging.info(f"💸 Drawdown subi pour le trade : {drawdown_usd:.2f} USD")
 
-        if profit_usd > 0:
-            body += f"\nProfit réalisé : {profit_usd:.2f} USD"
-        else:
-            body += f"\nDrawdown subi : {drawdown_usd:.2f} USD"
+    # Créer et envoyer l'e-mail
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+    msg['Subject'] = subject
 
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = receiver_email
-        msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
 
-        msg.attach(MIMEText(body, 'plain'))
-
-        try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(sender_email, password)
-                server.sendmail(sender_email, receiver_email, msg.as_string())
-                logging.info("📩 Notification email envoyée.")
-        except Exception as e:
-            logging.error(f"Erreur envoi email : {e}")
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, password)
+            server.sendmail(sender_email, receiver_email, msg.as_string())
+            logging.info("📩 Notification email envoyée.")
+    except Exception as e:
+        logging.error(f"Erreur envoi email : {e}")
             
     def manage_take_profit_stop_loss(self, symbol, trade):
         try:
             price = self.exchange.fetch_ticker(symbol)['last']
 
-            # TP fixe initial
-            if price >= trade['tp']:
-                duration = datetime.now() - trade["entry_time"]
-                minutes = int(duration.total_seconds() // 60)
-                logging.info(f"✅ TP initial atteint {symbol} à {price:.2f} | Durée : {minutes} min")
-                trade['tp'] = price * (1 + self.trailing_stop_percent / 100)  # Activer le trailing TP
-                logging.info(f"🔝 Trailing TP activé pour {symbol} : {trade['tp']:.2f}")
-
-            # Trailing TP
-            new_tp = price * (1 + self.trailing_stop_percent / 100)
-            if new_tp > trade['tp']:  # Si le prix monte, mettre à jour le TP
-                trade['tp'] = new_tp
-                logging.info(f"🔝 Trailing TP mis à jour pour {symbol} : {trade['tp']:.2f}")
-
             # TP atteint
             if price >= trade['tp']:
+                trade['exit_price'] = price  # Définir exit_price pour TP
                 duration = datetime.now() - trade["entry_time"]
                 minutes = int(duration.total_seconds() // 60)
                 logging.info(f"✅ TP atteint {symbol} à {price:.2f} | Durée : {minutes} min")
+                logging.info(f"📊 Prix d'entrée : {trade['entry']:.2f} | Prix de sortie : {trade['exit_price']:.2f}")
+                self.send_trade_notification(f"[TP ATTEINT] {symbol}", f"✅ Take Profit atteint sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes", trade)
                 trade['open'] = False
-                trade['exit_price'] = price
                 self.exchange.create_market_sell_order(symbol, trade['amount'])
-
-                subject = f"[TP ATTEINT] {symbol}"
-                body = f"✅ Take Profit atteint sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes"
-                self.send_trade_notification(subject, body, trade)
                 return
 
             # SL touché
             if price <= trade['sl']:
+                trade['exit_price'] = price  # Définir exit_price pour SL
                 duration = datetime.now() - trade["entry_time"]
                 minutes = int(duration.total_seconds() // 60)
                 logging.info(f"🛑 SL touché {symbol} à {price:.2f} | Durée : {minutes} min")
+                logging.info(f"📊 Prix d'entrée : {trade['entry']:.2f} | Prix de sortie : {trade['exit_price']:.2f}")
+                self.send_trade_notification(f"[SL TOUCHÉ] {symbol}", f"🛑 Stop Loss touché sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes", trade)
                 trade['open'] = False
-                trade['exit_price'] = price
                 self.exchange.create_market_sell_order(symbol, trade['amount'])
-
-                subject = f"[SL TOUCHÉ] {symbol}"
-                body = f"🛑 Stop Loss touché sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes"
-                self.send_trade_notification(subject, body, trade)
                 return
 
             # Trailing SL
