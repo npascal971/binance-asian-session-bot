@@ -422,12 +422,6 @@ if __name__ == "__main__":
     monitor_thread.daemon = True
     monitor_thread.start()
 
-    # Démarrer le serveur Flask
-    app.run(host="0.0.0.0", port=5000)
-
-    threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True).start()
-    threading.Thread(target=trader.run_scheduler, daemon=True).start()
-
-    # Démarre le serveur Flask
+      # Démarre le serveur Flask
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
