@@ -169,10 +169,12 @@ class AsianSessionTrader:
             if hh_detected and ll_detected:
                 logging.info(f"🌀 {symbol} → Possible CHoCH détecté (retournement)")
                 return True
-            return False
-        except Exception as e:
-            logging.error(f"Erreur détection structure LTF {symbol}: {e}")
-            return False
+            else:
+                logging.info(f"⚠️ Retournement de structure non confirmé pour {symbol} : HH = {hh_detected}, LL = {ll_detected}")
+                return False
+    except Exception as e:
+        logging.error(f"Erreur détection structure LTF {symbol}: {e}")
+        return False
 
     def analyze_session(self):
         try:
