@@ -256,27 +256,27 @@ class AsianSessionTrader:
             logging.error(f"Erreur analyse session : {str(e)}")
 
     def execute_post_session_trades(self):
-    for symbol in self.symbols:
-        data = self.session_data.get(symbol, {})
-        if not data.get("trend_ok"):
-            logging.info(f"Pas d'entrée pour {symbol} - tendance non confirmée.")
-            continue
+        for symbol in self.symbols:
+            data = self.session_data.get(symbol, {})
+            if not data.get("trend_ok"):
+                logging.info(f"Pas d'entrée pour {symbol} - tendance non confirmée.")
+                continue
 
-        asian_high, asian_low = self.get_asian_session_range(symbol)
-        if asian_high is None or asian_low is None:
-            continue
+            asian_high, asian_low = self.get_asian_session_range(symbol)
+            if asian_high is None or asian_low is None:
+                continue
 
-        price = self.exchange.fetch_ticker(symbol)['last']
-        if not self.is_price_near_liquidity_zone(symbol, price, asian_high, asian_low):
-            logging.info(f"⚠️ {symbol} - Prix pas proche des zones de liquidité, on attend")
-            continue
+            price = self.exchange.fetch_ticker(symbol)['last']
+            if not self.is_price_near_liquidity_zone(symbol, price, asian_high, asian_low):
+                logging.info(f"⚠️ {symbol} - Prix pas proche des zones de liquidité, on attend")
+                continue
 
-        if not self.detect_ltf_structure_shift(symbol, timeframe="5m"):
-            logging.info(f"⚠️ {symbol} - Structure LTF pas encore confirmée, on attend")
-            continue
+            if not self.detect_ltf_structure_shift(symbol, timeframe="5m"):
+                logging.info(f"⚠️ {symbol} - Structure LTF pas encore confirmée, on attend")
+                continue
 
-        usdt_balance = self.exchange.fetch_balance()['total']['USDT']
-        trade_amount = self.risk_per_trade * usdt_balance / price
+            usdt_balance = self.exchange.fetch_balance()['total']['USDT']
+            trade_amount = self.risk_per_trade * usdt_balance / price
 
         try:
             position_type = "long" if data["trend_ok"] else "short"
