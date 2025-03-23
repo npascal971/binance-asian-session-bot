@@ -413,7 +413,7 @@ if __name__ == "__main__":
     trader = AsianSessionTrader()
 
     # Thread pour le scheduler
-    scheduler_thread = threading.Thread(target=trader.run_scheduler)
+    scheduler_thread = threading.Thread(target=run_scheduler, args=(trader,))
     scheduler_thread.daemon = True
     scheduler_thread.start()
 
