@@ -349,45 +349,54 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur envoi email : {e}")
             
-   def manage_take_profit_stop_loss(self, symbol, trade):
-    try:
-        price = self.exchange.fetch_ticker(symbol)['last']
+    def manage_take_profit_stop_loss(self, symbol, trade):
+        try:
+            price = self.exchange.fetch_ticker(symbol)['last']
 
-        if price >= trade['tp']:
-            trade['exit_price'] = price
-            duration = datetime.now() - trade["entry_time"]
-            minutes = int(duration.total_seconds() // 60)
-            logging.info(f"✅ TP atteint {symbol} à {price:.2f} | Durée : {minutes} min")
-            logging.info(f"📊 Prix d'entrée : {trade['entry']:.2f} | Prix de sortie : {trade['exit_price']:.2f}")
-            self.send_trade_notification(f"[TP ATTEINT] {symbol}", f"✅ Take Profit atteint sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes", trade)
-            trade['open'] = False
-            self.exchange.create_market_sell_order(symbol, trade['amount'])
-            return
+            if price >= trade['tp']:
+                trade['exit_price'] = price
+                duration = datetime.now() - trade["entry_time"]
+                minutes = int(duration.total_seconds() // 60)
+                logging.info(f"✅ TP atteint {symbol} à {price:.2f} | Durée : {minutes} min")
+                logging.info(f"📊 Prix d'entrée : {trade['entry']:.2f} | Prix de sortie : {trade['exit_price']:.2f}")
+                self.send_trade_notification(
+                    f"[TP ATTEINT] {symbol}",
+                    f"✅ Take Profit atteint sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes",
+                    trade
+                )
+                trade['open'] = False
+                self.exchange.create_market_sell_order(symbol, trade['amount'])
+                return
 
-        if price <= trade['sl']:
-            trade['exit_price'] = price
-            duration = datetime.now() - trade["entry_time"]
-            minutes = int(duration.total_seconds() // 60)
-            logging.info(f"🛑 SL touché {symbol} à {price:.2f} | Durée : {minutes} min")
-            logging.info(f"📊 Prix d'entrée : {trade['entry']:.2f} | Prix de sortie : {trade['exit_price']:.2f}")
-            self.send_trade_notification(f"[SL TOUCHÉ] {symbol}", f"🛑 Stop Loss touché sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes", trade)
-            trade['open'] = False
-            self.exchange.create_market_sell_order(symbol, trade['amount'])
-            return
+            if price <= trade['sl']:
+                trade['exit_price'] = price
+                duration = datetime.now() - trade["entry_time"]
+                minutes = int(duration.total_seconds() // 60)
+                logging.info(f"🛑 SL touché {symbol} à {price:.2f} | Durée : {minutes} min")
+                logging.info(f"📊 Prix d'entrée : {trade['entry']:.2f} | Prix de sortie : {trade['exit_price']:.2f}")
+                self.send_trade_notification(
+                    f"[SL TOUCHÉ] {symbol}",
+                    f"🛑 Stop Loss touché sur {symbol}\n\nPrix d'entrée : {trade['entry']:.2f} USDT\nPrix de sortie : {price:.2f} USDT\nDurée : {minutes} minutes",
+                    trade
+                )
+                trade['open'] = False
+                self.exchange.create_market_sell_order(symbol, trade['amount'])
+                return
 
-        # Trailing Stop
-        new_sl = price * (1 - self.trailing_stop_percent / 100)
-        if new_sl > trade["sl"]:
-            logging.info(f"🔁 Trailing SL mis à jour pour {symbol} : {trade['sl']:.2f} → {new_sl:.2f}")
-            trade["sl"] = new_sl
+            # Trailing Stop
+            new_sl = price * (1 - self.trailing_stop_percent / 100)
+            if new_sl > trade["sl"]:
+                logging.info(f"🔁 Trailing SL mis à jour pour {symbol} : {trade['sl']:.2f} → {new_sl:.2f}")
+                trade["sl"] = new_sl
 
-        # Break-even
-        if price >= trade["entry"] * (1 + self.break_even_trigger / 100) and trade["sl"] < trade["entry"]:
-            trade["sl"] = trade["entry"]
-            logging.info(f"🟡 Break-even activé pour {symbol} → SL déplacé à l'entrée : {trade['entry']:.2f}")
+            # Break-even
+            if price >= trade["entry"] * (1 + self.break_even_trigger / 100) and trade["sl"] < trade["entry"]:
+                trade["sl"] = trade["entry"]
+                logging.info(f"🟡 Break-even activé pour {symbol} → SL déplacé à l'entrée : {trade['entry']:.2f}")
 
-    except Exception as e:
-        logging.error(f"Erreur gestion TP/SL {symbol} : {e}")
+        except Exception as e:
+            logging.error(f"Erreur gestion TP/SL {symbol} : {e}")
+
 
         
     def monitor_trades(self):
