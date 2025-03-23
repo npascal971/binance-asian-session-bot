@@ -14,8 +14,45 @@ from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# Define the scheduled_task function
+def scheduled_task():
+    logging.info("===== Début de la tâche programmée =====")
+    trader.analyze_session()
+    trader.execute_post_session_trades()
+    trader.monitor_trades()
+    logging.info("===== Fin de la tâche programmée =====")
+
+# Define the monitor_trades_runner function
+def monitor_trades_runner(trader):
+    while True:
+        open_trades = [t for t in trader.active_trades.values() if t.get("open")]       
+        if open_trades:
+            for trade in open_trades:
+                duration = datetime.now() - trade["entry_time"]
+                minutes = int(duration.total_seconds() // 60)
+                logging.info(f"💓 Monitor tick | Trades actifs : {len(open_trades)} | Durée trade actif : {minutes} min")
+        else:
+            logging.info("💓 Monitor tick | Trades actifs : 0")
+        trader.monitor_trades()
+        time.sleep(60)
+
+# Define the run_scheduler function
+def run_scheduler(trader):
+    while True:
+        current_time = datetime.now()
+        if trader.is_within_session(current_time):
+            logging.info("===== Début de la tâche programmée =====")
+            trader.analyze_session()
+            trader.execute_post_session_trades()
+            trader.monitor_trades()
+            logging.info("===== Fin de la tâche programmée =====")
+        else:
+            logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
+        time.sleep(60)
+        
 class AsianSessionTrader:
     def __init__(self):
         self.exchange = self.configure_exchange()
