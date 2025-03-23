@@ -340,12 +340,18 @@ class AsianSessionTrader:
             if trade.get("open"):
                 self.manage_take_profit_stop_loss(symbol, trade)
 
-def scheduled_task():
-    logging.info("===== Début de la tâche programmée =====")
-    trader.analyze_session()
-    trader.execute_post_session_trades()
-    trader.monitor_trades()
-    logging.info("===== Fin de la tâche programmée =====")
+def run_scheduler(self):
+        while True:
+            current_time = datetime.now()
+            if self.is_within_session(current_time):
+                logging.info("===== Début de la tâche programmée =====")
+                self.analyze_session()
+                self.execute_post_session_trades()
+                self.monitor_trades()
+                logging.info("===== Fin de la tâche programmée =====")
+            else:
+                logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
+            time.sleep(60)
 
 @app.route("/")
 def home():
