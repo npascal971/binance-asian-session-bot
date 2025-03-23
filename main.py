@@ -411,6 +411,8 @@ def monitor_trades_runner(trader):
 # === Lancer le bot ===
 if __name__ == "__main__":
     trader = AsianSessionTrader()
+    threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True).start()
+    run_scheduler(trader)  # exécution principale
 
     # Thread pour le scheduler
     scheduler_thread = threading.Thread(target=run_scheduler, args=(trader,))
