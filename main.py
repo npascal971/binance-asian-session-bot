@@ -364,7 +364,7 @@ def monitor_trades_runner(trader):
         trader.monitor_trades()
         time.sleep(60)
 
-def self.run_scheduler:
+def run_scheduler(self):
     while True:
         current_time = datetime.now()
         if self.is_within_session(current_time):
@@ -384,7 +384,7 @@ if __name__ == "__main__":
     schedule.every().day.at("02:10").do(scheduled_task)  # Planifie la tâche quotidienne
 
     # Lance les threads pour surveiller les trades et exécuter le scheduler
-    threading.Thread(target=self.run_scheduler, daemon=True).start()
+    threading.Thread(target=trader.run_scheduler, daemon=True).start()
     threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True).start()
 
     # Démarre le serveur Flask
