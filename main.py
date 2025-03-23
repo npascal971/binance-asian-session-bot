@@ -390,7 +390,7 @@ def run_scheduler():
         else:
             logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
         
-        time.sleep(300)
+        time.sleep(60)
 
 if __name__ == "__main__":
     trader = AsianSessionTrader()
