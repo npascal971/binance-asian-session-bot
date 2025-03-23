@@ -172,9 +172,9 @@ class AsianSessionTrader:
             else:
                 logging.info(f"⚠️ Retournement de structure non confirmé pour {symbol} : HH = {hh_detected}, LL = {ll_detected}")
                 return False
-    except Exception as e:
-        logging.error(f"Erreur détection structure LTF {symbol}: {e}")
-        return False
+        except Exception as e:
+            logging.error(f"Erreur détection structure LTF {symbol}: {e}")
+            return False
 
     def analyze_session(self):
         try:
