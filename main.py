@@ -395,9 +395,7 @@ def run_scheduler(self):
                 logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
             time.sleep(60)
 
-@app.route("/")
-def home():
-    return "Asian Session Bot is running 🚀", 200
+
 
 # Complément de la fonction monitor_trades_runner si elle a été tronquée
 def monitor_trades_runner(trader):
