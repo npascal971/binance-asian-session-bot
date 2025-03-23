@@ -414,21 +414,21 @@ def monitor_trades_runner(trader):
         time.sleep(60)
 
 # === Lancer le bot ===
-if __name__ == "__main__":
+if __name__ == '__main__':
     trader = AsianSessionTrader()
-    threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True).start()
-    run_scheduler(trader)  # exécution principale
 
-    # Thread pour le scheduler
+    # Lancer le scheduler dans un thread
     scheduler_thread = threading.Thread(target=run_scheduler, args=(trader,))
-    scheduler_thread.daemon = True
     scheduler_thread.start()
 
-    # Thread pour la surveillance des trades
+    # Lancer le monitoring des trades dans un autre thread
     monitor_thread = threading.Thread(target=monitor_trades_runner, args=(trader,))
-    monitor_thread.daemon = True
     monitor_thread.start()
 
-      # Démarre le serveur Flask
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    # Lancer un faux serveur Flask pour Render
+    @app.route('/')
+    def home():
+        return "Bot de trading actif sur Render 🚀"
+
+    port = int(os.environ.get("PORT", 10000))  # Render attend une variable PORT
+    app.run(host='0.0.0.0', port=port)
