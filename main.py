@@ -392,6 +392,7 @@ if __name__ == "__main__":
     # Lance les threads pour surveiller les trades et exécuter le scheduler
     threading.Thread(target=run_scheduler, args=(trader,), daemon=True).start()
     threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True).start()
+    threading.Thread(target=trader.run_scheduler, daemon=True).start()
 
     # Démarre le serveur Flask
     port = int(os.environ.get("PORT", 5000))
