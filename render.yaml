@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: trading-bot
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    plan: free
+    envVars:
+      - key: BINANCE_API_KEY
+        value: your_key_here
+      - key: BINANCE_API_SECRET
+        value: your_secret_here
+      - key: EMAIL_ADDRESS
+        value: your_email_here
+      - key: EMAIL_PASSWORD
+        value: your_password_here
