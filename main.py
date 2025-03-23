@@ -347,10 +347,10 @@ def manage_take_profit_stop_loss(self, symbol, trade):
     except Exception as e:
         logging.error(f"Erreur SL/TP dynamique : {e}")
         
-    def monitor_trades(self):
-        for symbol, trade in list(self.active_trades.items()):
-            if trade.get("open"):
-                self.manage_take_profit_stop_loss(symbol, trade)
+def monitor_trades(self):
+    for symbol, trade in list(self.active_trades.items()):
+        if trade.get("open"):
+            self.manage_take_profit_stop_loss(symbol, trade)
 
 def scheduled_task():
     logging.info("===== Début de la tâche programmée =====")
