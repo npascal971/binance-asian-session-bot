@@ -63,8 +63,8 @@ class AsianSessionTrader:
         self.exchange = self.configure_exchange()
         self.symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT"]
         self.risk_per_trade = 0.01
-        self.tp_percent = 1.1
-        self.sl_percent = 1.0
+        self.tp_percent = 0.5
+        self.sl_percent = 0.5
         self.trailing_stop_percent = 0.5
         self.break_even_trigger = 1.0
         self.session_data = {}
