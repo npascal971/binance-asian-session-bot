@@ -352,12 +352,12 @@ class AsianSessionTrader:
             if trade.get("open"):
                 self.manage_take_profit_stop_loss(symbol, trade)
 
-    def scheduled_task():
-        logging.info("===== Début de la tâche programmée =====")
-        trader.analyze_session()
-        trader.execute_post_session_trades()
-        trader.monitor_trades()
-        logging.info("===== Fin de la tâche programmée =====")
+def scheduled_task():
+    logging.info("===== Début de la tâche programmée =====")
+    trader.analyze_session()
+    trader.execute_post_session_trades()
+    trader.monitor_trades()
+    logging.info("===== Fin de la tâche programmée =====")
 
 @app.route("/")
 def home():
