@@ -394,6 +394,7 @@ def run_scheduler(self):
 def home():
     return "Asian Session Bot is running 🚀", 200
 
+# Complément de la fonction monitor_trades_runner si elle a été tronquée
 def monitor_trades_runner(trader):
     while True:
         open_trades = [t for t in trader.active_trades.values() if t.get("open")]       
@@ -407,27 +408,23 @@ def monitor_trades_runner(trader):
         trader.monitor_trades()
         time.sleep(60)
 
-def run_scheduler(trader):
-    while True:
-        current_time = datetime.now()
-        if self.is_within_session(current_time):
-            logging.info("===== Début de la tâche programmée =====")
-            self.analyze_session()
-            self.execute_post_session_trades()
-            self.monitor_trades()
-            logging.info("===== Fin de la tâche programmée =====")
-        else:
-            logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
-        
-        time.sleep(60)
-
+# === Lancer le bot ===
 if __name__ == "__main__":
-    trader = AsianSessionTrader()  # Initialise le trader
-    scheduled_task()  # Exécute la tâche programmée une première fois
-    schedule.every().day.at("02:10").do(scheduled_task)  # Planifie la tâche quotidienne
+    trader = AsianSessionTrader()
 
-    # Lance les threads pour surveiller les trades et exécuter le scheduler
-    threading.Thread(target=run_scheduler, args=(trader,), daemon=True).start()
+    # Thread pour le scheduler
+    scheduler_thread = threading.Thread(target=run_scheduler, args=(trader,))
+    scheduler_thread.daemon = True
+    scheduler_thread.start()
+
+    # Thread pour la surveillance des trades
+    monitor_thread = threading.Thread(target=monitor_trades_runner, args=(trader,))
+    monitor_thread.daemon = True
+    monitor_thread.start()
+
+    # Démarrer le serveur Flask
+    app.run(host="0.0.0.0", port=5000)
+
     threading.Thread(target=monitor_trades_runner, args=(trader,), daemon=True).start()
     threading.Thread(target=trader.run_scheduler, daemon=True).start()
 
