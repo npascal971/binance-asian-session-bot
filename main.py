@@ -12,9 +12,11 @@ import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.accounts as accounts
 import oandapyV20.endpoints.trades as trades
+import oandapyV20.endpoints.pricing as pricing
 
 # Chargement des variables d'environnement
 load_dotenv()
+USE_API_PRICING = False  # True pour utiliser l'Option 2
 
 # Configuration API OANDA
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
@@ -74,13 +76,20 @@ def get_instrument_details(pair):
         return None
 
 def calculate_position_size(pair, account_balance, entry_price, stop_loss):
-    """Calcule la taille de position avec gestion précise du risque"""
-    instrument = get_instrument_details(pair)
-    if not instrument:
-        return 0
-    
+    """Version finale avec gestion des erreurs"""
+    # Récupération des spécifications
+    specs = get_instrument_details(pair)  # Utilise l'Option 1
+    if not specs:
+        specs = get_pip_details(pair) if USE_API_PRICING else get_instrument_details(pair)
+        if not specs:
+            logger.error("❌ Impossible de déterminer les spécifications")
+            return 0
+
+    # Calcul du risque (1% du solde, max $100)
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), MAX_RISK_USD)
-    pip_multiplier = 10 ** instrument['pip_location']
+    
+    # Calcul de la distance en pips
+    pip_multiplier = 10 ** specs['pip_location']
     price_diff = abs(entry_price - stop_loss)
     distance_pips = price_diff * pip_multiplier
     
@@ -88,21 +97,16 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
         logger.error("❌ Distance SL invalide")
         return 0
     
-    units = (risk_amount / distance_pips) * (10 ** -instrument['pip_location'])
-    units = round(units, instrument['units_precision'])
+    # Calcul des unités
+    units = (risk_amount / distance_pips) * (10 ** -specs['pip_location'])
+    units = round(units, specs['units_precision'])
     
-    if units < instrument['min_units']:
-        logger.warning(f"⚠️ Unités ({units}) < minimum ({instrument['min_units']})")
+    # Vérification du minimum
+    if units < specs['min_units']:
+        logger.warning(f"⚠️ Unités ({units}) < minimum ({specs['min_units']})")
         return 0
     
-    logger.info(
-        f"\n⚖️ GESTION DU RISQUE {pair}:\n"
-        f"   💰 Solde: ${account_balance:.2f}\n"
-        f"   🎯 Risque: {RISK_PERCENTAGE}% = ${risk_amount:.2f}\n"
-        f"   📏 Distance SL: {distance_pips:.1f} pips\n"
-        f"   📦 Unités calculées: {units}"
-    )
-    
+    logger.info(f"ℹ️ {pair}: Units={units} | Risk=${risk_amount:.2f}")
     return units
 
 def send_notification(trade_info, hit_type):
