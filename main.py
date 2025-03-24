@@ -32,7 +32,7 @@ RISK_PERCENTAGE = 1  # 1% du capital
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 2.0
 SESSION_START = dtime(7, 0)  # 7h00
-SESSION_END = dtime(21, 0)   # 21h00
+SESSION_END = dtime(23, 50)   # 21h00
 MAX_RISK_USD = 100  # $100 max de risque par trade
 
 # Configuration des logs avec emojis
