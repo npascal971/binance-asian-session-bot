@@ -35,7 +35,7 @@ def monitor_trades_runner(trader):
                 logging.info(f"💓 Monitor tick | Trades actifs : {len(open_trades)} | Durée trade actif : {minutes} min")
         else:
             logging.info("💓 Monitor tick | Trades actifs : 0")
-        trader.monitor_trade()
+        trader.monitor_trades()
         time.sleep(45)
 
 # Define the run_scheduler function
