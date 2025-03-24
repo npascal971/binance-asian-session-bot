@@ -365,10 +365,9 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur gestion TP/SL {symbol} : {e}")
 
-    def monitor_trades(self):
-        while True:
+    def monitor_trades(self):        
             for symbol, trade in list(self.active_trades.items()):
-                if not trade.get("open", False):
+                if not trade["open"]:
                     continue
 
                 try:
