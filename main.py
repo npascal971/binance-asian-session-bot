@@ -45,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-SIMULATION_MODE = False  # Mettre à True pour tester sans exécuter de vrais trades
+SIMULATION_MODE = True  # Mettre à True pour tester sans exécuter de vrais trades
 
 trade_history = []
 active_trades = set()
