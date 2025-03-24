@@ -368,33 +368,34 @@ class AsianSessionTrader:
             logging.error(f"Erreur gestion TP/SL {symbol} : {e}")
 
     def monitor_trades(self):
-        while True:
-            for symbol, trade in list(self.active_trades.items()):
-                if not trade["open"]:
-                    continue
+    while True:
+        for symbol, trade in list(self.active_trades.items()):
+            if not trade["open"]:
+                continue
 
-                position_type = trade["position_type"]
-                amount = trade["amount"]
-                entry_price = trade["entry"]
-                trailing_stop = trade.get("trailing_stop", trade["sl"])
-                executed_tp = trade.get("executed_tp", [])
+            position_type = trade["position_type"]
+            amount = trade["amount"]
+            entry_price = trade["entry"]
+            trailing_stop = trade.get("trailing_stop", trade["sl"])
+            executed_tp = trade.get("executed_tp", [])
 
-                current_price = self.exchange.fetch_ticker(symbol)['last']
+            current_price = self.exchange.fetch_ticker(symbol)['last']
 
-                # 🔴 Stop Loss check
-                if (position_type == "long" and current_price <= trailing_stop) or \
-                   (position_type == "short" and current_price >= trailing_stop):
-                    self.exchange.close_position(symbol, amount)
-                    trade["open"] = False
-                    print(f"[STOP LOSS] Closed {symbol} at {current_price}")
-                    continue
+            # 🔴 Stop Loss check
+            if (position_type == "long" and current_price <= trailing_stop) or \
+               (position_type == "short" and current_price >= trailing_stop):
+                self.exchange.close_position(symbol, amount)
+                trade["open"] = False
+                print(f"[STOP LOSS] Closed {symbol} at {current_price}")
+                continue
 
-                # ✅ Take Profit partiels
-                for idx, tp in enumerate(trade["tp_levels"]):
-                    tp_price = tp["target"]
-                    tp_pct = tp["percent"]
-                    if idx in executed_tp:
-                        continue  # déjà exécuté
+            # ✅ Take Profit (partial closes)
+            for idx, tp in enumerate(trade["tp_levels"]):
+                if idx in executed_tp:
+                    continue  # Already executed
+
+                tp_price = tp["target"]
+                tp_pct = tp["percent"]
 
                 if (position_type == "long" and current_price >= tp_price) or \
                    (position_type == "short" and current_price <= tp_price):
@@ -405,17 +406,17 @@ class AsianSessionTrader:
 
                     print(f"[TP{idx+1}] {tp_pct*100:.0f}% of position closed at {current_price}")
 
-                # 🎯 Trailing stop : passer au break-even après TP1
-                if idx == 0:
-                    trade["trailing_stop"] = entry_price
-                    print(f"Trailing stop moved to breakeven: {trade['trailing_stop']}")
+                    # 🎯 Move trailing stop to breakeven after TP1
+                    if idx == 0:
+                        trade["trailing_stop"] = entry_price
+                        print(f"Trailing stop moved to breakeven: {trade['trailing_stop']}")
 
-                # 🔁 Renforcement du trailing stop après TP2 (optionnel)
-                if idx == 1:
-                    if position_type == "long":
-                        trade["trailing_stop"] = tp_price - (tp_price - entry_price) * 0.2
-                    else:
-                        trade["trailing_stop"] = tp_price + (entry_price - tp_price) * 0.2
+                    # 🔁 Strengthen trailing stop after TP2
+                    elif idx == 1:
+                        if position_type == "long":
+                            trade["trailing_stop"] = tp_price - (tp_price - entry_price) * 0.2
+                        else:
+                            trade["trailing_stop"] = tp_price + (entry_price - tp_price) * 0.2
                         print(f"Trailing stop advanced after TP2: {trade['trailing_stop']}")
 
 
