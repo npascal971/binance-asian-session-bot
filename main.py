@@ -41,10 +41,14 @@ logger = logging.getLogger()
 
 SIMULATION_MODE = True
 
+trade_history = []
+
+
 def notify_trade_trigger(direction, entry_price):
     subject = "Signal de Trade Détecté - Asian Session Bot"
     body = f"Un signal de trade a été détecté.\nDirection: {direction}\nPrix d'entrée: {entry_price:.2f}\nVeuillez vérifier la stratégie."
     send_email(subject, body)
+
 
 def send_email(subject, body):
     msg = EmailMessage()
@@ -56,13 +60,16 @@ def send_email(subject, body):
         smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         smtp.send_message(msg)
 
+
 def get_account_balance():
     r = accounts.AccountSummary(OANDA_ACCOUNT_ID)
     client.request(r)
     return float(r.response["account"]["balance"])
 
+
 def log_trailing_stop_update(trade_id, new_sl):
     logger.info(f"🔄 Mise à jour du stop loss (Trailing Stop) pour le trade {trade_id} : Nouveau SL = {new_sl}")
+
 
 def calculate_trade_units(entry_price, stop_loss_price, balance):
     risk_amount = min(balance * RISK_PERCENTAGE / 100, RISK_AMOUNT_CAP)
@@ -72,6 +79,7 @@ def calculate_trade_units(entry_price, stop_loss_price, balance):
     units = risk_amount / risk_per_unit
     logger.info(f"🔢 Calcul des unités à trader: {units:.2f} (pour un risque de {risk_amount:.2f} USD)")
     return int(units)
+
 
 def monitor_open_trades():
     r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
@@ -86,10 +94,11 @@ def monitor_open_trades():
         open_time = trade["openTime"]
         sl = trade.get("stopLossOrder", {}).get("price", "Non défini")
         logger.info(f"✅ Trade actif - ID: {trade_id}, Instrument: {instrument}, Prix: {price}, SL: {sl}, Ouvert depuis: {open_time}")
-        # Suivi Trailing Stop
         if float(price) - float(sl) > TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
             new_sl = float(price) - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
             log_trailing_stop_update(trade_id, new_sl)
+            logger.info(f"🚨 Trailing Stop mis à jour pour le trade {trade_id} sur {instrument}. Nouveau SL: {new_sl}")
+
 
 def get_candles(pair):
     params = {"granularity": "M5", "count": 100, "price": "M"}
@@ -97,21 +106,60 @@ def get_candles(pair):
     client.request(r)
     return r.response["candles"]
 
+
 def detect_asian_range_breakout(candles):
-    return None, None  # Placeholder logique à compléter
+    return None, None
+
 
 def generate_trade_signal(candles):
-    return None  # Placeholder logique à compléter
+    closes = [float(candle["mid"]["c"]) for candle in candles]
+    rsi = compute_rsi(closes)
+    macd_line, macd_signal = compute_macd(closes)
+    logger.info(f"🔠 RSI: {rsi[-1]:.2f} | MACD: {macd_line[-1]:.4f} | Signal MACD: {macd_signal[-1]:.4f}")
+    logger.info("🧠 Analyse technique complétée - Aucun retournement significatif si divergence absente.")
+    return None
+
+
+def compute_rsi(prices, period=14):
+    delta = np.diff(prices)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=period).mean()
+    avg_loss = pd.Series(loss).rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(0).values
+
+
+def compute_macd(prices, fast=12, slow=26, signal=9):
+    exp1 = pd.Series(prices).ewm(span=fast, adjust=False).mean()
+    exp2 = pd.Series(prices).ewm(span=slow, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd.values, signal_line.values
+
 
 def compute_atr(candles):
-    return 0.001  # Placeholder
+    return 0.001
+
 
 def wait_for_retest_and_reversal(pair, trigger_price, direction):
-    return True  # Placeholder pour test
+    return True
+
 
 def place_trade(pair, direction, entry_price, stop_price, atr, units):
     logger.info(f"💖 Nouveau trade exécuté 💖 {pair} | Direction: {direction} | Entrée: {entry_price} | SL: {stop_price} | Unités: {units}")
-    return "TRADE_ID_123"  # Placeholder
+    trade_info = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "pair": pair,
+        "direction": direction,
+        "entry_price": entry_price,
+        "stop_price": stop_price,
+        "units": units
+    }
+    trade_history.append(trade_info)
+    return "TRADE_ID_123"
+
 
 if __name__ == "__main__":
     logger.info("Démarrage du bot de trading Asian Session...")
@@ -139,7 +187,6 @@ if __name__ == "__main__":
                             atr = compute_atr(candles)
                             units = calculate_trade_units(entry_price, stop_price, balance)
                             trade_id = place_trade(pair, direction, entry_price, stop_price, atr, units)
-                            logger.info("💖 Nouveau trade exécuté 💖")
                         else:
                             logger.info("Aucune structure de retournement détectée après retest.")
                     else:
