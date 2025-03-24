@@ -396,8 +396,8 @@ def execute_post_session_trades(self):
                     if idx in executed_tp:
                         continue  # déjà exécuté
 
-                    if (position_type == "long" and current_price >= tp_price) or \
-                       (position_type == "short" and current_price <= tp_price):
+                if (position_type == "long" and current_price >= tp_price) or \
+                   (position_type == "short" and current_price <= tp_price):
 
                     qty_to_close = amount * tp_pct
                     self.exchange.close_position(symbol, qty_to_close)
