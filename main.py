@@ -379,7 +379,7 @@ class AsianSessionTrader:
                 trailing_stop = trade.get("trailing_stop", trade["sl"])
                 executed_tp = trade.get("executed_tp", [])
 
-                current_price = self.exchange.get_current_price(symbol)
+                current_price = self.exchange.fetch_ticker(symbol)['last']
 
                 # 🔴 Stop Loss check
                 if (position_type == "long" and current_price <= trailing_stop) or \
@@ -401,24 +401,21 @@ class AsianSessionTrader:
 
                     qty_to_close = amount * tp_pct
                     self.exchange.close_position(symbol, qty_to_close)
-                    trade["executed_tp"].append(idx)
+                    trade.setdefault("executed_tp", []).append(idx)
 
                     print(f"[TP{idx+1}] {tp_pct*100:.0f}% of position closed at {current_price}")
 
-                    # 🎯 Trailing stop : passer au break-even après TP1
-                    if idx == 0:
-                        if position_type == "long":
-                            trade["trailing_stop"] = entry_price
-                        else:
-                            trade["trailing_stop"] = entry_price
-                        print(f"Trailing stop moved to breakeven: {trade['trailing_stop']}")
+                # 🎯 Trailing stop : passer au break-even après TP1
+                if idx == 0:
+                    trade["trailing_stop"] = entry_price
+                    print(f"Trailing stop moved to breakeven: {trade['trailing_stop']}")
 
-                    # 🔁 Renforcement du trailing stop après TP2 (optionnel)
-                    if idx == 1:
-                        if position_type == "long":
-                            trade["trailing_stop"] = tp_price - (tp_price - entry_price) * 0.2
-                        else:
-                            trade["trailing_stop"] = tp_price + (entry_price - tp_price) * 0.2
+                # 🔁 Renforcement du trailing stop après TP2 (optionnel)
+                if idx == 1:
+                    if position_type == "long":
+                        trade["trailing_stop"] = tp_price - (tp_price - entry_price) * 0.2
+                    else:
+                        trade["trailing_stop"] = tp_price + (entry_price - tp_price) * 0.2
                         print(f"Trailing stop advanced after TP2: {trade['trailing_stop']}")
 
 
