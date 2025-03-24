@@ -62,7 +62,7 @@ def compute_atr(candles, period=14):
     highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
     lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
     closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
-    tr = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(candles))]
+    tr = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(highs))]
     return sum(tr[-period:]) / period
 
 def compute_rsi(prices, period=14):
@@ -173,6 +173,7 @@ def monitor_open_trades():
             send_email("Trade fermé", f"Trade fermé avec PnL: {unrealized_pl:.2f} USD")
 
 if __name__ == "__main__":
+    logger.info("Démarrage du bot de trading Asian Session...")
     while True:
         now = datetime.utcnow().time()
         if now >= SESSION_START:
