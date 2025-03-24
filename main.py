@@ -1,33 +1,39 @@
-import oandapyV20
-import oandapyV20.endpoints.orders as orders
-import oandapyV20.endpoints.trades as trades
-import oandapyV20.endpoints.instruments as instruments
-from oandapyV20.types import StopLossDetails, TakeProfitDetails
-from oandapyV20.endpoints.accounts import AccountDetails
-from oandapyV20.endpoints.positions import OpenPositions
-from datetime import datetime, time
-import pandas as pd
-import time as t
+import os
+import time
+import logging
+from datetime import datetime, timedelta, time as dtime
+from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
 import numpy as np
-from dotenv import load_dotenv
-import os
+import pandas as pd
+import oandapyV20
+import oandapyV20.endpoints.instruments as instruments
+import oandapyV20.endpoints.orders as orders
+import oandapyV20.endpoints.accounts as accounts
+import oandapyV20.endpoints.trades as trades
 
 load_dotenv()
 
-ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
-ACCESS_TOKEN = os.getenv("OANDA_ACCESS_TOKEN")
+# Configuration API OANDA
+OANDA_API_KEY = os.getenv("OANDA_API_KEY")
+OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-INSTRUMENT = "EUR_USD"
-RISK_PERCENTAGE = 0.01
+
+client = oandapyV20.API(access_token=OANDA_API_KEY)
+
+# Paramètres de trading
+PAIR = "XAU_USD"
+RISK_PERCENTAGE = 1  # Risque par trade
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 3.0
-SESSION_START = time(7, 0)
+SESSION_START = dtime(7, 0)
 
-client = oandapyV20.API(access_token=ACCESS_TOKEN)
+# Configuration logs
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger()
 
 def send_email(subject, body):
     msg = EmailMessage()
@@ -40,91 +46,120 @@ def send_email(subject, body):
         smtp.send_message(msg)
 
 def get_account_balance():
-    r = AccountDetails(accountID=ACCOUNT_ID)
+    r = accounts.AccountSummary(OANDA_ACCOUNT_ID)
     client.request(r)
     return float(r.response["account"]["balance"])
 
-def get_atr():
-    params = {"granularity": "H1", "count": 20}
-    r = instruments.InstrumentsCandles(instrument=INSTRUMENT, params=params)
+def get_candles(pair, count=100, granularity="H1"):
+    params = {"count": count, "granularity": granularity}
+    r = instruments.InstrumentsCandles(instrument=pair, params=params)
     client.request(r)
-    candles = r.response["candles"]
+    return r.response["candles"]
+
+def compute_atr(candles, period=14):
     highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
     lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
     closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
-    tr_list = [
-        max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        for i in range(1, len(candles))
-    ]
-    atr = sum(tr_list) / len(tr_list)
-    return atr
+    tr = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(candles))]
+    return sum(tr[-period:]) / period
 
-def calculate_position_size(entry_price, stop_loss_price):
-    risk_amount = get_account_balance() * RISK_PERCENTAGE
-    pip_value = abs(entry_price - stop_loss_price)
-    units = risk_amount / pip_value if pip_value != 0 else 0
-    return int(units)
-
-def get_current_price(direction):
-    r = instruments.InstrumentsPrice(instrument=INSTRUMENT)
-    client.request(r)
-    price = float(r.response['prices'][0]['bids'][0]['price']) if direction == "sell" else float(r.response['prices'][0]['asks'][0]['price'])
-    return price
-
-def generate_trade_signal():
-    params = {"granularity": "H1", "count": 50}
-    r = instruments.InstrumentsCandles(instrument=INSTRUMENT, params=params)
-    client.request(r)
-    candles = r.response["candles"]
-    closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
-    if len(closes) < 30:
-        return None
-    df = pd.DataFrame(closes, columns=['close'])
-    df['sma_fast'] = df['close'].rolling(window=10).mean()
-    df['sma_slow'] = df['close'].rolling(window=30).mean()
-    df['rsi'] = compute_rsi(df['close'], 14)
-    df['macd'], df['macd_signal'] = compute_macd(df['close'])
-
-    signal = None
-    if df['sma_fast'].iloc[-2] < df['sma_slow'].iloc[-2] and df['sma_fast'].iloc[-1] > df['sma_slow'].iloc[-1] and df['rsi'].iloc[-1] > 50 and df['macd'].iloc[-1] > df['macd_signal'].iloc[-1]:
-        signal = "buy"
-    elif df['sma_fast'].iloc[-2] > df['sma_slow'].iloc[-2] and df['sma_fast'].iloc[-1] < df['sma_slow'].iloc[-1] and df['rsi'].iloc[-1] < 50 and df['macd'].iloc[-1] < df['macd_signal'].iloc[-1]:
-        signal = "sell"
-    return signal
-
-def compute_rsi(series, period):
-    delta = series.diff()
+def compute_rsi(prices, period=14):
+    delta = pd.Series(prices).diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
     avg_gain = gain.rolling(window=period).mean()
     avg_loss = loss.rolling(window=period).mean()
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
-def compute_macd(series, short=12, long=26, signal=9):
-    ema_short = series.ewm(span=short, adjust=False).mean()
-    ema_long = series.ewm(span=long, adjust=False).mean()
+def compute_macd(prices, short=12, long=26, signal=9):
+    prices = pd.Series(prices)
+    ema_short = prices.ewm(span=short, adjust=False).mean()
+    ema_long = prices.ewm(span=long, adjust=False).mean()
     macd = ema_short - ema_long
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd, signal_line
 
-# Les autres fonctions place_trade(), update_trailing_stop_tp(), modify_trade(), monitor_trade(), main() restent inchangées.
+def detect_asian_range_breakout(candles):
+    asian_high = max(float(c["mid"]["h"]) for c in candles[0:7])
+    asian_low = min(float(c["mid"]["l"]) for c in candles[0:7])
+    breakout_candle = candles[8]
+    high = float(breakout_candle["mid"]["h"])
+    low = float(breakout_candle["mid"]["l"])
+    if high > asian_high:
+        return "BUY", asian_high
+    elif low < asian_low:
+        return "SELL", asian_low
+    return None, None
+
+def generate_trade_signal(candles):
+    closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
+    rsi = compute_rsi(closes)
+    macd, signal = compute_macd(closes)
+    if rsi.iloc[-1] > 55 and macd.iloc[-1] > signal.iloc[-1]:
+        return "BUY"
+    elif rsi.iloc[-1] < 45 and macd.iloc[-1] < signal.iloc[-1]:
+        return "SELL"
+    return None
+
+def calculate_position_size(balance, entry_price, stop_price):
+    risk_amount = balance * (RISK_PERCENTAGE / 100)
+    stop_distance = abs(entry_price - stop_price)
+    if stop_distance == 0:
+        return 0
+    units = int(risk_amount / stop_distance)
+    return units
+
+def place_trade(pair, direction, entry_price, stop_price, atr):
+    balance = get_account_balance()
+    units = calculate_position_size(balance, entry_price, stop_price)
+    if direction == "SELL":
+        units = -units
+    sl_distance = atr * ATR_MULTIPLIER_SL
+    tp_distance = atr * ATR_MULTIPLIER_TP
+    trailing_stop_distance = max(sl_distance, TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001)
+    take_profit_price = entry_price + tp_distance if direction == "BUY" else entry_price - tp_distance
+    data = {
+        "order": {
+            "type": "MARKET",
+            "instrument": pair,
+            "units": str(units),
+            "trailingStopLossOnFill": {"distance": f"{trailing_stop_distance:.5f}"},
+            "takeProfitOnFill": {"price": f"{take_profit_price:.5f}"}
+        }
+    }
+    r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=data)
+    client.request(r)
+    logger.info(f"Trade exécuté : {direction} {units} unités de {pair} | SL dynamique: {trailing_stop_distance:.5f}, TP: {take_profit_price:.5f}")
+
+def monitor_open_trades():
+    r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
+    client.request(r)
+    for trade in r.response["trades"]:
+        unrealized_pl = float(trade["unrealizedPL"])
+        sl = trade.get("trailingStopLoss")
+        tp = trade.get("takeProfit")
+        logger.info(f"Trade actif {trade['instrument']} | PnL latent: {unrealized_pl:.2f} USD | SL: {sl.get('distance', 'N/A')} | TP: {tp.get('price', 'N/A')}")
+        if trade["state"] == "CLOSED":
+            send_email("Trade fermé", f"Trade fermé avec PnL: {unrealized_pl:.2f} USD")
 
 if __name__ == "__main__":
     while True:
-        try:
-            candles = get_candles(PAIR)
-            direction, trigger_price = detect_asian_range_breakout(candles)
-            if direction:
-                logger.info(f"Cassure détectée ! Direction: {direction} au niveau de prix {trigger_price}")
-                entry_price = float(candles[-1]["mid"]["c"])
-                stop_price = trigger_price
-                place_trade(PAIR, direction, entry_price, stop_price, TRAILING_SL_PIPS, TRAILING_TP_PIPS)
-            else:
-                logger.info("Aucune cassure détectée.")
-        except Exception as e:
-            logger.error(f"Erreur dans le système: {e}")
-
+        now = datetime.utcnow().time()
+        if now >= SESSION_START:
+            try:
+                candles = get_candles(PAIR)
+                direction, trigger_price = detect_asian_range_breakout(candles)
+                signal = generate_trade_signal(candles)
+                if direction and signal == direction:
+                    logger.info(f"Cassure détectée ! Direction: {direction} au niveau de prix {trigger_price}")
+                    entry_price = float(candles[-1]["mid"]["c"])
+                    stop_price = trigger_price
+                    atr = compute_atr(candles)
+                    place_trade(PAIR, direction, entry_price, stop_price, atr)
+                else:
+                    logger.info("Aucune cassure ou signal technique contradictoire.")
+                monitor_open_trades()
+            except Exception as e:
+                logger.error(f"Erreur dans le système: {e}")
         time.sleep(3600)
-
