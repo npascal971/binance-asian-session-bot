@@ -367,38 +367,37 @@ def execute_post_session_trades(self):
         except Exception as e:
             logging.error(f"Erreur gestion TP/SL {symbol} : {e}")
 
+    def monitor_trades(self):
+        while True:
+            for symbol, trade in list(self.active_trades.items()):
+                if not trade["open"]:
+                    continue
 
-   def monitor_trades(self):
-    while True:
-        for symbol, trade in list(self.active_trades.items()):
-            if not trade["open"]:
-                continue
+                position_type = trade["position_type"]
+                amount = trade["amount"]
+                entry_price = trade["entry"]
+                trailing_stop = trade.get("trailing_stop", trade["sl"])
+                executed_tp = trade.get("executed_tp", [])
 
-            position_type = trade["position_type"]
-            amount = trade["amount"]
-            entry_price = trade["entry"]
-            trailing_stop = trade.get("trailing_stop", trade["sl"])
-            executed_tp = trade.get("executed_tp", [])
+                current_price = self.exchange.get_current_price(symbol)
 
-            current_price = self.exchange.get_current_price(symbol)
+                # 🔴 Stop Loss check
+                if (position_type == "long" and current_price <= trailing_stop) or \
+                   (position_type == "short" and current_price >= trailing_stop):
+                    self.exchange.close_position(symbol, amount)
+                    trade["open"] = False
+                    print(f"[STOP LOSS] Closed {symbol} at {current_price}")
+                    continue
 
-            # 🔴 Stop Loss check
-            if (position_type == "long" and current_price <= trailing_stop) or \
-               (position_type == "short" and current_price >= trailing_stop):
-                self.exchange.close_position(symbol, amount)
-                trade["open"] = False
-                print(f"[STOP LOSS] Closed {symbol} at {current_price}")
-                continue
+                # ✅ Take Profit partiels
+                for idx, tp in enumerate(trade["tp_levels"]):
+                    tp_price = tp["target"]
+                    tp_pct = tp["percent"]
+                    if idx in executed_tp:
+                        continue  # déjà exécuté
 
-            # ✅ Take Profit partiels
-            for idx, tp in enumerate(trade["tp_levels"]):
-                tp_price = tp["target"]
-                tp_pct = tp["percent"]
-                if idx in executed_tp:
-                    continue  # déjà exécuté
-
-                if (position_type == "long" and current_price >= tp_price) or \
-                   (position_type == "short" and current_price <= tp_price):
+                    if (position_type == "long" and current_price >= tp_price) or \
+                       (position_type == "short" and current_price <= tp_price):
 
                     qty_to_close = amount * tp_pct
                     self.exchange.close_position(symbol, qty_to_close)
