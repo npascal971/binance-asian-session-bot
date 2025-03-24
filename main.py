@@ -267,6 +267,7 @@ class AsianSessionTrader:
         sl_distance = price * self.sl_percent / 100
         qty = risk_amount / sl_distance if sl_distance > 0 else 0
 
+
         tp1 = price * (1 + self.tp_percent / 100) if position_type == "long" else price * (1 - self.tp_percent / 100)
         sl = price * (1 - self.sl_percent / 100) if position_type == "long" else price * (1 + self.sl_percent / 100)
 
@@ -291,6 +292,9 @@ class AsianSessionTrader:
 
         logging.info(f"📥 Entrée position {position_type.upper()} {symbol} | Qty : {qty:.4f} | Entry : {price:.2f} | SL : {sl:.2f} | TP : {tp1:.2f}")
         self.active_trades[symbol] = trade
+        logging.info(f"Tentative ordre | Symbole: {symbol}, Quantité: {qty}, Prix: {price}")
+        balance = self.get_free_balance()
+        logging.info(f"Solde disponible : {balance}")
 
 
     def execute_post_session_trades(self):
