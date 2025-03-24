@@ -46,7 +46,8 @@ def run_scheduler(trader):
             if trader.is_within_session(current_time):
                 logging.info("===== Début de la tâche programmée =====")
                 trader.analyze_session()
-                trader.execute_post_session_trades()                
+                trader.execute_post_session_trades()  
+                trader.monitor_trades()               
                 logging.info("===== Fin de la tâche programmée =====")
             else:
                 logging.info("En dehors des heures de trading.")
@@ -75,6 +76,10 @@ class AsianSessionTrader:
 
         self.update_balance()
         self.last_ob = {}
+        
+    def monitor_trades(self):
+        for trade in self.open_trades:
+            self.monitor_trade(trade)
 
     def configure_exchange(self):
         exchange = ccxt.binance({
