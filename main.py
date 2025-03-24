@@ -370,54 +370,93 @@ class AsianSessionTrader:
     def monitor_trades(self):
         while True:
             for symbol, trade in list(self.active_trades.items()):
-                if not trade["open"]:
+                if not trade.get("open", False):
                     continue
 
-                position_type = trade["position_type"]
-                amount = trade["amount"]
-                entry_price = trade["entry"]
-                trailing_stop = trade.get("trailing_stop", trade["sl"])
-                executed_tp = trade.get("executed_tp", [])
+                try:
+                    current_price = self.exchange.fetch_ticker(symbol)['last']
+                    position_type = trade["position_type"]
+                    entry_price = trade["entry"]
+                    amount = trade["amount"]
+                    trailing_stop = trade.get("trailing_stop", trade["sl"])
+                    executed_tp = trade.get("executed_tp", [])
 
-                current_price = self.exchange.fetch_ticker(symbol)['last']
+                # 🔴 STOP LOSS
+                    if (position_type == "long" and current_price <= trailing_stop) or \
+                       (position_type == "short" and current_price >= trailing_stop):
+                        self.exchange.close_position(symbol, amount)
+                        trade["exit_price"] = current_price
+                        trade["open"] = False
+                        duration = datetime.now() - trade["entry_time"]
+                        minutes = int(duration.total_seconds() // 60)
+                        logging.info(f"🛑 SL touché {symbol} à {current_price:.2f} | Durée : {minutes} min")
+                        self.send_trade_notification(
+                            f"[STOP LOSS] {symbol}",
+                            f"🛑 Stop Loss activé\n\nEntrée : {entry_price:.2f} USDT\nSortie : {current_price:.2f} USDT\nDurée : {minutes} min",
+                            trade
+                        )
+                        continue
 
-                # 🔴 Stop Loss check
-                if (position_type == "long" and current_price <= trailing_stop) or \
-                   (position_type == "short" and current_price >= trailing_stop):
-                    self.exchange.close_position(symbol, amount)
-                    trade["open"] = False
-                    print(f"[STOP LOSS] Closed {symbol} at {current_price}")
-                    continue
+                # ✅ TAKE PROFIT PARTIELS
+                    total_pct_executed = sum([trade["tp_levels"][i]["percent"] for i in executed_tp])
+                    amount_remaining = amount * (1 - total_pct_executed)
 
-                # ✅ Take Profit (partial closes)
-                for idx, tp in enumerate(trade["tp_levels"]):
-                    if idx in executed_tp:
-                        continue  # Already executed
+                    for idx, tp in enumerate(trade["tp_levels"]):
+                        if idx in executed_tp:
+                            continue
 
-                    tp_price = tp["target"]
-                    tp_pct = tp["percent"]
+                        tp_price = tp["target"]
+                        tp_pct = tp["percent"]
 
-                    if (position_type == "long" and current_price >= tp_price) or \
-                       (position_type == "short" and current_price <= tp_price):
+                        if (position_type == "long" and current_price >= tp_price) or \
+                           (position_type == "short" and current_price <= tp_price):
 
-                        qty_to_close = amount * tp_pct
-                        self.exchange.close_position(symbol, qty_to_close)
-                        trade.setdefault("executed_tp", []).append(idx)
+                            qty_to_close = amount_remaining * (tp_pct / (1 - total_pct_executed))
+                            self.exchange.close_position(symbol, qty_to_close)
+                            trade.setdefault("executed_tp", []).append(idx)
 
-                        print(f"[TP{idx+1}] {tp_pct*100:.0f}% of position closed at {current_price}")
+                            logging.info(f"[TP{idx+1}] {tp_pct*100:.0f}% de position fermée à {current_price:.2f}")
+                            self.send_trade_notification(
+                                f"[TP{idx+1} atteint] {symbol}",
+                                f"✅ TP{idx+1} atteint à {current_price:.2f}\n{tp_pct*100:.0f}% de position fermée.",
+                                trade
+                            )
 
-                    # 🎯 Move trailing stop to breakeven after TP1
-                    if idx == 0:
-                        trade["trailing_stop"] = entry_price
-                        print(f"Trailing stop moved to breakeven: {trade['trailing_stop']}")
+                            # 🎯 BREAK-EVEN après TP1
+                            if idx == 0:
+                                trade["trailing_stop"] = entry_price
+                                logging.info(f"🟡 Break-even activé pour {symbol} → SL déplacé à {entry_price:.2f}")
 
-                    # 🔁 Strengthen trailing stop after TP2
-                    elif idx == 1:
+                            # 🔁 TRAILING SL renforcé après TP2
+                            elif idx == 1:
+                                if position_type == "long":
+                                    new_sl = tp_price - (tp_price - entry_price) * 0.2
+                                else:
+                                    new_sl = tp_price + (entry_price - tp_price) * 0.2
+
+                                if (position_type == "long" and new_sl > trade["trailing_stop"]) or \
+                                   (position_type == "short" and new_sl < trade["trailing_stop"]):
+                                    trade["trailing_stop"] = new_sl
+                                    logging.info(f"🔁 Trailing SL avancé : {trade['trailing_stop']:.2f}")
+
+                            break  # On break ici pour éviter l'exécution immédiate d'autres TP dans le même cycle
+
+                # 📈 TRAILING SL DYNAMIQUE (optionnel)
+                    if self.trailing_stop_percent:
                         if position_type == "long":
-                            trade["trailing_stop"] = tp_price - (tp_price - entry_price) * 0.2
+                            new_sl = current_price * (1 - self.trailing_stop_percent / 100)
+                            if new_sl > trade["trailing_stop"]:
+                                trade["trailing_stop"] = new_sl
+                                logging.info(f"🔁 SL trailing mis à jour : {trade['trailing_stop']:.2f}")
                         else:
-                            trade["trailing_stop"] = tp_price + (entry_price - tp_price) * 0.2
-                        print(f"Trailing stop advanced after TP2: {trade['trailing_stop']}")
+                            new_sl = current_price * (1 + self.trailing_stop_percent / 100)
+                            if new_sl < trade["trailing_stop"]:
+                                trade["trailing_stop"] = new_sl
+                                logging.info(f"🔁 SL trailing mis à jour : {trade['trailing_stop']:.2f}")
+
+                except Exception as e:
+                    logging.error(f"⚠️ Erreur sur le monitoring du trade {symbol} : {e}")
+
 
 
 
