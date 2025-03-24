@@ -16,7 +16,6 @@ import oandapyV20.endpoints.pricing as pricing
 
 # Chargement des variables d'environnement
 load_dotenv()
-USE_API_PRICING = True  # True pour utiliser l'Option 2
 
 # Configuration API OANDA
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
@@ -26,14 +25,16 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment="practice")
 
-# Paramètres de trading
-PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
+# Paramètres de trading (avec BTC et ETH ajoutés)
+PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD", "BTC_USD", "ETH_USD"]
+CRYPTO_PAIRS = ["BTC_USD", "ETH_USD"]
 RISK_PERCENTAGE = 1  # 1% du capital
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 2.0
 SESSION_START = dtime(7, 0)  # 7h00
-SESSION_END = dtime(23, 50)   # 21h00
+SESSION_END = dtime(23, 50)   # 23h50
 MAX_RISK_USD = 100  # $100 max de risque par trade
+MIN_CRYPTO_UNITS = 0.001  # Unités minimales pour les cryptos
 
 # Configuration des logs avec emojis
 logging.basicConfig(
@@ -49,115 +50,86 @@ logger = logging.getLogger()
 SIMULATION_MODE = True  # Passer à False pour le trading réel
 trade_history = []
 active_trades = set()
-INSTRUMENT_DETAILS = {}
 
-# ========================
-# 🚀 FONCTIONS PRINCIPALES
-# ========================
-
-
-# Configuration des instruments avec valeurs par défaut OANDA
+# Spécifications des instruments (avec crypto)
 INSTRUMENT_SPECS = {
-    "EUR_USD": {
-        "pip_location": -4,  # 0.0001
-        "min_units": 1000,
-        "units_precision": 0,
-        "margin_rate": 0.02
-    },
-    "GBP_USD": {
-        "pip_location": -4,  # 0.0001
-        "min_units": 1000,
-        "units_precision": 0,
-        "margin_rate": 0.02
-    },
-    "USD_JPY": {
-        "pip_location": -2,  # 0.01
-        "min_units": 1000,
-        "units_precision": 0,
-        "margin_rate": 0.02
-    },
-    "XAU_USD": {
-        "pip_location": -2,  # 0.01
-        "min_units": 1,
-        "units_precision": 2,
-        "margin_rate": 0.02
-    },
-    "BTC_USD": {
-        "pip_location": 1,  # 10
-        "min_units": 0.001,
-        "units_precision": 6,
-        "margin_rate": 0.05
-    }
+    "EUR_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
+    "GBP_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
+    "USD_JPY": {"pip": 0.01, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
+    "XAU_USD": {"pip": 0.01, "min_units": 1, "precision": 2, "margin_rate": 0.02},
+    "BTC_USD": {"pip": 1, "min_units": MIN_CRYPTO_UNITS, "precision": 6, "margin_rate": 0.05},
+    "ETH_USD": {"pip": 0.1, "min_units": MIN_CRYPTO_UNITS, "precision": 6, "margin_rate": 0.05}
 }
 
-def get_instrument_details(pair):
-    """Retourne les spécifications de l'instrument avec fallback intelligent"""
+def get_account_balance():
+    """Récupère le solde du compte"""
     try:
-        # Essayer d'abord avec les valeurs par défaut
-        if pair in INSTRUMENT_SPECS:
-            logger.info(f"🔧 Using predefined specs for {pair}")
-            return INSTRUMENT_SPECS[pair]
-        
-        # Fallback dynamique pour les paires inconnues
-        logger.warning(f"⚠️ Unknown pair {pair}, estimating pip location...")
-        
-        # Méthode alternative pour estimer la précision
-        params = {"instruments": pair}
-        r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params=params)
-        price = client.request(r)['prices'][0]['closeoutBid']
-        
-        decimals = len(price.split('.')[1]) if '.' in price else 0
-        pip_location = -decimals if decimals > 0 else 0
-        
-        return {
-            "pip_location": pip_location,
-            "min_units": 1000,
-            "units_precision": max(0, decimals - 1),
-            "margin_rate": 0.02
-        }
-        
+        r = accounts.AccountSummary(OANDA_ACCOUNT_ID)
+        return float(client.request(r)["account"]["balance"])
     except Exception as e:
-        logger.error(f"❌ Error getting details for {pair}: {str(e)}")
-        # Fallback ultra-secure
+        logger.error(f"❌ Erreur récupération solde: {str(e)}")
+        return 0
+
+def get_instrument_details(pair):
+    """Retourne les spécifications de l'instrument"""
+    try:
+        if pair in INSTRUMENT_SPECS:
+            spec = INSTRUMENT_SPECS[pair]
+            pip_location = int(np.log10(spec["pip"])) if spec["pip"] > 0 else 0
+            return {
+                'pip_location': pip_location,
+                'min_units': spec["min_units"],
+                'units_precision': spec["precision"],
+                'margin_rate': spec["margin_rate"]
+            }
+        return INSTRUMENT_SPECS["EUR_USD"]  # Fallback pour paires inconnues
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération spécifications: {str(e)}")
         return {
-            "pip_location": -4,
-            "min_units": 1000,
-            "units_precision": 0,
-            "margin_rate": 0.02
+            'pip_location': -4,
+            'min_units': MIN_CRYPTO_UNITS if pair in CRYPTO_PAIRS else 1000,
+            'units_precision': 6 if pair in CRYPTO_PAIRS else 2,
+            'margin_rate': 0.05 if pair in CRYPTO_PAIRS else 0.02
         }
 
 def calculate_position_size(pair, account_balance, entry_price, stop_loss):
-    """Calcule la taille de position de manière robuste"""
+    """Calcule la taille de position avec gestion précise du risque"""
     specs = get_instrument_details(pair)
     
     # Calcul du montant à risquer
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), MAX_RISK_USD)
-    risk_per_pip = risk_amount / (abs(entry_price - stop_loss) * (10 ** -specs['pip_location']))
     
-    units = risk_per_pip * (10 ** specs['pip_location'])
+    # Calcul spécial pour les cryptos
+    if pair in CRYPTO_PAIRS:
+        units = risk_amount / abs(entry_price - stop_loss)
+    else:
+        pip_value = 10 ** specs['pip_location']
+        distance_pips = abs(entry_price - stop_loss) / (10 ** specs['pip_location'])
+        units = risk_amount / (distance_pips * pip_value)
+    
     units = round(units, specs['units_precision'])
     
     # Validation finale
     if units < specs['min_units']:
-        logger.error(f"🚨 Calculated units ({units}) below minimum ({specs['min_units']})")
+        logger.error(f"🚨 Unités calculées trop faibles ({units}) < minimum ({specs['min_units']})")
         return 0
     
     logger.info(f"""
-    📊 Position Size Calculation:
-    Pair: {pair}
-    Risk: ${risk_amount:.2f} ({RISK_PERCENTAGE}%)
-    Entry: {entry_price:.5f}
-    Stop: {stop_loss:.5f}
-    Pip Location: 10^{specs['pip_location']}
-    Calculated Units: {units}
+    📊 Calcul Position {pair}:
+    • Risque: ${risk_amount:.2f} ({RISK_PERCENTAGE}%)
+    • Entrée: {entry_price:.5f}
+    • Stop: {stop_loss:.5f}
+    • Pip Location: 10^{specs['pip_location']}
+    • Unités: {units}
     """)
     
     return units
-def send_notification(trade_info, hit_type):
+
+def send_trade_notification(trade_info, hit_type):
     """Envoie une notification email pour TP/SL"""
     try:
         emoji = "💰" if hit_type == "TP" else "🛑"
-        subject = f"{emoji} {trade_info['pair']} {hit_type} HIT {emoji}"
+        subject = f"{emoji} {trade_info['pair']} {hit_type} ATTEINT {emoji}"
         
         if hit_type == "TP":
             profit = (trade_info['tp'] - trade_info['entry']) * trade_info['units']
@@ -196,39 +168,54 @@ def send_notification(trade_info, hit_type):
     except Exception as e:
         logger.error(f"❌ Erreur envoi email: {str(e)}")
 
-def check_tp_sl():
-    """Vérifie si TP/SL atteint"""
+def check_active_trades():
+    """Vérifie les trades actuellement ouverts"""
     try:
         r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
-        open_trades = client.request(r).get('trades', [])
-        
-        for trade in open_trades:
-            current_price = float(trade['price'])
-            tp_price = float(trade['takeProfitOrder']['price'])
-            sl_price = float(trade['stopLossOrder']['price'])
-            
-            if current_price >= tp_price:
-                send_notification({
-                    'pair': trade['instrument'],
-                    'direction': 'buy' if float(trade['currentUnits']) > 0 else 'sell',
-                    'entry': float(trade['openPrice']),
-                    'stop': sl_price,
-                    'tp': tp_price,
-                    'units': abs(float(trade['currentUnits']))
-                }, "TP")
-                
-            elif current_price <= sl_price:
-                send_notification({
-                    'pair': trade['instrument'],
-                    'direction': 'buy' if float(trade['currentUnits']) > 0 else 'sell',
-                    'entry': float(trade['openPrice']),
-                    'stop': sl_price,
-                    'tp': tp_price,
-                    'units': abs(float(trade['currentUnits']))
-                }, "SL")
-                
+        return {t["instrument"] for t in client.request(r).get('trades', [])}
     except Exception as e:
-        logger.error(f"❌ Erreur vérification TP/SL: {str(e)}")
+        logger.error(f"❌ Erreur vérification trades: {str(e)}")
+        return set()
+
+def analyze_pair(pair):
+    """Analyse une paire et exécute les trades si conditions remplies"""
+    try:
+        params = {"granularity": "M5", "count": 50, "price": "M"}
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        candles = client.request(r)['candles']
+
+        closes = [float(c['mid']['c']) for c in candles if c['complete']]
+        highs = [float(c['mid']['h']) for c in candles if c['complete']]
+        lows = [float(c['mid']['l']) for c in candles if c['complete']]
+
+        if len(closes) < 20:
+            logger.warning(f"⚠️ Données insuffisantes pour {pair}")
+            return
+
+        # Calcul ATR
+        atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
+        last_close = closes[-1]
+
+        # Stratégie de breakout
+        if pair not in active_trades:
+            if last_close > max(closes[-10:-1]):  # Breakout haussier
+                place_trade(
+                    pair=pair,
+                    direction="buy",
+                    entry_price=last_close,
+                    stop_loss=last_close - (ATR_MULTIPLIER_SL * atr),
+                    take_profit=last_close + (ATR_MULTIPLIER_TP * atr)
+                )
+            elif last_close < min(closes[-10:-1]):  # Breakout baissier
+                place_trade(
+                    pair=pair,
+                    direction="sell",
+                    entry_price=last_close,
+                    stop_loss=last_close + (ATR_MULTIPLIER_SL * atr),
+                    take_profit=last_close - (ATR_MULTIPLIER_TP * atr)
+                )
+    except Exception as e:
+        logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     """Exécute un trade"""
@@ -247,7 +234,8 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
         f"   💵 Entrée: {entry_price:.5f}\n"
         f"   🛑 Stop: {stop_loss:.5f}\n"
         f"   🎯 TP: {take_profit:.5f}\n"
-        f"   📦 Unités: {units}"
+        f"   📦 Unités: {units}\n"
+        f"   💰 Risque: ${min(account_balance * (RISK_PERCENTAGE / 100), MAX_RISK_USD):.2f}"
     )
 
     trade_info = {
@@ -300,6 +288,38 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
         logger.info("🧪 Mode simulation - Trade non envoyé")
         return "SIMULATION"
 
+def check_tp_sl():
+    """Vérifie si TP/SL atteint"""
+    try:
+        r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
+        open_trades = client.request(r).get('trades', [])
+        
+        for trade in open_trades:
+            current_price = float(trade['price'])
+            tp_price = float(trade['takeProfitOrder']['price'])
+            sl_price = float(trade['stopLossOrder']['price'])
+            
+            if current_price >= tp_price:
+                send_trade_notification({
+                    'pair': trade['instrument'],
+                    'direction': 'buy' if float(trade['currentUnits']) > 0 else 'sell',
+                    'entry': float(trade['openPrice']),
+                    'stop': sl_price,
+                    'tp': tp_price,
+                    'units': abs(float(trade['currentUnits']))
+                }, "TP")
+            elif current_price <= sl_price:
+                send_trade_notification({
+                    'pair': trade['instrument'],
+                    'direction': 'buy' if float(trade['currentUnits']) > 0 else 'sell',
+                    'entry': float(trade['openPrice']),
+                    'stop': sl_price,
+                    'tp': tp_price,
+                    'units': abs(float(trade['currentUnits']))
+                }, "SL")
+    except Exception as e:
+        logger.error(f"❌ Erreur vérification TP/SL: {str(e)}")
+
 # ========================
 # 🔄 BOUCLE PRINCIPALE
 # ========================
@@ -307,12 +327,12 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
 if __name__ == "__main__":
     logger.info("\n"
         "✨✨✨✨✨✨✨✨✨✨✨✨✨\n"
-        "   OANDA TRADING BOT v3.1\n"
-        "  Boucle 60s pendant session\n"
+        "   OANDA TRADING BOT v4.0\n"
+        "  Crypto Edition (BTC/ETH)\n"
         "✨✨✨✨✨✨✨✨✨✨✨✨✨"
     )
     
-    # Préchargement des spécifications
+    # Initialisation
     for pair in PAIRS:
         get_instrument_details(pair)
         time.sleep(0.5)
@@ -321,25 +341,23 @@ if __name__ == "__main__":
         now = datetime.now().time()
         
         if SESSION_START <= now <= SESSION_END:
-            start_time = time.time()  # 🕒 Mesure du temps d'exécution
+            start_time = time.time()
             
-            logger.info("\n🔎 Analyse des paires...")
+            # 1. Vérifier les trades actifs
+            active_trades = check_active_trades()
+            
+            # 2. Analyser toutes les paires
             for pair in PAIRS:
-                try:
-                    # [...] (Votre logique d'analyse et de trading)
-                    pass
-                except Exception as e:
-                    logger.error(f"❌ Erreur sur {pair}: {str(e)}")
+                analyze_pair(pair)
             
-            # Vérification TP/SL à chaque boucle
+            # 3. Vérifier les TP/SL
             check_tp_sl()
             
-            # ⏱ Calcul du temps restant pour 60s total
+            # 4. Gestion du timing
             elapsed = time.time() - start_time
-            sleep_time = max(60 - elapsed, 5)  # Garantit au moins 5s de pause
-            logger.info(f"⏳ Prochaine exécution dans {sleep_time:.0f}s")
+            sleep_time = max(60 - elapsed, 5)
+            logger.info(f"⏳ Prochaine exécution dans {sleep_time:.1f}s")
             time.sleep(sleep_time)
-            
         else:
             logger.info("\n😴 Hors session - Prochaine vérification dans 5 minutes")
-            time.sleep(300)  # ⏸️ Hors session, pause plus longue
+            time.sleep(300)
