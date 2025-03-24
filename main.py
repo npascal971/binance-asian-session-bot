@@ -71,7 +71,7 @@ class AsianSessionTrader:
         self.active_trades = {}
         self.asian_session = {"start": {"hour": 23, "minute": 0}, "end": {"hour": 10, "minute": 0}}
         self.us_session = {"start": {"hour": 14, "minute": 0}, "end": {"hour": 21, "minute": 0}}
-        self.trading_hours = {"start": {"hour": 10, "minute": 0}, "end": {"hour": 23, "minute": 50}}
+        self.trading_hours = {"start": {"hour": 2, "minute": 0}, "end": {"hour": 23, "minute": 50}}
         if not os.path.exists("reports"):
             os.makedirs("reports")
 
@@ -255,32 +255,32 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur analyse session : {str(e)}")
 
-def execute_post_session_trades(self):
-    for symbol in self.symbols:
-        data = self.session_data.get(symbol, {})
-        if not data.get("trend_ok"):
-            logging.info(f"Pas d'entrée pour {symbol} - tendance non confirmée.")
-            continue
+    def execute_post_session_trades(self):
+        for symbol in self.symbols:
+            data = self.session_data.get(symbol, {})
+            if not data.get("trend_ok"):
+                logging.info(f"Pas d'entrée pour {symbol} - tendance non confirmée.")
+                continue
 
-        asian_high, asian_low = self.get_asian_session_range(symbol)
-        if asian_high is None or asian_low is None:
-            continue
+            asian_high, asian_low = self.get_asian_session_range(symbol)
+            if asian_high is None or asian_low is None:
+                continue
 
-        price = self.exchange.fetch_ticker(symbol)['last']
-        if not self.is_price_near_liquidity_zone(symbol, price, asian_high, asian_low):
-            logging.info(f"⚠️ {symbol} - Prix pas proche des zones de liquidité, on attend")
-            continue
+            price = self.exchange.fetch_ticker(symbol)['last']
+            if not self.is_price_near_liquidity_zone(symbol, price, asian_high, asian_low):
+                logging.info(f"⚠️ {symbol} - Prix pas proche des zones de liquidité, on attend")
+                continue
 
-        if not self.detect_ltf_structure_shift(symbol, timeframe="5m"):
-            logging.info(f"⚠️ {symbol} - Structure LTF pas encore confirmée, on attend")
-            continue
+            if not self.detect_ltf_structure_shift(symbol, timeframe="5m"):
+                logging.info(f"⚠️ {symbol} - Structure LTF pas encore confirmée, on attend")
+                continue
 
-        try:
-            position_type = "long" if data["trend_ok"] else "short"
-            self.enter_trade(symbol, position_type)
+            try:
+                position_type = "long" if data["trend_ok"] else "short"
+                self.enter_trade(symbol, position_type)
 
-        except Exception as e:
-            logging.error(f"Erreur exécution ordre : {e}")
+            except Exception as e:
+                logging.error(f"Erreur exécution ordre : {e}")
 
 
 
