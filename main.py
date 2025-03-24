@@ -22,7 +22,6 @@ def scheduled_task():
     logging.info("===== Début de la tâche programmée =====")
     trader.analyze_session()
     trader.execute_post_session_trades()
-    trader.monitor_trades()
     logging.info("===== Fin de la tâche programmée =====")
 
 # Define the monitor_trades_runner function
@@ -47,8 +46,7 @@ def run_scheduler(trader):
             if trader.is_within_session(current_time):
                 logging.info("===== Début de la tâche programmée =====")
                 trader.analyze_session()
-                trader.execute_post_session_trades()
-                trader.monitor_trades()
+                trader.execute_post_session_trades()                
                 logging.info("===== Fin de la tâche programmée =====")
             else:
                 logging.info("En dehors des heures de trading.")
