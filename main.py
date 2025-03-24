@@ -35,7 +35,7 @@ def monitor_trades_runner(trader):
                 logging.info(f"💓 Monitor tick | Trades actifs : {len(open_trades)} | Durée trade actif : {minutes} min")
         else:
             logging.info("💓 Monitor tick | Trades actifs : 0")
-        trader.monitor_trades()
+        trader.monitor_trade()
         time.sleep(45)
 
 # Define the run_scheduler function
@@ -445,7 +445,7 @@ def run_scheduler(self):
                 logging.info("===== Début de la tâche programmée =====")
                 self.analyze_session()
                 self.execute_post_session_trades()
-                self.monitor_trades()
+                self.monitor_trade()
                 logging.info("===== Fin de la tâche programmée =====")
             else:
                 logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
@@ -464,7 +464,7 @@ def monitor_trades_runner(trader):
                 logging.info(f"💓 Monitor tick | Trades actifs : {len(open_trades)} | Durée trade actif : {minutes} min")
         else:
             logging.info("💓 Monitor tick | Trades actifs : 0")
-        trader.monitor_trades()
+        trader.monitor_trade()
         time.sleep(60)
 
 # === Lancer le bot ===
