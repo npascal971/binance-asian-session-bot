@@ -255,64 +255,34 @@ class AsianSessionTrader:
         except Exception as e:
             logging.error(f"Erreur analyse session : {str(e)}")
 
-    def execute_post_session_trades(self):
-        for symbol in self.symbols:
-            data = self.session_data.get(symbol, {})
-            if not data.get("trend_ok"):
-                logging.info(f"Pas d'entrée pour {symbol} - tendance non confirmée.")
-                continue
+def execute_post_session_trades(self):
+    for symbol in self.symbols:
+        data = self.session_data.get(symbol, {})
+        if not data.get("trend_ok"):
+            logging.info(f"Pas d'entrée pour {symbol} - tendance non confirmée.")
+            continue
 
-            asian_high, asian_low = self.get_asian_session_range(symbol)
-            if asian_high is None or asian_low is None:
-                continue
+        asian_high, asian_low = self.get_asian_session_range(symbol)
+        if asian_high is None or asian_low is None:
+            continue
 
-            price = self.exchange.fetch_ticker(symbol)['last']
-            if not self.is_price_near_liquidity_zone(symbol, price, asian_high, asian_low):
-                logging.info(f"⚠️ {symbol} - Prix pas proche des zones de liquidité, on attend")
-                continue
+        price = self.exchange.fetch_ticker(symbol)['last']
+        if not self.is_price_near_liquidity_zone(symbol, price, asian_high, asian_low):
+            logging.info(f"⚠️ {symbol} - Prix pas proche des zones de liquidité, on attend")
+            continue
 
-            if not self.detect_ltf_structure_shift(symbol, timeframe="5m"):
-                logging.info(f"⚠️ {symbol} - Structure LTF pas encore confirmée, on attend")
-                continue
-
-            usdt_balance = self.exchange.fetch_balance()['total']['USDT']
-            trade_amount = self.risk_per_trade * usdt_balance / price
+        if not self.detect_ltf_structure_shift(symbol, timeframe="5m"):
+            logging.info(f"⚠️ {symbol} - Structure LTF pas encore confirmée, on attend")
+            continue
 
         try:
             position_type = "long" if data["trend_ok"] else "short"
+            self.enter_trade(symbol, position_type)
 
-            if position_type == "long":
-                order = self.exchange.create_market_buy_order(symbol, trade_amount)
-                sl = price * (1 - self.sl_percent / 100)
-                tp1 = price * (1 + self.tp_percent / 100)
-            else:
-                order = self.exchange.create_market_sell_order(symbol, trade_amount)
-                sl = price * (1 + self.sl_percent / 100)
-                tp1 = price * (1 - self.tp_percent / 100)
-
-            tp2 = tp1 + (tp1 - price) * 0.5 if position_type == "long" else tp1 - (price - tp1) * 0.5
-            tp3 = tp2 + (tp2 - price) * 0.5 if position_type == "long" else tp2 - (price - tp2) * 0.5
-
-            self.active_trades[symbol] = {
-                "entry": price,
-                "sl": sl,
-                "tp": tp1,
-                "amount": trade_amount,
-                "order_id": order['id'],
-                "open": True,
-                "trailing_stop": sl,
-                "tp1": tp1,
-                "tp2": tp2,
-                "tp3": tp3,
-                "executed_tp": [],
-                "position_type": position_type,
-                "entry_time": datetime.now()
-            }
-
-            logging.info(f"🎯 Nouveau trade {symbol} | Entrée: {price:.2f} | TP: {tp1:.2f} | SL: {sl:.2f}")
-            logging.info(f"ORDRE exécuté {symbol}: {order}")
         except Exception as e:
             logging.error(f"Erreur exécution ordre : {e}")
+
+
 
     def send_trade_notification(self, subject, body, trade):
         sender_email = os.getenv('EMAIL_ADDRESS')
@@ -398,11 +368,61 @@ class AsianSessionTrader:
             logging.error(f"Erreur gestion TP/SL {symbol} : {e}")
 
 
-        
-    def monitor_trades(self):
+   def monitor_trades(self):
+    while True:
         for symbol, trade in list(self.active_trades.items()):
-            if trade.get("open"):
-                self.manage_take_profit_stop_loss(symbol, trade)
+            if not trade["open"]:
+                continue
+
+            position_type = trade["position_type"]
+            amount = trade["amount"]
+            entry_price = trade["entry"]
+            trailing_stop = trade.get("trailing_stop", trade["sl"])
+            executed_tp = trade.get("executed_tp", [])
+
+            current_price = self.exchange.get_current_price(symbol)
+
+            # 🔴 Stop Loss check
+            if (position_type == "long" and current_price <= trailing_stop) or \
+               (position_type == "short" and current_price >= trailing_stop):
+                self.exchange.close_position(symbol, amount)
+                trade["open"] = False
+                print(f"[STOP LOSS] Closed {symbol} at {current_price}")
+                continue
+
+            # ✅ Take Profit partiels
+            for idx, tp in enumerate(trade["tp_levels"]):
+                tp_price = tp["target"]
+                tp_pct = tp["percent"]
+                if idx in executed_tp:
+                    continue  # déjà exécuté
+
+                if (position_type == "long" and current_price >= tp_price) or \
+                   (position_type == "short" and current_price <= tp_price):
+
+                    qty_to_close = amount * tp_pct
+                    self.exchange.close_position(symbol, qty_to_close)
+                    trade["executed_tp"].append(idx)
+
+                    print(f"[TP{idx+1}] {tp_pct*100:.0f}% of position closed at {current_price}")
+
+                    # 🎯 Trailing stop : passer au break-even après TP1
+                    if idx == 0:
+                        if position_type == "long":
+                            trade["trailing_stop"] = entry_price
+                        else:
+                            trade["trailing_stop"] = entry_price
+                        print(f"Trailing stop moved to breakeven: {trade['trailing_stop']}")
+
+                    # 🔁 Renforcement du trailing stop après TP2 (optionnel)
+                    if idx == 1:
+                        if position_type == "long":
+                            trade["trailing_stop"] = tp_price - (tp_price - entry_price) * 0.2
+                        else:
+                            trade["trailing_stop"] = tp_price + (entry_price - tp_price) * 0.2
+                        print(f"Trailing stop advanced after TP2: {trade['trailing_stop']}")
+
+
 
 def run_scheduler(self):
         while True:
@@ -415,7 +435,7 @@ def run_scheduler(self):
                 logging.info("===== Fin de la tâche programmée =====")
             else:
                 logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
-            time.sleep(45)
+            time.sleep(120)
 
 
 
@@ -431,7 +451,7 @@ def monitor_trades_runner(trader):
         else:
             logging.info("💓 Monitor tick | Trades actifs : 0")
         trader.monitor_trades()
-        time.sleep(45)
+        time.sleep(120)
 
 # === Lancer le bot ===
 if __name__ == '__main__':
