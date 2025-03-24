@@ -76,6 +76,7 @@ class AsianSessionTrader:
 
         self.update_balance()
         self.last_ob = {}
+        self.open_trades = []
         
     def monitor_trades(self):
         for trade in self.open_trades:
