@@ -32,6 +32,7 @@ ATR_MULTIPLIER_TP = 3.0
 SESSION_START = dtime(7, 0)
 RETEST_TOLERANCE_PIPS = 10
 RETEST_ZONE_RANGE = RETEST_TOLERANCE_PIPS * 0.0001
+RISK_AMOUNT_CAP = 100  # Cap de risque maximal en USD par trade
 
 # Configuration logs
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -105,7 +106,7 @@ def generate_trade_signal(candles):
     return None
 
 def calculate_position_size(balance, entry_price, stop_price):
-    risk_amount = balance * (RISK_PERCENTAGE / 100)
+    risk_amount = min(balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
     stop_distance = abs(entry_price - stop_price)
     if stop_distance == 0:
         return 0
