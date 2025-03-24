@@ -23,16 +23,30 @@ client = oandapyV20.API(access_token=OANDA_API_KEY)
 
 # Paramètres de trading
 PAIRS = ["XAU_USD", "EUR_USD", "GBP_JPY", "BTC_USD", "ETH_USD"]
-RISK_PERCENTAGE = 1
+RISK_PERCENTAGE = 1  # 1% du capital
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 3.0
 SESSION_START = dtime(7, 0)
 SESSION_END = dtime(23, 0)
-RETEST_TOLERANCE_PIPS = 10
-RETEST_ZONE_RANGE = RETEST_TOLERANCE_PIPS * 0.0001
-RISK_AMOUNT_CAP = 100
+RISK_AMOUNT_CAP = 100  # $100 max de risque par trade
 CRYPTO_PAIRS = ["BTC_USD", "ETH_USD"]
+
+# Valeur des pips et unités minimales par instrument
+PIP_VALUES = {
+    "EUR_USD": 0.0001,
+    "GBP_JPY": 0.01,
+    "XAU_USD": 0.01,
+    "BTC_USD": 1,
+    "ETH_USD": 1
+}
+MIN_UNITS = {
+    "EUR_USD": 1000,
+    "GBP_JPY": 1000,
+    "XAU_USD": 1,
+    "BTC_USD": 0.001,
+    "ETH_USD": 0.001
+}
 
 # Configuration logs
 logging.basicConfig(
@@ -40,13 +54,12 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('trading_bot.log')
+        logging.FileHandler('oanda_trading_bot.log')
     ]
 )
 logger = logging.getLogger()
 
-SIMULATION_MODE = True  # Mettre à True pour tester sans exécuter de vrais trades
-
+SIMULATION_MODE = True  # Mettre à False pour trading réel
 trade_history = []
 active_trades = set()
 
@@ -60,10 +73,10 @@ def check_active_trades():
         global active_trades
         active_trades = current_trades
         
-        logger.info(f"Trades actuellement ouverts: {current_trades}")
+        logger.info(f"Trades actifs: {current_trades}")
         return current_trades
     except Exception as e:
-        logger.error(f"Erreur lors de la vérification des trades ouverts: {e}")
+        logger.error(f"Erreur vérification trades: {e}")
         return set()
 
 def get_account_balance():
@@ -73,32 +86,54 @@ def get_account_balance():
         client.request(r)
         return float(r.response["account"]["balance"])
     except Exception as e:
-        logger.error(f"Erreur lors de la récupération du solde: {e}")
+        logger.error(f"Erreur récupération solde: {e}")
         return 0
 
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
-    """Calcule la taille de position selon le risque et le type d'instrument"""
+    """Calcule la taille de position avec gestion précise du risque"""
+    # Montant à risquer (1% du solde, max RISK_AMOUNT_CAP)
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
-    risk_per_unit = abs(entry_price - stop_loss_price)
+    pip_size = PIP_VALUES.get(pair, 0.0001)
     
-    if risk_per_unit == 0:
+    # Calcul de la distance en pips
+    distance_pips = abs(entry_price - stop_loss_price) / pip_size
+    
+    # Valeur d'un pip pour 1 unité
+    if pair in CRYPTO_PAIRS or pair == "XAU_USD":
+        pip_value = pip_size * 1  # Pour cryptos et or
+    else:
+        pip_value = pip_size * 100000  # Pour Forex
+    
+    # Calcul des unités
+    if distance_pips == 0:
         logger.error("Distance SL nulle - trade annulé")
         return 0
     
-    # Conversion spéciale pour les paires crypto et XAU
-    if pair in CRYPTO_PAIRS or pair == "XAU_USD":
-        units = risk_amount / risk_per_unit
-    else:
-        # Pour les paires forex standard
-        units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
+    units = (risk_amount / (distance_pips * pip_value))
+    min_unit = MIN_UNITS.get(pair, 1000)
     
-    # Arrondir selon les conventions OANDA
+    # Arrondir selon le type d'instrument
     if pair in CRYPTO_PAIRS:
-        return round(units, 6)  # 6 décimales pour les cryptos
+        units = round(units, 6)
     elif pair == "XAU_USD":
-        return round(units, 2)  # 2 décimales pour l'or
+        units = round(units, 2)
     else:
-        return round(units)  # Unités entières pour forex
+        units = round(units)
+    
+    # Vérification unités minimales
+    if units < min_unit:
+        logger.warning(f"Unités ({units}) < minimum ({min_unit}) - trade annulé")
+        return 0
+    
+    logger.info(
+        f"Risk Management:\n"
+        f"  Solde: ${account_balance:.2f}\n"
+        f"  Risque: {RISK_PERCENTAGE}% = ${risk_amount:.2f}\n"
+        f"  Distance SL: {distance_pips:.1f} pips\n"
+        f"  Unités calculées: {units}\n"
+        f"  Risque réel: ${distance_pips * units * pip_value:.2f}"
+    )
+    return units
 
 def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
@@ -114,60 +149,61 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected):
 
     if macd > macd_signal:
         signal_detected = True
-        reason.append("MACD croise au-dessus du signal : signal d'ACHAT")
+        reason.append("MACD > Signal : ACHAT")
     elif macd < macd_signal:
         signal_detected = True
-        reason.append("MACD croise en dessous du signal : signal de VENTE")
+        reason.append("MACD < Signal : VENTE")
 
     if breakout_detected:
         signal_detected = True
-        reason.append("Breakout détecté sur le range asiatique")
+        reason.append("Breakout détecté")
 
     if signal_detected:
-        logger.info(f"💡 Signal détecté pour {pair} → Raisons: {', '.join(reason)}")
+        logger.info(f"Signal détecté pour {pair}: {', '.join(reason)}")
     else:
-        logger.info(f"🔍 Aucun signal détecté pour {pair}")
+        logger.info(f"Aucun signal pour {pair}")
 
     return signal_detected
 
 def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
-    """Exécute un trade sur le compte OANDA"""
+    """Exécute un trade avec gestion précise du risque"""
     if pair in active_trades:
-        logger.info(f"🚫 Trade déjà actif sur {pair}, aucun nouveau trade ne sera ouvert.")
+        logger.info(f"Trade actif existant sur {pair}")
         return None
 
-    try:
-        units = calculate_position_size(account_balance, entry_price, stop_price, pair)
-        if units == 0:
-            logger.error("❌ Calcul des unités invalide - trade annulé")
-            return None
+    units = calculate_position_size(account_balance, entry_price, stop_price, pair)
+    if units <= 0:
+        return None
 
-        # Calcul du take profit
-        if direction == "buy":
-            take_profit_price = round(entry_price + ATR_MULTIPLIER_TP * atr, 5)
-        else:
-            take_profit_price = round(entry_price - ATR_MULTIPLIER_TP * atr, 5)
-        
-        logger.info(f"\n💖 NOUVEAU TRADE DÉTECTÉ 💖\n"
-                    f"Paire: {pair}\n"
-                    f"Direction: {direction.upper()}\n"
-                    f"Prix d'entrée: {entry_price}\n"
-                    f"Stop Loss: {stop_price}\n"
-                    f"Take Profit: {take_profit_price}\n"
-                    f"Unités: {units}\n"
-                    f"Solde compte: {account_balance}")
-        
-        trade_info = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "pair": pair,
-            "direction": direction,
-            "entry_price": entry_price,
-            "stop_price": stop_price,
-            "take_profit": take_profit_price,
-            "units": units
-        }
-        
-        if not SIMULATION_MODE:
+    # Calcul TP
+    if direction == "buy":
+        take_profit = round(entry_price + (ATR_MULTIPLIER_TP * atr), 5)
+    else:
+        take_profit = round(entry_price - (ATR_MULTIPLIER_TP * atr), 5)
+
+    logger.info(
+        f"\n💎 NOUVEAU TRADE 💎\n"
+        f"Paire: {pair}\n"
+        f"Direction: {direction.upper()}\n"
+        f"Entry: {entry_price:.5f}\n"
+        f"Stop: {stop_price:.5f}\n"
+        f"TP: {take_profit:.5f}\n"
+        f"Unités: {units}\n"
+        f"Risque: {RISK_PERCENTAGE}% du solde"
+    )
+
+    trade_info = {
+        "pair": pair,
+        "direction": direction,
+        "entry": entry_price,
+        "stop": stop_price,
+        "tp": take_profit,
+        "units": units,
+        "time": datetime.utcnow().isoformat()
+    }
+
+    if not SIMULATION_MODE:
+        try:
             order_data = {
                 "order": {
                     "instrument": pair,
@@ -175,142 +211,119 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                     "type": "MARKET",
                     "positionFill": "DEFAULT",
                     "stopLossOnFill": {
-                        "price": "{0:.5f}".format(stop_price)
+                        "price": f"{stop_price:.5f}",
+                        "timeInForce": "GTC"
                     },
                     "takeProfitOnFill": {
-                        "price": "{0:.5f}".format(take_profit_price)
-                    },
-                    "trailingStopLossOnFill": {
-                        "distance": "{0:.5f}".format(TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001)
+                        "price": f"{take_profit:.5f}",
+                        "timeInForce": "GTC"
                     }
                 }
             }
-            
-            logger.debug(f"Données de l'ordre envoyé à OANDA: {order_data}")
-            
+
             r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
             response = client.request(r)
-            
-            if 'orderCreateTransaction' in response:
-                trade_id = response['orderCreateTransaction']['id']
-                logger.info(f"✔️ Trade exécuté avec succès. ID: {trade_id}")
-                trade_info['trade_id'] = trade_id
+
+            if 'orderFillTransaction' in response:
+                trade_id = response['orderFillTransaction']['id']
+                logger.info(f"Trade exécuté! ID: {trade_id}")
+                trade_info['id'] = trade_id
                 active_trades.add(pair)
                 trade_history.append(trade_info)
                 return trade_id
             else:
-                logger.error(f"❌ Erreur dans la réponse OANDA: {response}")
+                logger.error(f"Erreur OANDA: {response}")
                 return None
-        else:
-            trade_info['trade_id'] = "SIMULATED_TRADE_ID"
-            trade_history.append(trade_info)
-            active_trades.add(pair)
-            logger.info("✅ Trade simulé (mode simulation activé)")
-            return "SIMULATED_TRADE_ID"
-            
-    except Exception as e:
-        logger.error(f"❌ Erreur critique lors de la création de l'ordre: {str(e)}", exc_info=True)
-        return None
+
+        except Exception as e:
+            logger.error(f"Erreur création ordre: {e}")
+            return None
+    else:
+        trade_info['id'] = "SIMULATION"
+        active_trades.add(pair)
+        trade_history.append(trade_info)
+        logger.info("Mode simulation - Trade non envoyé")
+        return "SIMULATION"
 
 def analyze_pair(pair):
-    """Analyse une paire de trading et exécute les trades si conditions remplies"""
-    logger.info(f"🔍 Analyse de la paire {pair}...")
+    """Analyse une paire et exécute les trades si conditions remplies"""
+    logger.info(f"Analyse de {pair}...")
+    
     try:
         params = {"granularity": "M5", "count": 50, "price": "M"}
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        client.request(r)
-        candles = r.response['candles']
+        candles = client.request(r)['candles']
 
         closes = [float(c['mid']['c']) for c in candles if c['complete']]
         highs = [float(c['mid']['h']) for c in candles if c['complete']]
         lows = [float(c['mid']['l']) for c in candles if c['complete']]
 
-        if len(closes) < 26:
-            logger.warning("Pas assez de données pour le calcul technique.")
+        if len(closes) < 20:
+            logger.warning("Données insuffisantes")
             return
 
-        close_series = pd.Series(closes)
-        high_series = pd.Series(highs)
-        low_series = pd.Series(lows)
-
-        # Calcul RSI
-        delta = close_series.diff().dropna()
-        gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-        loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+        # Calcul indicateurs
+        df = pd.DataFrame({'close': closes, 'high': highs, 'low': lows})
+        
+        # RSI
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = -delta.where(delta < 0, 0).rolling(14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
-        latest_rsi = rsi.iloc[-1]
-
-        # Calcul MACD
-        ema12 = close_series.ewm(span=12, adjust=False).mean()
-        ema26 = close_series.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        latest_macd = macd_line.iloc[-1]
-        latest_signal = signal_line.iloc[-1]
-
-        # Détection breakout
-        breakout_up = closes[-1] > max(closes[-11:-1])
-        breakout_down = closes[-1] < min(closes[-11:-1])
-        breakout_detected = breakout_up or breakout_down
-
-        logger.info(f"📊 Indicateurs {pair}:\n"
-                   f"RSI: {latest_rsi:.2f}\n"
-                   f"MACD: {latest_macd:.4f}\n"
-                   f"Signal MACD: {latest_signal:.4f}\n"
-                   f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
-
-        if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected):
-            logger.info(f"🚀 Trade potentiel détecté sur {pair}")
-            entry_price = closes[-1]
-            atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
-            
+        
+        # MACD
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        
+        # Dernières valeurs
+        last_close = closes[-1]
+        last_rsi = rsi.iloc[-1]
+        last_macd = macd.iloc[-1]
+        last_signal = signal.iloc[-1]
+        atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
+        
+        # Détection signal
+        breakout_up = last_close > max(closes[-10:-1])
+        breakout_down = last_close < min(closes[-10:-1])
+        
+        if should_open_trade(pair, last_rsi, last_macd, last_signal, breakout_up or breakout_down):
+            entry = last_close
             if breakout_up:
-                stop_price = entry_price - ATR_MULTIPLIER_SL * atr
-                direction = "buy"
-            else:
-                stop_price = entry_price + ATR_MULTIPLIER_SL * atr
-                direction = "sell"
-            
-            account_balance = get_account_balance()
-            place_trade(pair, direction, entry_price, stop_price, atr, account_balance)
-        else:
-            logger.info("📉 Pas de conditions suffisantes pour ouvrir un trade.")
+                stop = entry - (ATR_MULTIPLIER_SL * atr)
+                place_trade(pair, "buy", entry, stop, atr, get_account_balance())
+            elif breakout_down:
+                stop = entry + (ATR_MULTIPLIER_SL * atr)
+                place_trade(pair, "sell", entry, stop, atr, get_account_balance())
 
     except Exception as e:
-        logger.error(f"Erreur lors de l'analyse de {pair}: {str(e)}", exc_info=True)
+        logger.error(f"Erreur analyse {pair}: {e}")
 
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du bot de trading OANDA...")
+    logger.info("=== Démarrage du Bot OANDA ===")
     
-    # Vérification initiale de la connexion
     try:
-        account_info = accounts.AccountDetails(OANDA_ACCOUNT_ID)
-        client.request(account_info)
-        logger.info(f"✅ Connecté avec succès au compte OANDA: {OANDA_ACCOUNT_ID}")
-        logger.info(f"🔧 Mode simulation: {'ACTIVÉ' if SIMULATION_MODE else 'DÉSACTIVÉ'}")
+        balance = get_account_balance()
+        logger.info(f"Solde initial: ${balance:.2f}")
+        check_active_trades()
     except Exception as e:
-        logger.error(f"❌ Échec de la connexion à OANDA: {e}")
+        logger.error(f"Erreur initialisation: {e}")
         exit(1)
-    
+
     while True:
         now = datetime.utcnow().time()
+        
         if SESSION_START <= now <= SESSION_END:
-            logger.info("⏱ Session active - Analyse des paires...")
-            
-            # Vérifier les trades ouverts avant analyse
+            logger.info("--- Session active ---")
             check_active_trades()
             
             for pair in PAIRS:
-                try:
-                    analyze_pair(pair)
-                except Exception as e:
-                    logger.error(f"Erreur critique avec {pair}: {e}")
+                analyze_pair(pair)
+                time.sleep(1)
             
-            # Attente avec vérification plus fréquente des trades
-            for _ in range(12):  # 12 x 5 secondes = 1 minute
-                check_active_trades()
-                time.sleep(5)
+            time.sleep(60)
         else:
-            logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
-            time.sleep(300)  # Attente plus longue hors session
+            logger.info("Session inactive - Attente...")
+            time.sleep(300)
