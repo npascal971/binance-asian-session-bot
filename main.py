@@ -16,7 +16,7 @@ import oandapyV20.endpoints.pricing as pricing
 
 # Chargement des variables d'environnement
 load_dotenv()
-USE_API_PRICING = False  # True pour utiliser l'Option 2
+USE_API_PRICING = True  # True pour utiliser l'Option 2
 
 # Configuration API OANDA
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
