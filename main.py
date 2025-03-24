@@ -110,3 +110,21 @@ def compute_macd(series, short=12, long=26, signal=9):
     return macd, signal_line
 
 # Les autres fonctions place_trade(), update_trailing_stop_tp(), modify_trade(), monitor_trade(), main() restent inchangées.
+
+if __name__ == "__main__":
+    while True:
+        try:
+            candles = get_candles(PAIR)
+            direction, trigger_price = detect_asian_range_breakout(candles)
+            if direction:
+                logger.info(f"Cassure détectée ! Direction: {direction} au niveau de prix {trigger_price}")
+                entry_price = float(candles[-1]["mid"]["c"])
+                stop_price = trigger_price
+                place_trade(PAIR, direction, entry_price, stop_price, TRAILING_SL_PIPS, TRAILING_TP_PIPS)
+            else:
+                logger.info("Aucune cassure détectée.")
+        except Exception as e:
+            logger.error(f"Erreur dans le système: {e}")
+
+        time.sleep(3600)
+
