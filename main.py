@@ -25,11 +25,13 @@ client = oandapyV20.API(access_token=OANDA_API_KEY)
 
 # Paramètres de trading
 PAIR = "XAU_USD"
-RISK_PERCENTAGE = 1  # Risque par trade
+RISK_PERCENTAGE = 1
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 3.0
 SESSION_START = dtime(7, 0)
+RETEST_TOLERANCE_PIPS = 10
+RETEST_ZONE_RANGE = RETEST_TOLERANCE_PIPS * 0.0001
 
 # Configuration logs
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -110,6 +112,33 @@ def calculate_position_size(balance, entry_price, stop_price):
     units = int(risk_amount / stop_distance)
     return units
 
+def detect_reversal_structure(candles, direction):
+    closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
+    macd, signal = compute_macd(closes)
+    rsi = compute_rsi(closes)
+    if direction == "BUY" and rsi.iloc[-1] > 50 and macd.iloc[-1] > signal.iloc[-1]:
+        return True
+    elif direction == "SELL" and rsi.iloc[-1] < 50 and macd.iloc[-1] < signal.iloc[-1]:
+        return True
+    return False
+
+def wait_for_retest_and_reversal(pair, breakout_level, direction):
+    logger.info("En attente de retest...")
+    for _ in range(12):
+        candles = get_candles(pair, count=20, granularity="M5")
+        last_close = float(candles[-1]["mid"]["c"])
+        if direction == "BUY" and abs(last_close - breakout_level) <= RETEST_ZONE_RANGE:
+            if detect_reversal_structure(candles, direction):
+                logger.info("Retest confirmé avec structure de retournement LTF.")
+                return True
+        elif direction == "SELL" and abs(last_close - breakout_level) <= RETEST_ZONE_RANGE:
+            if detect_reversal_structure(candles, direction):
+                logger.info("Retest confirmé avec structure de retournement LTF.")
+                return True
+        time.sleep(300)
+    logger.info("Pas de retest structuré détecté.")
+    return False
+
 def place_trade(pair, direction, entry_price, stop_price, atr):
     balance = get_account_balance()
     units = calculate_position_size(balance, entry_price, stop_price)
@@ -153,10 +182,13 @@ if __name__ == "__main__":
                 signal = generate_trade_signal(candles)
                 if direction and signal == direction:
                     logger.info(f"Cassure détectée ! Direction: {direction} au niveau de prix {trigger_price}")
-                    entry_price = float(candles[-1]["mid"]["c"])
-                    stop_price = trigger_price
-                    atr = compute_atr(candles)
-                    place_trade(PAIR, direction, entry_price, stop_price, atr)
+                    if wait_for_retest_and_reversal(PAIR, trigger_price, direction):
+                        entry_price = float(candles[-1]["mid"]["c"])
+                        stop_price = trigger_price
+                        atr = compute_atr(candles)
+                        place_trade(PAIR, direction, entry_price, stop_price, atr)
+                    else:
+                        logger.info("Aucune structure de retournement détectée après retest.")
                 else:
                     logger.info("Aucune cassure ou signal technique contradictoire.")
                 monitor_open_trades()
