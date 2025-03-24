@@ -450,7 +450,7 @@ def run_scheduler(self):
                 logging.info("===== Début de la tâche programmée =====")
                 self.analyze_session()
                 self.execute_post_session_trades()
-                self.monitor_trade()
+                self.monitor_trades()
                 logging.info("===== Fin de la tâche programmée =====")
             else:
                 logging.info("En dehors de la plage horaire de trading (10h00-17h00). Attente...")
