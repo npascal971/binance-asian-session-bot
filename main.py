@@ -161,9 +161,13 @@ def place_trade(pair, direction, entry_price, stop_price, atr):
             "takeProfitOnFill": {"price": f"{take_profit_price:.5f}"}
         }
     }
-    r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=data)
-    client.request(r)
-    logger.info(f"Trade exécuté : {direction} {units} unités de {pair} | SL dynamique: {trailing_stop_distance:.5f}, TP: {take_profit_price:.5f}")
+    try:
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=data)
+        client.request(r)
+        logger.info(f"Trade exécuté : {direction} {units} unités de {pair} | SL dynamique: {trailing_stop_distance:.5f}, TP: {take_profit_price:.5f}")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi de l'ordre : {e}")
+        send_email("Erreur d'exécution du trade", f"Une erreur est survenue lors de l'exécution du trade : {e}")
 
 def monitor_open_trades():
     r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
@@ -199,4 +203,5 @@ if __name__ == "__main__":
                 monitor_open_trades()
             except Exception as e:
                 logger.error(f"Erreur dans le système: {e}")
+                send_email("Erreur dans le système de trading", f"Une erreur est survenue dans le bot de trading : {e}")
         time.sleep(3600)
