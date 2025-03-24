@@ -55,24 +55,20 @@ INSTRUMENT_DETAILS = {}
 
 def get_instrument_details(pair):
     """Récupère les spécifications de l'instrument"""
-    if pair in INSTRUMENT_DETAILS:
-        return INSTRUMENT_DETAILS[pair]
-    
     try:
-        params = {"instruments": pair}
-        r = instruments.InstrumentsDetails(accountID=OANDA_ACCOUNT_ID, params=params)
-        details = client.request(r)['instruments'][0]
+        r = instruments.InstrumentsInstrumentDetails(
+            accountID=OANDA_ACCOUNT_ID,
+            instrument=pair
+        )
+        response = client.request(r)
+        details = response['instrument']
         
-        spec = {
+        return {
             'pip_location': int(details['pipLocation']),
             'min_units': float(details['minimumTradeSize']),
-            'units_precision': int(details['tradeUnitsPrecision'])
+            'units_precision': int(details['tradeUnitsPrecision']),
+            'margin_rate': float(details['marginRate'])
         }
-        
-        INSTRUMENT_DETAILS[pair] = spec
-        logger.info(f"📋 Spécifications {pair}: PipLocation=10^{spec['pip_location']}")
-        return spec
-        
     except Exception as e:
         logger.error(f"❌ Erreur récupération détails {pair}: {str(e)}")
         return None
