@@ -142,6 +142,9 @@ def wait_for_retest_and_reversal(pair, breakout_level, direction):
 def place_trade(pair, direction, entry_price, stop_price, atr):
     balance = get_account_balance()
     units = calculate_position_size(balance, entry_price, stop_price)
+    if units == 0:
+        logger.warning("Taille de position calculée à 0. Trade annulé.")
+        return
     if direction == "SELL":
         units = -units
     sl_distance = atr * ATR_MULTIPLIER_SL
@@ -169,8 +172,8 @@ def monitor_open_trades():
         sl = trade.get("trailingStopLoss")
         tp = trade.get("takeProfit")
         logger.info(f"Trade actif {trade['instrument']} | PnL latent: {unrealized_pl:.2f} USD | SL: {sl.get('distance', 'N/A')} | TP: {tp.get('price', 'N/A')}")
-        if trade["state"] == "CLOSED":
-            send_email("Trade fermé", f"Trade fermé avec PnL: {unrealized_pl:.2f} USD")
+        if trade.get("state") == "CLOSED" or unrealized_pl < -100:
+            send_email("Trade fermé ou perte importante", f"Trade fermé ou perte > 100 USD détectée. PnL: {unrealized_pl:.2f} USD")
 
 if __name__ == "__main__":
     logger.info("Démarrage du bot de trading Asian Session...")
@@ -195,4 +198,4 @@ if __name__ == "__main__":
                 monitor_open_trades()
             except Exception as e:
                 logger.error(f"Erreur dans le système: {e}")
-        time.sleep(60)
+        time.sleep(3600)
