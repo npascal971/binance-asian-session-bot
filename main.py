@@ -42,11 +42,10 @@ logger = logging.getLogger()
 SIMULATION_MODE = True
 
 trade_history = []
-
 CRYPTO_PAIRS = ["BTC_USD", "ETH_USD"]
+active_trades = set()
 
 # Détection de signaux techniques
-
 def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected):
     signal_detected = False
     reason = []
@@ -76,59 +75,38 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected):
 
     return signal_detected
 
-# Calcul ATR
-
-def compute_atr(candles, period=14):
-    highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
-    lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
-    closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
-
-    tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])) for i in range(1, len(closes))]
-    atr = pd.Series(tr_list).rolling(window=period).mean().iloc[-1]
-    return atr
-
-# Calcul des unités
-
-def calculate_trade_units(entry_price, stop_loss_price, balance):
-    risk_amount = min(balance * RISK_PERCENTAGE / 100, RISK_AMOUNT_CAP)
-    risk_per_unit = abs(entry_price - stop_loss_price)
-    if risk_per_unit == 0:
+# Calcul de la taille de position ajustée au prix de l'instrument
+def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
+    risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
+    pip_value = abs(entry_price - stop_loss_price)
+    if pip_value == 0:
         return 0
-    units = risk_amount / risk_per_unit
+    units = risk_amount / pip_value
+    if pair in CRYPTO_PAIRS or pair == "XAU_USD":
+        units = units / entry_price
     return int(units)
 
-# Envoi d'e-mail
+# Ouverture du trade
+def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
+    if pair in active_trades:
+        logger.info(f"🚫 Trade déjà actif sur {pair}, aucun nouveau trade ne sera ouvert.")
+        return None
 
-def send_email(subject, body):
-    msg = EmailMessage()
-    msg.set_content(body)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_ADDRESS
-    msg["To"] = EMAIL_ADDRESS
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-        smtp.send_message(msg)
+    units = calculate_position_size(account_balance, entry_price, stop_price, pair)
+    take_profit_price = entry_price + ATR_MULTIPLIER_TP * atr if direction == "buy" else entry_price - ATR_MULTIPLIER_TP * atr
 
-# Balance du compte
-
-def get_account_balance():
-    r = accounts.AccountSummary(OANDA_ACCOUNT_ID)
-    client.request(r)
-    return float(r.response["account"]["balance"])
-
-# Placement de trade
-
-def place_trade(pair, direction, entry_price, stop_price, atr, units):
-    logger.info(f"💖 Nouveau trade exécuté 💖 {pair} | Direction: {direction} | Entrée: {entry_price} | SL: {stop_price} | Unités: {units}")
+    logger.info(f"💖 Nouveau trade exécuté 💖 {pair} | Direction: {direction} | Entrée: {entry_price} | SL: {stop_price} | TP: {take_profit_price} | Unités: {units}")
     trade_info = {
         "timestamp": datetime.utcnow().isoformat(),
         "pair": pair,
         "direction": direction,
         "entry_price": entry_price,
         "stop_price": stop_price,
+        "take_profit": take_profit_price,
         "units": units
     }
     trade_history.append(trade_info)
+    active_trades.add(pair)
 
     if not SIMULATION_MODE:
         order_data = {
@@ -137,7 +115,9 @@ def place_trade(pair, direction, entry_price, stop_price, atr, units):
                 "units": str(units if direction == "buy" else -units),
                 "type": "MARKET",
                 "positionFill": "DEFAULT",
-                "stopLossOnFill": {"price": str(stop_price)}
+                "stopLossOnFill": {"price": str(stop_price)},
+                "takeProfitOnFill": {"price": str(take_profit_price)},
+                "trailingStopLossOnFill": {"distance": str(TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001)}
             }
         }
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
@@ -145,16 +125,17 @@ def place_trade(pair, direction, entry_price, stop_price, atr, units):
         logger.info(f"✔️ Trade envoyé à OANDA. ID de commande: {r.response['orderCreateTransaction']['id']}")
     return "SIMULATED_TRADE_ID" if SIMULATION_MODE else r.response['orderCreateTransaction']['id']
 
-# Analyse par paire
+# Balance du compte
+def get_account_balance():
+    r = accounts.AccountSummary(OANDA_ACCOUNT_ID)
+    client.request(r)
+    return float(r.response["account"]["balance"])
 
+# Exemple d'intégration dans une boucle d'analyse
 def analyze_pair(pair):
     logger.info(f"🔍 Analyse de la paire {pair}...")
     try:
-        params = {
-            "granularity": "M5",
-            "count": 50,
-            "price": "M"
-        }
+        params = {"granularity": "M5", "count": 50, "price": "M"}
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         client.request(r)
         candles = r.response['candles']
@@ -168,6 +149,7 @@ def analyze_pair(pair):
             return
 
         close_series = pd.Series(closes)
+
         delta = close_series.diff().dropna()
         gain = delta.where(delta > 0, 0).rolling(window=14).mean()
         loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
@@ -186,24 +168,21 @@ def analyze_pair(pair):
         breakout_down = closes[-1] < min(closes[-11:-1])
         breakout_detected = breakout_up or breakout_down
 
-        logger.info(f"🔠 RSI: {latest_rsi:.2f} | MACD: {latest_macd:.4f} | Signal MACD: {latest_signal:.4f} | Breakout: {breakout_detected}")
+        logger.info(f"🌠 RSI: {latest_rsi:.2f} | MACD: {latest_macd:.4f} | Signal MACD: {latest_signal:.4f} | Breakout: {breakout_detected}")
 
         if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected):
+            logger.info(f"🚀 Trade potentiel détecté sur {pair} selon les critères techniques ou breakout.")
             entry_price = closes[-1]
-            atr = compute_atr(candles)
+            atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
             stop_price = entry_price - ATR_MULTIPLIER_SL * atr if breakout_up else entry_price + ATR_MULTIPLIER_SL * atr
-            balance = get_account_balance()
-            units = calculate_trade_units(entry_price, stop_price, balance)
             direction = "buy" if breakout_up else "sell"
-            place_trade(pair, direction, entry_price, stop_price, atr, units)
-            send_email("Signal de Trade Détecté", f"Trade détecté sur {pair} | Direction: {direction} | Prix d'entrée: {entry_price}")
+            account_balance = get_account_balance()
+            place_trade(pair, direction, entry_price, stop_price, atr, account_balance)
         else:
             logger.info("📉 Pas de conditions suffisantes pour ouvrir un trade.")
 
     except Exception as e:
         logger.error(f"Erreur lors de l'analyse de {pair} : {e}")
-
-# Boucle principale
 
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du bot de trading Asian Session...")
