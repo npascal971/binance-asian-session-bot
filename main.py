@@ -70,7 +70,7 @@ class AsianSessionTrader:
         self.active_trades = {}
         self.asian_session = {"start": {"hour": 23, "minute": 0}, "end": {"hour": 10, "minute": 0}}
         self.us_session = {"start": {"hour": 14, "minute": 0}, "end": {"hour": 21, "minute": 0}}
-        self.trading_hours = {"start": {"hour": 2, "minute": 0}, "end": {"hour": 23, "minute": 50}}
+        self.trading_hours = {"start": {"hour": 10, "minute": 0}, "end": {"hour": 17, "minute": 0}}
         if not os.path.exists("reports"):
             os.makedirs("reports")
 
