@@ -195,4 +195,4 @@ if __name__ == "__main__":
                 monitor_open_trades()
             except Exception as e:
                 logger.error(f"Erreur dans le système: {e}")
-        time.sleep(3600)
+        time.sleep(60)
