@@ -802,12 +802,13 @@ def calculate_tp(entry, asian_range, direction, daily_zone=None):
 
 def handle_weekend(now):
     """Gère spécifiquement la fermeture du week-end"""
+    global end_of_day_processed
     close_all_trades()
     next_monday = now + timedelta(days=(7 - now.weekday()))
     sleep_seconds = (next_monday - now).total_seconds()
     logger.info(f"⛔ Week-end - Prochaine ouverture à {LONDON_SESSION_START.strftime('%H:%M')} UTC")
     time.sleep(min(sleep_seconds, 21600))  # Max 6h
-
+    end_of_day_processed = True
 
 def log_session_status():
     """Affiche un résumé complet du statut"""
