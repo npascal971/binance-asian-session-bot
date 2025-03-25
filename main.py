@@ -103,6 +103,13 @@ INSTRUMENT_SPECS = {
     "ETH_USD": {"pip": 0.1, "min_units": 0.001, "precision": 6, "margin_rate": 0.05}
 }
 
+BUFFER_SETTINGS = {
+    'FOREX': 0.0003,    # 3 pips
+    'JPY_PAIRS': 0.03,  # 30 pips
+    'XAU_USD': 0.3,     # 30 cents
+    'CRYPTO': 5.0       # $5 pour BTC/ETH
+}
+
 def get_account_balance():
     """Récupère le solde du compte"""
     try:
@@ -664,43 +671,36 @@ def identify_order_blocks(candles, lookback=100):
     return filtered_ob
     
 def analyze_pair(pair):
-    """Version finale avec tous les filtres et gestion d'erreur unique"""
+    """Version optimisée avec gestion des buffers dynamiques et requêtes API réduites"""
     try:
-        # Vérification initiale des données
+        # 1. Récupération initiale des données (une seule requête HTF)
         htf_data = get_htf_data(pair)
-        if not htf_data or len(htf_data) < 10:  # Minimum 10 bougies
-            logger.warning(f"⚠️ Données insuffisantes pour {pair}")
+        if not htf_data or len(htf_data) < 10:
+            logger.warning(f"⚠️ Données HTF insuffisantes pour {pair} ({len(htf_data) if htf_data else 0} bougies)")
             return
 
-        # 1. Vérification tendance HTF
-        trend = check_htf_trend(pair)
+        # 2. Récupération simultanée du prix et du range
+        current_price, asian_range = get_current_price(pair), get_asian_range(pair)
+        if None in (current_price, asian_range):
+            return
+
+        # 3. Vérification tendance avec cache
+        trend = check_htf_trend(pair, htf_data)  # Modifié pour utiliser les données existantes
         if trend == 'NEUTRAL':
-            logger.debug(f"↔️ {pair} en range - Aucun trade")
+            logger.debug(f"↔️ {pair} en range (Prix: {current_price:.5f})")
             return
 
-        # 2. Récupération du range asiatique
-        asian_range = get_asian_range(pair)
-        current_price = get_current_price(pair)
+        # 4. Buffer dynamique selon l'instrument
+        buffer = get_buffer_size(pair)  # Nouvelle fonction à créer
         
-        # 3. Vérification du contexte de prix
-        if not is_price_in_valid_range(current_price, asian_range, trend):
-            logger.debug(f"🔍 {pair}: Prix hors range asiatique valide")
+        # 5. Vérification prix dans le range élargi
+        if not (asian_range['low'] - buffer <= current_price <= asian_range['high'] + buffer):
+            logger.debug(f"🔍 {pair}: {current_price:.5f} hors range {asian_range['low']-buffer:.5f}-{asian_range['high']+buffer:.5f}")
             return
 
-        # 4. Détection des zones de trading
+        # 6. Analyse des zones (utilise les données HTF déjà chargées)
         fvgs = identify_fvg(htf_data)
         obs = identify_order_blocks(htf_data)
-
-        # 5. Vérification des zones FVG/OB
-        in_fvg, fvg_zone = is_price_in_fvg(current_price, fvgs)
-        near_ob, ob_zone = is_price_near_ob(current_price, obs, trend)
-
-        if not (in_fvg and near_ob):
-            logger.debug(f"🔍 {pair}: Aucune zone FVG/OB valide")
-            return
-
-        # 6. Détermination de la direction
-        direction = 'BUY' if trend == 'UP' else 'SELL'
         
         # 7. Vérification de la confluence
         confluence_score = check_confluence(pair, direction)
@@ -746,6 +746,19 @@ def analyze_pair(pair):
 
     except Exception as e:
         logger.error(f"❌ Erreur analyse {pair}: {str(e)}", exc_info=True)
+
+def get_buffer_size(pair):
+    """Retourne le buffer adapté à chaque instrument"""
+    buffers = {
+        'EUR_USD': 0.0003,  # 3 pips
+        'GBP_USD': 0.0003,
+        'USD_JPY': 0.03,    # 30 pips
+        'XAU_USD': 0.3,      # 0.3$
+        'BTC_USD': 10.0,
+        'ETH_USD': 5.0
+    }
+    return buffers.get(pair, 0.0005)  # Valeur par défaut
+
 def calculate_tp_from_structure(fvg, direction):
     """Calcule le TP basé sur la taille du FVG"""
     fvg_size = abs(fvg['top'] - fvg['bottom'])
