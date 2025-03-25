@@ -16,6 +16,7 @@ import oandapyV20.endpoints.pricing as pricing
 import requests
 from datetime import timedelta
 
+
 # Chargement des variables d'environnement
 load_dotenv()
 
@@ -47,7 +48,7 @@ SESSION_START = LONDON_SESSION_START  # On garde pour compatibilité
 SESSION_END = NY_SESSION_END
 # Configuration des logs avec emojis
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # ← Changez de INFO à DEBUG
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
@@ -550,11 +551,16 @@ def get_candles(pair, start_time, end_time=None):
     
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        return client.request(r)['candles']
+        candles = client.request(r)['candles']
+        
+        # AJOUTEZ CE LOG ICI ↓
+        logger.debug(f"🕯️ Candles reçues pour {pair}: {candles[:1]}")  # Affiche la première bougie
+        
+        return candles
     except Exception as e:
         logger.error(f"❌ Erreur récupération candles {pair}: {str(e)}")
         return []
-
+        
 def identify_fvg(candles, lookback=50):
     """
     Identifie les Fair Value Gaps (FVG) sur les données historiques
