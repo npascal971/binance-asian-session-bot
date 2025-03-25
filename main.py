@@ -737,11 +737,11 @@ def get_candles(pair, start_time, end_time=None):
         logger.warning(f"⚠️ Plage temporelle ajustée pour {pair}")
 
     params = {
-        "instruments": ",".join(instruments),
-        "granularity": "H4",
-        "count": 100
+         "granularity": "M5",
+         "from": start_date.isoformat() + "Z",
+         "to": end_date.isoformat() + "Z",
+         "price": "M"
     }
-    return client.request(instruments.InstrumentsCandles(params))
     
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
