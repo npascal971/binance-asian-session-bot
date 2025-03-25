@@ -1298,26 +1298,59 @@ while True:
         # 3. Mise à jour quotidienne
         if not daily_data_updated and current_time >= dtime(0, 30):
             update_daily_zones()
-
+            
         # 4. Session Asiatique (00:00-06:00 UTC)
-        if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+        current_utc_time = datetime.utcnow().time()
+        if ASIAN_SESSION_START <= current_utc_time < ASIAN_SESSION_END:
+            logger.info(f"🌐 DÉTECTION SESSION ASIATIQUE ACTIVE (UTC: {current_utc_time})")
+    
             if not asian_range_calculated:
-                logger.info("🌏 Début analyse session asiatique")
+                logger.info("🌏 LANCEMENT ANALYSE ASIATIQUE APPROFONDIE")
                 for pair in PAIRS:
-                    # Version optimisée de store_asian_range()
-                    candles = get_candles(pair, ASIAN_SESSION_START, current_time)
-                    if candles:
-                        highs = [float(c['mid']['h']) for c in candles if 'mid' in c]
-                        lows = [float(c['mid']['l']) for c in candles if 'mid' in c]
-                        if highs and lows:
-                            asian_ranges[pair] = {
-                                'high': max(highs),
-                                'low': min(lows),
-                                'time': now
-                            }
+                    try:
+                        # Récupération depuis le début de session
+                        start_dt = datetime.combine(datetime.utcnow().date(), ASIAN_SESSION_START)
+                        end_dt = datetime.utcnow()
+                
+                        candles = get_candles(pair, start_dt.time(), end_dt.time())
+                
+                        if not candles:
+                            logger.warning(f"⚠️ Aucune donnée pour {pair}")
+                            continue
+                    
+                        # Validation des données
+                        valid_candles = [c for c in candles if c['complete'] and 'mid' in c]
+                        if not valid_candles:
+                            continue
+                    
+                        highs = [float(c['mid']['h']) for c in valid_candles]
+                        lows = [float(c['mid']['l']) for c in valid_candles]
+                
+                        # Calcul avec buffer
+                        buffer = BUFFER_SETTINGS.get(pair, 0.0003)
+                        asian_ranges[pair] = {
+                            'high': max(highs) + buffer,
+                            'low': min(lows) - buffer,
+                            'time': datetime.utcnow(),
+                            'samples': len(valid_candles)
+                        }
+                
+                        logger.info(f"""
+                        📊 RÉSULTAT {pair}:
+                        • High: {asian_ranges[pair]['high']:.5f}
+                        • Low: {asian_ranges[pair]['low']:.5f}
+                        • Bougies analysées: {asian_ranges[pair]['samples']}
+                        """)
+                
+                    except Exception as e:
+                        logger.error(f"❌ ERREUR {pair}: {str(e)}")
+                        continue
+                
                 asian_range_calculated = True
-                logger.info("✅ Analyse session asiatique terminée")
-            time.sleep(300)  # Attente avant prochaine vérification
+                logger.info("✅ ANALYSE ASIATIQUE TERMINÉE")
+    
+            # Surveillance continue
+            time.sleep(60)  # Réduisez l'intervalle
             continue
 
         # 5. Pause Entre Sessions (06:00-07:00 UTC)
