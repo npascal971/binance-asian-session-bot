@@ -15,6 +15,7 @@ import oandapyV20.endpoints.trades as trades
 import oandapyV20.endpoints.pricing as pricing
 import requests
 from datetime import timedelta
+from datetime import time
 
 
 # Chargement des variables d'environnement
@@ -62,7 +63,7 @@ RISK_REWARD_RATIO = 1.5  # Ratio minimal risque/récompense
 MIN_CONFLUENCE_SCORE = 2  # Nombre minimal d'indicateurs favorables
 daily_data_updated = False
 MACRO_API_KEY = os.getenv("MACRO_API_KEY")  # Clé pour FRED/Quandl
-ECONOMIC_CALENDAR_API = "https://economic-calendar.com/api"  # Exemple
+ECONOMIC_CALENDAR_API = "https://api.fxstreet.com/v1/economic-calendar"
 asian_ranges = {}  # Dictionnaire pour stocker les ranges
 asian_range_calculated = False  # Flag de contrôle
 
@@ -333,25 +334,25 @@ def check_economic_calendar(pair):
     events = IMPORTANT_EVENTS.get(base_currency, [])
     
     try:
-        # Exemple d'API calendrier économique
+        if not ECONOMIC_CALENDAR_API:
+            return []
+            
         params = {
             "currency": base_currency,
             "importance": "HIGH,MEDIUM",
             "api_key": MACRO_API_KEY
         }
-        response = requests.get(ECONOMIC_CALENDAR_API, params=params).json()
+        response = requests.get(ECONOMIC_CALENDAR_API, params=params, timeout=5).json()
         
-        upcoming_events = [
+        return [
             (e["title"], e["date"], e["impact"])
-            for e in response["events"]
+            for e in response.get("events", [])
             if e["title"] in events
         ]
         
-        return upcoming_events
-        
     except Exception as e:
         logger.warning(f"⚠️ Erreur calendrier: {str(e)}")
-        return []
+        return []  # Return empty list instead of failing
 
 def get_historical_prices(instrument, periods):
     """
