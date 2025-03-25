@@ -505,12 +505,13 @@ def update_daily_zones():
                 'time': datetime.utcnow().date()
             }
             
-            
+        except Exception as e:
+            logger.error(f"❌ Erreur MAJ zones quotidiennes: {str(e)}")
+            daily_data_updated = False
+            continue
+    
     logger.info("📊 Zones quotidiennes mises à jour")
-        daily_data_updated = True
-    except Exception as e:
-        logger.error(f"❌ Erreur MAJ zones quotidiennes: {str(e)}")
-        daily_data_updated = False
+    daily_data_updated = True
 
 
 def get_candles(pair, start_time, end_time=None):
