@@ -1317,13 +1317,17 @@ while True:
 
 
 # Remplacez la condition de session asiatique par :
-        current_utc = datetime.now(UTC).time()
+        current_utc = datetime.utcnow().time()
         if ASIAN_SESSION_START <= current_utc < ASIAN_SESSION_END:
             logger.info(f"🌏 DÉTECTION SESSION ASIATIQUE ({current_utc} UTC)")
     
             if not asian_range_calculated:
                 logger.info("🔍 DÉBUT ANALYSE ASIATIQUE APPROFONDIE")
-        
+                process_asian_session()  # Extraire cette logique dans une fonction
+            else:
+                logger.debug("Session asiatique déjà analysée")
+            time.sleep(60)
+            continue
                 # 1. Récupération des données
                 start_dt = datetime.now(UTC).replace(hour=0, minute=0, second=0)
                 end_dt = datetime.now(UTC)
