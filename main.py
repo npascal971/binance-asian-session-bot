@@ -785,7 +785,7 @@ def calculate_stop(fvg_zone, ob_zone, asian_range, direction):
     else:
         return max(fvg_zone['top'], ob_zone['high'], asian_range['high']) + 0.0005
 
-ddef calculate_tp(entry, asian_range, direction, daily_zone=None):
+def calculate_tp(entry, asian_range, direction, daily_zone=None):
     """Calcule le take-profit avec référence au range asiatique"""
     range_size = asian_range['high'] - asian_range['low']
     
