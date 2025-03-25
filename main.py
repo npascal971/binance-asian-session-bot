@@ -1285,9 +1285,7 @@ logger.info(f"""
 - London Session config: {LONDON_SESSION_START}-{NY_SESSION_END}
 """)
 
-# Test manuel immédiat
-test_time = datetime.now(pytz.UTC).time()
-logger.info(f"TEST MANUEL: Asian active? {ASIAN_SESSION_START <= test_time < ASIAN_SESSION_END}")
+
 # Boucle principale
 while True:
     try:
@@ -1295,118 +1293,119 @@ while True:
         current_time = now.time()
         weekday = now.weekday()
 
-        logger.info(f"🔄 Cycle début - {now} (UTC) | Session: {'ASIE' if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END else 'LON/NY' if LONDON_SESSION_START <= current_time <= NY_SESSION_END else 'HORS-SESSION'}")
+        # Détermination précise de la session
+        if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+            session_type = "ASIE"
+        elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+            session_type = "LON/NY"
+        else:
+            session_type = "HORS-SESSION"
+
+        logger.info(f"\n🔄 Cycle début - {now} (UTC) | Session: {session_type}")
 
         # 1. Gestion Week-End
         if weekday >= 5:
             handle_weekend(now)
             continue
 
-        # 2. Réinitialisation quotidienne
+        # 2. Réinitialisation quotidienne (à 00:00 UTC)
         if current_time.hour == 0 and current_time.minute < 30:
+            logger.info("🔄 Réinitialisation quotidienne des données")
             daily_data_updated = False
             asian_range_calculated = False
             end_of_day_processed = False
 
-        # 3. Mise à jour quotidienne
+        # 3. Mise à jour des données journalières (après 00:30 UTC)
         if not daily_data_updated and current_time >= dtime(0, 30):
             update_daily_zones()
             
         # 4. Session Asiatique (00:00-06:00 UTC)
-        # Ajoutez en haut du fichier
-
-
-# Remplacez la condition de session asiatique par :
-        current_utc = datetime.utcnow().time()
-        if ASIAN_SESSION_START <= current_utc < ASIAN_SESSION_END:
-            logger.info(f"🌏 DÉTECTION SESSION ASIATIQUE ({current_utc} UTC)")
-    
+        if session_type == "ASIE":
+            logger.info(f"🌏 DÉBUT SESSION ASIATIQUE ({current_time})")
+            
             if not asian_range_calculated:
-                logger.info("🔍 DÉBUT ANALYSE ASIATIQUE APPROFONDIE")
-               
-                # 1. Récupération des données
-                start_dt = datetime.now(UTC).replace(hour=0, minute=0, second=0)
-                end_dt = datetime.now(UTC)
-        
-                for pair in PAIRS:
-                    try:
-                        # 2. Requête avec plage temporelle précise
+                logger.info("🔍 Calcul des ranges asiatiques...")
+                try:
+                    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    end_dt = now
+                    
+                    for pair in PAIRS:
                         params = {
                             "granularity": "H1",
                             "from": start_dt.isoformat() + "Z",
                             "to": end_dt.isoformat() + "Z",
                             "price": "M"
                         }
+                        
                         candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
-                
-                        # 3. Validation des données
                         valid_candles = [c for c in candles if c['complete']]
-                        if not valid_candles:
-                            continue
+                        
+                        if valid_candles:
+                            highs = [float(c['mid']['h']) for c in valid_candles]
+                            lows = [float(c['mid']['l']) for c in valid_candles]
+                            
+                            asian_ranges[pair] = {
+                                'high': max(highs),
+                                'low': min(lows),
+                                'time': end_dt,
+                                'candles': len(valid_candles)
+                            }
+                            
+                            logger.info(f"📊 {pair} Range: {asian_ranges[pair]['low']:.5f}-{asian_ranges[pair]['high']:.5f}")
+                
+                    asian_range_calculated = True
+                    logger.info("✅ Analyse asiatique terminée")
                     
-                        # 4. Calcul du range
-                        highs = [float(c['mid']['h']) for c in valid_candles]
-                        lows = [float(c['mid']['l']) for c in valid_candles]
-                
-                        asian_ranges[pair] = {
-                            'high': max(highs),
-                            'low': min(lows),
-                            'time': end_dt,
-                            'candles': len(valid_candles)
-                        }
-                
-                        logger.info(f"""
-                            📊 RÉSULTAT {pair}:
-                        • High: {asian_ranges[pair]['high']:.5f}
-                        • Low: {asian_ranges[pair]['low']:.5f} 
-                        • Bougies analysées: {asian_ranges[pair]['candles']}
-                        • Dernière bougie: {valid_candles[-1]['time']}
-                        """)
-                
-                    except Exception as e:
-                        logger.error(f"❌ ERREUR {pair}: {str(e)}")
-                        continue
-                
-                asian_range_calculated = True
-                logger.info("✅ ANALYSE ASIATIQUE TERMINÉE")
-    
-            # Surveillance continue
-            time.sleep(60)
+                except Exception as e:
+                    logger.error(f"❌ Erreur analyse asiatique: {str(e)}")
+            
+            # Vérification toutes les 5 minutes
+            time.sleep(300)
             continue
-                
+
         # 5. Pause Entre Sessions (06:00-07:00 UTC)
-        if ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
+        if session_type == "HORS-SESSION" and ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
+            logger.debug("⏳ Pause entre sessions")
             time.sleep(60)
             continue
 
         # 6. Session Active (Londres + NY, 07:00-16:30 UTC)
-        if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+        if session_type == "LON/NY":
             cycle_start = time.time()
+            logger.info("🏙️ SESSION LONDRES/NY ACTIVE")
             
-            # Vérification événements macro
+            # Vérification des événements macro
             if check_high_impact_events():
+                logger.warning("⚠️ Événement macro majeur - Pause de 5min")
                 time.sleep(300)
                 continue
                 
-            # Analyse des paires
+            # Analyse et trading
             active_trades = check_active_trades()
-            for pair in PAIRS:
-                analyze_pair(pair)
+            logger.info(f"📊 Trades actifs: {len(active_trades)}")
             
+            for pair in PAIRS:
+                if pair not in active_trades:
+                    analyze_pair(pair)
+                else:
+                    logger.debug(f"⏩ Trade actif sur {pair} - Analyse ignorée")
+            
+            # Gestion des TP/SL
             check_tp_sl()
             
             # Timing dynamique
             elapsed = time.time() - cycle_start
             sleep_time = max(30 - elapsed, 5)
-            logger.debug(f"⏱ Prochain cycle trading dans {sleep_time:.1f}s")
+            logger.debug(f"⏱ Prochain cycle dans {sleep_time:.1f}s")
             time.sleep(sleep_time)
             continue
 
         # 7. Après Fermeture (16:30-00:00 UTC)
-        if not end_of_day_processed:
-            logger.info("🌙 Fermeture de session - Liquidation des positions")
+        if session_type == "HORS-SESSION" and not end_of_day_processed:
+            logger.info("🌙 Fermeture de session - Vérification des positions")
             close_all_trades()
             end_of_day_processed = True
+            log_daily_summary()  # À implémenter pour un rapport journalier
             
         time.sleep(60)
 
