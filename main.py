@@ -608,7 +608,7 @@ def analyze_pair(pair):
 
         # 8. Calcul des niveaux
         stop_loss = calculate_stop(fvg_zone, ob_zone, direction)
-        take_profit = calculate_tp(current_price, direction, daily_zones.get(pair, {})
+        take_profit = calculate_tp(current_price, direction, daily_zones.get(pair, {}))
         
         # 9. Journalisation détaillée
         logger.info(f"""
