@@ -1162,14 +1162,20 @@ if __name__ == "__main__":
 
         # 5. Session Active (Londres + NY)
             if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+                cycle_start = time.time()  # <-- AJOUTEZ CETTE LIGNE
                 active_trades = check_active_trades()
-            
+    
                 for pair in PAIRS:
                     analyze_pair(pair)
-            
+    
                 check_tp_sl()
-                time.sleep(max(30 - (time.time() - start_time), 5))
+    
+                elapsed = time.time() - cycle_start
+                sleep_time = max(30 - elapsed, 5)  # 30s target avec minimum 5s
+                logger.debug(f"⏱ Prochain cycle dans {sleep_time:.1f}s (Traitement: {elapsed:.2f}s)")
+                time.sleep(sleep_time)
                 continue
+
 
         # 6. Hors session
             if not end_of_day_processed:
