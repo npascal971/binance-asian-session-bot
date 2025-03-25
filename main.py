@@ -606,53 +606,70 @@ def identify_fvg(candles, lookback=50):
 def identify_order_blocks(candles, lookback=100):
     """
     Identifie les Order Blocks (OB) sur les données historiques
-    Args:
-        candles: Liste des bougies OHLC
-        lookback: Nombre de bougies à analyser
-    Returns:
-        Dictionnaire des OB (bullish et bearish)
+    Version corrigée pour gérer le format OANDA v3
     """
     ob_bullish = []
     ob_bearish = []
     candles = candles[-lookback:]
     
     for i in range(2, len(candles)):
-        prev = candles[i-1]['mid']
-        curr = candles[i]['mid']
+        prev = candles[i-1]
+        curr = candles[i]
+        
+        # Vérification que les données nécessaires existent
+        if not all(key in prev['mid'] for key in ['o', 'h', 'l', 'c']):
+            continue
+            
+        prev_open = float(prev['mid']['o'])
+        prev_close = float(prev['mid']['c'])
+        curr_open = float(curr['mid']['o'])
+        curr_close = float(curr['mid']['c'])
         
         # OB haussier (grosse bougie verte suivie d'une bougie rouge)
-        if float(prev['c']) > float(prev['o']) and float(curr['c']) < float(curr['o']):
+        if prev_close > prev_open and curr_close < curr_open:
             ob_bullish.append({
-                'high': float(prev['h']),
-                'low': float(prev['l']),
-                'open': float(prev['o']),
-                'close': float(prev['c']),
-                'time': prev['time'],
-                'volume': candles[i-1]['volume']
+                'high': float(prev['mid']['h']),
+                'low': float(prev['mid']['l']),
+                'open': prev_open,
+                'close': prev_close,
+                'time': prev.get('time', 'N/A'),  # Gestion du champ time manquant
+                'volume': int(prev.get('volume', 0))
             })
         
         # OB baissier (grosse bougie rouge suivie d'une bougie verte)
-        elif float(prev['c']) < float(prev['o']) and float(curr['c']) > float(curr['o']):
+        elif prev_close < prev_open and curr_close > curr_open:
             ob_bearish.append({
-                'high': float(prev['h']),
-                'low': float(prev['l']),
-                'open': float(prev['o']),
-                'close': float(prev['c']),
-                'time': prev['time'],
-                'volume': candles[i-1]['volume']
+                'high': float(prev['mid']['h']),
+                'low': float(prev['mid']['l']),
+                'open': prev_open,
+                'close': prev_close,
+                'time': prev.get('time', 'N/A'),  # Gestion du champ time manquant
+                'volume': int(prev.get('volume', 0))
             })
     
-    # Filtrage des OB par volume et taille
+    # Filtrage des OB significatifs
+    significant_volume = 100  # Volume minimum
+    min_size = 0.0005  # Taille minimum en pips
+    
     filtered_ob = {
-        'bullish': [ob for ob in ob_bullish if ob['volume'] > 100 and (ob['close'] - ob['open']) > 0.0005],
-        'bearish': [ob for ob in ob_bearish if ob['volume'] > 100 and (ob['open'] - ob['close']) > 0.0005]
+        'bullish': [ob for ob in ob_bullish 
+                   if ob['volume'] >= significant_volume 
+                   and (ob['close'] - ob['open']) >= min_size],
+        'bearish': [ob for ob in ob_bearish 
+                   if ob['volume'] >= significant_volume 
+                   and (ob['open'] - ob['close']) >= min_size]
     }
     
     logger.debug(f"🔍 OB détectés: {len(filtered_ob['bullish'])} haussiers / {len(filtered_ob['bearish'])} baissiers")
     return filtered_ob
-
+    
 def analyze_pair(pair):
     """Version finale avec tous les filtres (tendance, FVG/OB, confluence, corrélation, macro, range asiatique)"""
+    try:
+        htf_data = get_htf_data(pair)
+        if not htf_data or len(htf_data) < 10:  # Minimum 10 bougies
+            logger.warning(f"⚠️ Données insuffisantes pour {pair}")
+            return
     try:
         # 1. Vérification tendance HTF
         trend = check_htf_trend(pair)
@@ -772,9 +789,14 @@ def inflation_adjustment(pair):
     return 1.1 if cpi > 3.0 else 0.9
 
 def get_htf_data(pair):
-    """Récupère les données une seule fois par paire"""
-    params = {"granularity": "H4", "count": 100, "price": "M"}
-    return client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+    try:
+        params = {"granularity": "H4", "count": 100, "price": "M"}
+        candles = client.request(instruments.InstrumentsCandles(
+            instrument=pair, params=params))['candles']
+        return [c for c in candles if c['complete']]  # Ne garder que les bougies complètes
+    except Exception as e:
+        logger.error(f"❌ Erreur données HTF {pair}: {str(e)}")
+        return None
 
 def is_price_in_valid_range(price, asian_range, trend):
     """Vérifie si le prix est dans une configuration favorable par rapport au range asiatique"""
