@@ -1093,7 +1093,6 @@ def check_tp_sl():
 # 🔄 BOUCLE PRINCIPALE
 # ========================
 if __name__ == "__main__":
-    update_daily_zones()  # Premier calcul
     logger.info("\n"
         "✨✨✨✨✨✨✨✨✨✨✨✨✨\n"
         "   OANDA TRADING BOT v4.0\n"
@@ -1106,71 +1105,80 @@ if __name__ == "__main__":
         get_instrument_details(pair)
         time.sleep(0.5)
 
-while True:
-        now = datetime.utcnow()
-        if now.time() > dtime(0, 30):  # Attendre 30min après minuit
-            update_daily_zones()
-            break
-        time.sleep(60)        
+    # Attente initiale pour la première mise à jour
+    while datetime.utcnow().time() < dtime(0, 30):
+        time.sleep(60)
+    
+    update_daily_zones()  # Premier calcul après 00:30 UTC
 
-while True:
-    try:
-        now = datetime.utcnow()
-        current_time = now.time()
-        weekday = now.weekday()
+    # Boucle principale
+    while True:
+        try:
+            now = datetime.utcnow()
+            current_time = now.time()
+            weekday = now.weekday()
 
-        # 1. Gestion Week-End
-        if weekday >= 5:  # Samedi (5) ou Dimanche (6)
-            handle_weekend(now)
-            continue
+            # 1. Gestion Week-End
+            if weekday >= 5:  # Samedi (5) ou Dimanche (6)
+                handle_weekend(now)
+                continue
 
-        # 2. Session Asiatique (00:00 - 06:00 UTC)
-        if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
-            if not asian_range_calculated:
-                logger.info("🌏 Début analyse session asiatique")
+            # 2. Actualisation quotidienne à 00:30 UTC
+            if current_time.hour == 0 and current_time.minute >= 30 and not daily_data_updated:
+                update_daily_zones()
+                daily_data_updated = True
+            
+            # Réinitialisation du flag à minuit
+            if current_time.hour == 0 and current_time.minute < 30:
+                daily_data_updated = False
+
+            # 3. Session Asiatique (00:00 - 06:00 UTC)
+            if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+                if not asian_range_calculated:
+                    logger.info("🌏 Début analyse session asiatique")
+                    for pair in PAIRS:
+                        store_asian_range(pair)
+                    asian_range_calculated = True
+                    logger.info("✅ Analyse session asiatique terminée")
+                time.sleep(300)  # Attendre 5 minutes
+                continue
+
+            # 4. Pause Entre Sessions (06:00 - 07:00 UTC)
+            if ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
+                time.sleep(60)
+                continue
+
+            # 5. Session Active (Londres + NY, 07:00 - 16:30 UTC)
+            if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+                start_time = time.time()
+                
+                # A. Vérifier les trades actifs
+                active_trades = check_active_trades()
+                
+                # B. Analyser chaque paire
                 for pair in PAIRS:
-                    store_asian_range(pair)
-                asian_range_calculated = True
-                logger.info("✅ Analyse session asiatique terminée")
-            time.sleep(300)  # Attendre 5 minutes
-            continue
+                    analyze_pair(pair)
+                
+                # C. Vérifier les TP/SL
+                check_tp_sl()
+                
+                # D. Contrôle du timing
+                elapsed = time.time() - start_time
+                sleep_time = max(60 - elapsed, 5)  # Minimum 5 secondes
+                time.sleep(sleep_time)
+                continue
 
-        # 3. Pause Entre Sessions (06:00 - 07:00 UTC)
-        if ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
-            time.sleep(60)
-            continue
+            # 6. Après la Fermeture (16:30 - 00:00 UTC)
+            if current_time > NY_SESSION_END or current_time < ASIAN_SESSION_START:
+                if not end_of_day_processed:
+                    logger.info("🕒 Fermeture session NY - Liquidation des positions")
+                    close_all_trades()
+                    end_of_day_processed = True
+                time.sleep(60)
+                continue
+            else:
+                end_of_day_processed = False
 
-        # 4. Session Active (Londres + NY, 07:00 - 16:30 UTC)
-        if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-            start_time = time.time()
-            
-            # A. Vérifier les trades actifs
-            active_trades = check_active_trades()
-            
-            # B. Analyser chaque paire
-            for pair in PAIRS:
-                analyze_pair(pair)
-            
-            # C. Vérifier les TP/SL
-            check_tp_sl()
-            
-            # D. Contrôle du timing
-            elapsed = time.time() - start_time
-            sleep_time = max(60 - elapsed, 5)  # Minimum 5 secondes
-            time.sleep(sleep_time)
-            continue
-
-        # 5. Après la Fermeture (16:30 - 00:00 UTC)
-        if current_time > NY_SESSION_END:
-            if not end_of_day_processed:
-                logger.info("🕒 Fermeture session NY - Liquidation des positions")
-                close_all_trades()
-                end_of_day_processed = True
-            time.sleep(60)
-            continue
-        else:
-            end_of_day_processed = False
-
-    except Exception as e:
-        logger.error(f"💥 Erreur dans la boucle principale: {str(e)}", exc_info=True)
-        time.sleep(60)  # Attendre avant de réessayer
+        except Exception as e:
+            logger.error(f"💥 Erreur dans la boucle principale: {str(e)}", exc_info=True)
+            time.sleep(60)  # Attendre avant de réessayer
