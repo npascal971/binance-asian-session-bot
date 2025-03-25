@@ -319,64 +319,86 @@ def get_macro_data(currency, indicator):
         return None
 
 
-def macro_filter(pair, direction):
+@lru_cache(maxsize=32, ttl=3600)  # Cache pour 1 heure
+def get_economic_events(country):
     """
-    Filtre macroéconomique avancé avec :
-    - Détection d'événements critiques
-    - Analyse du contexte inflationniste
-    - Politique monétaire
+    Récupère les événements économiques avec :
+    - Cache LRU intelligent
+    - Gestion des erreurs robuste
+    - Optimisation des requêtes
+    """
+    params = {
+        "function": "ECONOMIC_CALENDAR",
+        "apikey": ALPHA_VANTAGE_API_KEY,
+        "countries": country,
+        "importance": "high,medium",
+        "time_from": datetime.utcnow().strftime("%Y%m%dT%H%M"),
+        "time_to": (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%dT%H%M")
+    }
+
+    data = safe_api_call(params)
+    
+    if not data:
+        logger.error(f"No data received for {country}")
+        return []
+    
+    try:
+        events = data.get('economicCalendar', [])
+        
+        # Formatage standardisé des événements
+        formatted_events = []
+        for event in events:
+            formatted_events.append({
+                'name': event.get('event'),
+                'time': datetime.strptime(event['time'], '%Y-%m-%dT%H:%M:%S'),
+                'currency': event.get('currency'),
+                'impact': event.get('impact').upper(),
+                'actual': event.get('actual'),
+                'forecast': event.get('forecast')
+            })
+        
+        logger.debug(f"Retrieved {len(formatted_events)} events for {country}")
+        return formatted_events
+        
+    except (KeyError, ValueError) as e:
+        logger.error(f"Data parsing error: {str(e)}")
+        return []
+
+def macro_filter(pair, direction):
+    """Version optimisée avec :
+    - Requêtes groupées
     - Cache intelligent
+    - Gestion des timeouts
     """
     base_currency = pair[:3]
+    events = get_economic_events(base_currency)
     
-    # 1. Cache des événements (évite les appels API répétés)
-    @lru_cache(maxsize=10, ttl=3600)  # Cache 1h
-    def get_cached_events(pair):
-        return check_economic_calendar(pair)
-    
-    events = get_cached_events(pair)
-    
-    # 2. Vérification événements imminents (4h)
+    # 1. Détection événements critiques (prochains 4h)
     now = datetime.utcnow()
     critical_events = [
-        e for e in events 
-        if e[2] == "HIGH" 
-        and (e[1] - now) <= timedelta(hours=4)
+        event for event in events
+        if event['impact'] == 'High' and
+        datetime.strptime(event['time'], '%Y-%m-%dT%H:%M:%S') - now <= timedelta(hours=4)
     ]
     
     if critical_events:
-        next_event = min(events, key=lambda x: x[1])
+        next_event = min(critical_events, key=lambda x: x['time'])
         logger.warning(
-            f"⛔ Événement critique {next_event[0]} à {next_event[1].strftime('%H:%M UTC')}\n"
-            f"   Impact: {next_event[2]} - Trading suspendu 4h"
+            f"⛔ Événement critique détecté\n"
+            f"• Nom: {next_event['event']}\n"
+            f"• Heure: {next_event['time']}\n"
+            f"• Impact: {next_event['impact']}\n"
+            f"• Devise: {base_currency}"
         )
         return False
 
-    # 3. Contexte inflationniste (USD seulement)
+    # 2. Analyse contextuelle (inflation/taux)
     if base_currency == "USD":
         cpi = get_macro_data("USD", "CPI")
-        inflation_threshold = 5.0  # Seuil personnalisable
-        
-        if cpi:
-            if cpi > inflation_threshold and direction == "BUY":
-                logger.info(f"✅ Inflation USD {cpi}% > seuil - Long favorisé")
-                return True
-            elif cpi > inflation_threshold and direction == "SELL":
-                logger.warning(f"⚠️ Inflation élevée - Short USD déconseillé")
-                return False
+        if cpi and cpi > 5.0:
+            logger.info(f"📈 Contexte inflationniste (CPI: {cpi}%)")
+            return direction == "BUY"
 
-    # 4. Politique monétaire (toutes paires)
-    rates = get_central_bank_rates(base_currency)
-    if rates:
-        if rates["trend"] == "hawkish" and direction == "BUY":
-            logger.info("✅ Politique hawkish - Long favorisé")
-            return True
-        elif rates["trend"] == "dovish" and direction == "SELL":
-            logger.info("✅ Politique dovish - Short favorisé")
-            return True
-
-    # 5. Fallback sécurisé
-    logger.debug("ℹ️ Aucun signal macro clair - Validation technique seule")
     return True
 
 # Configuration Alpha Vantage
@@ -469,6 +491,29 @@ def send_trade_notification(trade_info, hit_type):
         logger.info(f"📧 Notification {hit_type} envoyée!")
     except Exception as e:
         logger.error(f"❌ Erreur envoi email: {str(e)}")
+
+# Dans votre configuration principale
+REQUEST_DELAY = 0.2  # 200ms entre les requêtes
+MAX_RETRIES = 3
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+
+def safe_api_call(params):
+    """Gestion robuste des appels API avec retry et backoff"""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            time.sleep(REQUEST_DELAY * (attempt - 1))  # Backoff linéaire
+            response = requests.get(
+                "https://www.alphavantage.co/query",
+                params=params,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed for {params['countries']}: {str(e)}")
+            if attempt == MAX_RETRIES:
+                logger.error(f"API call failed after {MAX_RETRIES} attempts")
+                return None
 
 def check_confluence(pair, direction):
     """
