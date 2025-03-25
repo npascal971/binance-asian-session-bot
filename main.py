@@ -1277,6 +1277,17 @@ if __name__ == "__main__":
     
     update_daily_zones()  # Premier calcul après 00:30 UTC
 
+# Avant la boucle principale, ajoutez :
+logger.info(f"""
+🛠️ CONFIGURATION VÉRIFICATION:
+- Heure système UTC: {datetime.now(pytz.UTC)}
+- Asian Session config: {ASIAN_SESSION_START}-{ASIAN_SESSION_END}
+- London Session config: {LONDON_SESSION_START}-{NY_SESSION_END}
+""")
+
+# Test manuel immédiat
+test_time = datetime.now(pytz.UTC).time()
+logger.info(f"TEST MANUEL: Asian active? {ASIAN_SESSION_START <= test_time < ASIAN_SESSION_END}")
 # Boucle principale
 while True:
     try:
