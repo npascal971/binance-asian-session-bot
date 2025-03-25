@@ -216,6 +216,21 @@ def calculate_correlation(main_pair, window=30):
     
     return correlations
 
+def log_daily_summary():
+    """Génère un rapport journalier des performances"""
+    try:
+        balance = get_account_balance()
+        logger.info(f"""
+        📊 RÉSUMÉ QUOTIDIEN - {datetime.utcnow().date()}
+        • Solde final: ${balance:.2f}
+        • Trades ouverts: {len(active_trades)}
+        • Sessions analysées:
+          - Asiatique: {'OUI' if asian_range_calculated else 'NON'}
+          - London/NY: {'OUI' if LONDON_SESSION_START <= datetime.utcnow().time() <= NY_SESSION_END else 'NON'}
+        """)
+    except Exception as e:
+        logger.error(f"❌ Erreur génération rapport: {str(e)}")
+
 def process_asian_session():
     """Gère spécifiquement la session asiatique"""
     global asian_range_calculated
