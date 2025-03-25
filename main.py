@@ -15,6 +15,9 @@ import oandapyV20.endpoints.trades as trades
 import oandapyV20.endpoints.pricing as pricing
 import requests
 from datetime import timedelta
+from datetime import datetime, timedelta
+from functools import lru_cache
+from datetime import datetime, timedelta
 import pytz
 UTC = pytz.UTC
 
@@ -315,66 +318,98 @@ def get_macro_data(currency, indicator):
         logger.error(f"❌ Erreur macro {indicator}: {str(e)}")
         return None
 
+
 def macro_filter(pair, direction):
     """
-    Vérifie la cohérence macroéconomique
-    Retourne True si les conditions sont favorables
+    Filtre macroéconomique avancé avec :
+    - Détection d'événements critiques
+    - Analyse du contexte inflationniste
+    - Politique monétaire
+    - Cache intelligent
     """
     base_currency = pair[:3]
     
-    # 1. Vérification des événements imminents
-    upcoming = check_economic_calendar(pair)
-    if any(e[2] == "HIGH" for e in upcoming):
-        logger.warning(f"⚠️ Événement macro majeur imminent - Trade annulé")
-        return False
+    # 1. Cache des événements (évite les appels API répétés)
+    @lru_cache(maxsize=10, ttl=3600)  # Cache 1h
+    def get_cached_events(pair):
+        return check_economic_calendar(pair)
     
-    # 2. Analyse des indicateurs clés
+    events = get_cached_events(pair)
+    
+    # 2. Vérification événements imminents (4h)
+    now = datetime.utcnow()
+    critical_events = [
+        e for e in events 
+        if e[2] == "HIGH" 
+        and (e[1] - now) <= timedelta(hours=4)
+    ]
+    
+    if critical_events:
+        next_event = min(events, key=lambda x: x[1])
+        logger.warning(
+            f"⛔ Événement critique {next_event[0]} à {next_event[1].strftime('%H:%M UTC')}\n"
+            f"   Impact: {next_event[2]} - Trading suspendu 4h"
+        )
+        return False
+
+    # 3. Contexte inflationniste (USD seulement)
     if base_currency == "USD":
         cpi = get_macro_data("USD", "CPI")
-        if cpi and cpi > 5.0:  # Inflation élevée
-            if direction == "BUY":
-                logger.info("✅ Contexte inflationniste favorable aux positions long USD")
-                return True
-    
-    # 3. Contexte des taux d'intérêt
-    rates = get_central_bank_rates(base_currency)
-    if rates and rates["trend"] != direction:
-        logger.warning(f"⚠️ Politique monétaire défavorable")
-        return False
+        inflation_threshold = 5.0  # Seuil personnalisable
         
+        if cpi:
+            if cpi > inflation_threshold and direction == "BUY":
+                logger.info(f"✅ Inflation USD {cpi}% > seuil - Long favorisé")
+                return True
+            elif cpi > inflation_threshold and direction == "SELL":
+                logger.warning(f"⚠️ Inflation élevée - Short USD déconseillé")
+                return False
+
+    # 4. Politique monétaire (toutes paires)
+    rates = get_central_bank_rates(base_currency)
+    if rates:
+        if rates["trend"] == "hawkish" and direction == "BUY":
+            logger.info("✅ Politique hawkish - Long favorisé")
+            return True
+        elif rates["trend"] == "dovish" and direction == "SELL":
+            logger.info("✅ Politique dovish - Short favorisé")
+            return True
+
+    # 5. Fallback sécurisé
+    logger.debug("ℹ️ Aucun signal macro clair - Validation technique seule")
     return True
 
+# Configuration Alpha Vantage
+ECONOMIC_CALENDAR_API = "https://www.alphavantage.co/query"
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")  # Clé gratuite sur leur site
+
 def check_economic_calendar(pair):
-    """Vérifie les événements à venir pour la paire"""
+    """Récupère le calendrier économique via Alpha Vantage"""
     base_currency = pair[:3]
-    events = IMPORTANT_EVENTS.get(base_currency, [])
+    
+    params = {
+        "function": "ECONOMIC_CALENDAR",
+        "apikey": ALPHA_VANTAGE_API_KEY,
+        "countries": base_currency,
+        "importance": "high,medium",
+        "time_from": datetime.utcnow().strftime("%Y%m%dT%H%M"),
+        "time_to": (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%dT%H%M")
+    }
     
     try:
-        if not ECONOMIC_CALENDAR_API:
-            return []
-        headers = {
-            "Authorization": f"Bearer {MACRO_API_KEY}",
-            "Accept": "application/json"
-    } 
-       params = {
-            "country": pair[:3],  # Format attendu par la nouvelle API
-            "importance": "high,medium",  # Format corrigé
-            "timezone": "UTC",
-            "start_date": datetime.utcnow().isoformat(),
-            "end_date": (datetime.utcnow() + timedelta(days=1)).isoformat()
-        }
-        response = requests.get(ECONOMIC_CALENDAR_API, params=params, timeout=5).json()
+        response = requests.get(ECONOMIC_CALENDAR_API, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
         
-        return [
-            (e["title"], e["date"], e["impact"])
-            for e in response.get("events", [])
-            if e["title"] in events
-        ]
+        return [(
+            event['event'],
+            datetime.strptime(event['time'], '%Y-%m-%dT%H:%M:%S'),
+            event['impact'].upper()
+        ) for event in data.get('economicCalendar', [])]
         
     except Exception as e:
-        logger.warning(f"⚠️ Erreur calendrier: {str(e)}")
-        return []  # Return empty list instead of failing
-
+        logger.warning(f"⚠️ Erreur calendrier Alpha Vantage: {str(e)}")
+        return []
 def get_historical_prices(instrument, periods):
     """
     Récupère les prix historiques selon l'instrument
