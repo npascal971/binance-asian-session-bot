@@ -641,7 +641,7 @@ def identify_order_blocks(candles, lookback=100):
     return filtered_ob
 
 def analyze_pair(pair):
-    """Version finale avec tous les filtres (tendance, FVG/OB, confluence, corrélation, macro)"""
+    """Version finale avec tous les filtres (tendance, FVG/OB, confluence, corrélation, macro, range asiatique)"""
     try:
         # 1. Vérification tendance HTF
         trend = check_htf_trend(pair)
@@ -649,13 +649,21 @@ def analyze_pair(pair):
             logger.debug(f"↔️ {pair} en range - Aucun trade")
             return
 
-        # 2. Détection des zones de trading
+        # 2. Récupération du range asiatique (nouveau)
+        asian_range = get_asian_range(pair)
+        current_price = get_current_price(pair)
+        
+        # 3. Vérification du contexte de prix par rapport au range
+        if not is_price_in_valid_range(current_price, asian_range, trend):
+            logger.debug(f"🔍 {pair}: Prix hors range asiatique valide")
+            return
+
+        # 4. Détection des zones de trading
         htf_data = get_htf_data(pair)
         fvgs = identify_fvg(htf_data)
         obs = identify_order_blocks(htf_data)
-        current_price = get_current_price(pair)
 
-        # 3. Vérification des zones
+        # 5. Vérification des zones FVG/OB
         in_fvg, fvg_zone = is_price_in_fvg(current_price, fvgs)
         near_ob, ob_zone = is_price_near_ob(current_price, obs, trend)
 
@@ -663,34 +671,35 @@ def analyze_pair(pair):
             logger.debug(f"🔍 {pair}: Aucune zone FVG/OB valide")
             return
 
-        # 4. Détermination de la direction
+        # 6. Détermination de la direction
         direction = 'BUY' if trend == 'UP' else 'SELL'
         
-        # 5. Vérification de la confluence
+        # 7. Vérification de la confluence
         confluence_score = check_confluence(pair, direction)
         if confluence_score < MIN_CONFLUENCE_SCORE:
             logger.warning(f"⚠️ {pair}: Confluence insuffisante ({confluence_score}/{MIN_CONFLUENCE_SCORE})")
             return
 
-        # 6. Vérification des corrélations
+        # 8. Vérification des corrélations
         if not check_correlation(pair, direction):
             logger.warning(f"⚠️ {pair}: Corrélations défavorables")
             return
 
-        # 7. Filtre macroéconomique
+        # 9. Filtre macroéconomique
         if not macro_filter(pair, direction):
             logger.warning(f"⚠️ {pair}: Contexte macro défavorable")
             return
 
-        # 8. Calcul des niveaux
-        stop_loss = calculate_stop(fvg_zone, ob_zone, direction)
-        take_profit = calculate_tp(current_price, direction, daily_zones.get(pair, {}))
+        # 10. Calcul des niveaux avec référence au range asiatique (nouveau)
+        stop_loss = calculate_stop(fvg_zone, ob_zone, asian_range, direction)
+        take_profit = calculate_tp(current_price, asian_range, direction, daily_zones.get(pair, {}))
         
-        # 9. Journalisation détaillée
+        # 11. Journalisation détaillée
         logger.info(f"""
         🎯 Signal confirmé sur {pair}:
         • Direction: {direction}
         • Prix: {current_price:.5f}
+        • Range Asiatique: {asian_range['low']:.5f}-{asian_range['high']:.5f}
         • Stop: {stop_loss:.5f} (Risque: {abs(current_price-stop_loss):.1f}pips)
         • TP: {take_profit:.5f} (Gain potentiel: {abs(take_profit-current_price):.1f}pips)
         • Ratio R/R: {abs(take_profit-current_price)/abs(current_price-stop_loss):.1f}
@@ -698,7 +707,7 @@ def analyze_pair(pair):
         • Tendance HTF: {trend}
         """)
 
-        # 10. Execution du trade
+        # 12. Execution du trade
         place_trade(
             pair=pair,
             direction=direction.lower(),
@@ -709,7 +718,6 @@ def analyze_pair(pair):
 
     except Exception as e:
         logger.error(f"❌ Erreur analyse {pair}: {str(e)}", exc_info=True)
-
 def calculate_tp_from_structure(fvg, direction):
     """Calcule le TP basé sur la taille du FVG"""
     fvg_size = abs(fvg['top'] - fvg['bottom'])
@@ -757,19 +765,40 @@ def get_htf_data(pair):
     params = {"granularity": "H4", "count": 100, "price": "M"}
     return client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
 
-def calculate_stop(fvg_zone, ob_zone, direction):
-    """Version plus sécurisée avec buffer"""
-    buffer = 0.0005 if "JPY" not in pair else 0.05
-    if direction == 'BUY':
-        return min(fvg_zone['bottom'], ob_zone['low']) - buffer
-    return max(fvg_zone['top'], ob_zone['high']) + buffer
+def is_price_in_valid_range(price, asian_range, trend):
+    """Vérifie si le prix est dans une configuration favorable par rapport au range asiatique"""
+    buffer = 0.0003  # 3 pips de marge
+    
+    # Configuration haussière
+    if trend == 'UP' and price > (asian_range['high'] - buffer):
+        return True
+        
+    # Configuration baissière
+    if trend == 'DOWN' and price < (asian_range['low'] + buffer):
+        return True
+        
+    return False
 
-def calculate_tp(entry, direction, daily_zone):
-    """TP avec gestion des cas où daily_zones n'est pas disponible"""
-    base_tp = entry * 1.005 if direction == 'BUY' else entry * 0.995
-    if not daily_zone:
+def calculate_stop(fvg_zone, ob_zone, asian_range, direction):
+    if direction == 'BUY':
+        return min(fvg_zone['bottom'], ob_zone['low'], asian_range['low']) - 0.0005
+    else:
+        return max(fvg_zone['top'], ob_zone['high'], asian_range['high']) + 0.0005
+
+ddef calculate_tp(entry, asian_range, direction, daily_zone=None):
+    """Calcule le take-profit avec référence au range asiatique"""
+    range_size = asian_range['high'] - asian_range['low']
+    
+    if direction == 'BUY':
+        base_tp = entry + range_size * 1.5  # 1.5x la taille du range
+        if daily_zone:
+            return max(base_tp, daily_zone.get('VAH', 0))
         return base_tp
-    return max(base_tp, daily_zone.get('VAH', 0)) if direction == 'BUY' else min(base_tp, daily_zone.get('VAL', float('inf')))
+    else:
+        base_tp = entry - range_size * 1.5
+        if daily_zone:
+            return min(base_tp, daily_zone.get('VAL', float('inf')))
+        return base_tp
 
 def handle_weekend(now):
     """Gère spécifiquement la fermeture du week-end"""
@@ -1117,8 +1146,12 @@ while True:
         # 4. SESSION ACTIVE (Londres + NY)
         # =============================================
         if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-            process_trading_session()
-            continue
+            asian_range = get_asian_range(pair)
+            if price > asian_range['high']:
+                # Signal d'achat sur breakout
+            elif price < asian_range['low']:
+                # Signal de vente sur breakdown
+                    continue
 
         # =============================================
         # 5. HORS SESSION (Backup)
