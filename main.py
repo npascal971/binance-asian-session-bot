@@ -16,8 +16,9 @@ import oandapyV20.endpoints.pricing as pricing
 import requests
 from datetime import timedelta
 from datetime import datetime, timedelta
+
+from functools import lru_cache, wraps
 from functools import lru_cache
-from datetime import datetime, timedelta
 import pytz
 UTC = pytz.UTC
 
@@ -319,11 +320,28 @@ def get_macro_data(currency, indicator):
         return None
 
 
-@lru_cache(maxsize=32, ttl=3600)  # Cache pour 1 heure
+
+def timed_lru_cache(seconds: int, maxsize: int = 128):
+    """Décorateur de cache avec expiration temporelle"""
+    def wrapper_cache(func):
+        func = lru_cache(maxsize=maxsize)(func)
+        func.lifetime = timedelta(seconds=seconds)
+        func.expiration = datetime.utcnow() + func.lifetime
+
+        @wraps(func)
+        def wrapped_func(*args, **kwargs):
+            if datetime.utcnow() >= func.expiration:
+                func.cache_clear()
+                func.expiration = datetime.utcnow() + func.lifetime
+            return func(*args, **kwargs)
+        return wrapped_func
+    return wrapper_cache
+
+@timed_lru_cache(seconds=3600, maxsize=32)
 def get_economic_events(country):
     """
     Récupère les événements économiques avec :
-    - Cache LRU intelligent
+    - Cache LRU intelligent avec expiration
     - Gestion des erreurs robuste
     - Optimisation des requêtes
     """
@@ -345,23 +363,27 @@ def get_economic_events(country):
     try:
         events = data.get('economicCalendar', [])
         
-        # Formatage standardisé des événements
         formatted_events = []
         for event in events:
-            formatted_events.append({
-                'name': event.get('event'),
-                'time': datetime.strptime(event['time'], '%Y-%m-%dT%H:%M:%S'),
-                'currency': event.get('currency'),
-                'impact': event.get('impact').upper(),
-                'actual': event.get('actual'),
-                'forecast': event.get('forecast')
-            })
+            try:
+                formatted_events.append({
+                    'name': event['event'],
+                    'time': datetime.strptime(event['time'], '%Y-%m-%dT%H:%M:%S'),
+                    'currency': event.get('currency', country),
+                    'impact': event.get('impact', 'medium').upper(),
+                    'actual': event.get('actual'),
+                    'forecast': event.get('forecast'),
+                    'previous': event.get('previous')
+                })
+            except KeyError as e:
+                logger.warning(f"Missing key in event data: {str(e)}")
+                continue
         
-        logger.debug(f"Retrieved {len(formatted_events)} events for {country}")
+        logger.info(f"Retrieved {len(formatted_events)} valid events for {country}")
         return formatted_events
         
-    except (KeyError, ValueError) as e:
-        logger.error(f"Data parsing error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Data processing failed: {str(e)}")
         return []
 
 def macro_filter(pair, direction):
