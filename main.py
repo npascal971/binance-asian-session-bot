@@ -977,8 +977,8 @@ if __name__ == "__main__":
     for pair in PAIRS:
         get_instrument_details(pair)
         time.sleep(0.5)
-
-    while True:
+        
+while True:
     try:
         now = datetime.utcnow()
         current_time = now.time()
