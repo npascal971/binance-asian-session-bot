@@ -1178,6 +1178,6 @@ if __name__ == "__main__":
         
             time.sleep(60)
 
-    except Exception as e:
-        logger.error(f"💥 Erreur critique: {str(e)}", exc_info=True)
-        time.sleep(300)
+        except Exception as e:
+            logger.error(f"💥 Erreur critique: {str(e)}", exc_info=True)
+            time.sleep(300)
