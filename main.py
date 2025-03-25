@@ -60,6 +60,8 @@ MIN_CONFLUENCE_SCORE = 2  # Nombre minimal d'indicateurs favorables
 daily_data_updated = False
 MACRO_API_KEY = os.getenv("MACRO_API_KEY")  # Clé pour FRED/Quandl
 ECONOMIC_CALENDAR_API = "https://economic-calendar.com/api"  # Exemple
+asian_ranges = {}  # Dictionnaire pour stocker les ranges
+asian_range_calculated = False  # Flag de contrôle
 
 IMPORTANT_EVENTS = {
     "USD": ["CPI", "NFP", "FOMC", "UNEMPLOYMENT"],
@@ -198,6 +200,42 @@ def calculate_correlation(main_pair, window=30):
             logger.warning(f"⚠️ Erreur corrélation {main_pair}-{related_pair}: {str(e)}")
     
     return correlations
+
+def process_asian_session():
+    """Gère spécifiquement la session asiatique"""
+    global asian_range_calculated
+    
+    if not asian_range_calculated:
+        logger.info("🌏 Début analyse session asiatique")
+        
+        for pair in PAIRS:
+            try:
+                # Récupère les données depuis le début de session
+                candles = get_candles(pair, ASIAN_SESSION_START, None)
+                
+                if not candles:
+                    logger.warning(f"⚠️ Aucune donnée pour {pair}")
+                    continue
+                    
+                highs = [float(c['mid']['h']) for c in candles if 'mid' in c]
+                lows = [float(c['mid']['l']) for c in candles if 'mid' in c]
+                
+                if highs and lows:
+                    # Stocke le range pour usage ultérieur
+                    asian_ranges[pair] = {
+                        'high': max(highs),
+                        'low': min(lows),
+                        'time': datetime.utcnow()
+                    }
+                    logger.debug(f"📊 Range asiatique {pair}: {asian_ranges[pair]['high']:.5f}/{asian_ranges[pair]['low']:.5f}")
+            
+            except Exception as e:
+                logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
+        
+        asian_range_calculated = True
+        logger.info("✅ Analyse session asiatique terminée")
+    
+    time.sleep(300)  # Attente avant prochaine vérification
 
 def check_correlation(main_pair, direction):
     """
@@ -915,6 +953,14 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
         trade_history.append(trade_info)
         logger.info("🧪 Mode simulation - Trade non envoyé")
         return "SIMULATION"
+
+def get_asian_range(pair):
+    """Récupère le range asiatique calculé"""
+    return asian_ranges.get(pair, {
+        'high': float('inf'),
+        'low': 0,
+        'time': None
+    })
 
 def close_all_trades():
     """Ferme tous les trades ouverts"""
