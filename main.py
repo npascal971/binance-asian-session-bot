@@ -57,8 +57,8 @@ INSTRUMENT_SPECS = {
     "GBP_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
     "USD_JPY": {"pip": 0.01, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
     "XAU_USD": {"pip": 0.01, "min_units": 1, "precision": 2, "margin_rate": 0.02},
-    "BTC_USD": {"pip": 1, "min_units": MIN_CRYPTO_UNITS, "precision": 6, "margin_rate": 0.05},
-    "ETH_USD": {"pip": 0.1, "min_units": MIN_CRYPTO_UNITS, "precision": 6, "margin_rate": 0.05}
+    "BTC_USD": {"pip": 1, "min_units": 0.001, "precision": 6, "margin_rate": 0.05},
+    "ETH_USD": {"pip": 0.1, "min_units": 0.001, "precision": 6, "margin_rate": 0.05}
 }
 
 def get_account_balance():
@@ -95,39 +95,44 @@ def get_instrument_details(pair):
 def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     """Calcule la taille de position avec gestion précise du risque"""
     specs = get_instrument_details(pair)
-    
-    # Calcul du montant à risquer (1% du solde ou $100 max)
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), MAX_RISK_USD)
     
-    # Cas des cryptos (BTC, ETH)
-    if pair in CRYPTO_PAIRS:
-        risk_per_unit = abs(entry_price - stop_loss)
-        units = risk_amount / risk_per_unit
-    # Cas des paires Forex (EUR/USD, GBP/USD, etc.)
-    else:
-        pip_value = 10 ** specs['pip_location']  # 0.0001 pour EUR/USD, 0.01 pour USD/JPY
-        distance_pips = abs(entry_price - stop_loss) / pip_value
-        units = risk_amount / distance_pips  # Pas besoin de multiplier par pip_value ici
-    
-    # Arrondir selon la précision requise
-    units = round(units, specs['units_precision'])
-    
-    # Validation finale
-    if units < specs['min_units']:
-        logger.error(f"🚨 Unités calculées trop faibles ({units}) < minimum ({specs['min_units']})")
+    try:
+        if pair in CRYPTO_PAIRS:
+            # Calcul pour les cryptos
+            risk_per_unit = abs(entry_price - stop_loss)
+            units = risk_amount / risk_per_unit
+            distance_pips = risk_per_unit  # Just for logging
+        else:
+            # Calcul pour Forex et autres
+            pip_value = 10 ** specs['pip_location']
+            distance_pips = abs(entry_price - stop_loss) / pip_value
+            units = risk_amount / distance_pips
+        
+        units = round(units, specs['units_precision'])
+        
+        # Vérification des unités minimales
+        if units < specs['min_units']:
+            logger.warning(f"⚠️ Unités trop petites ({units}) < min ({specs['min_units']}). Ajustement du risque.")
+            risk_amount = specs['min_units'] * distance_pips
+            if risk_amount > MAX_RISK_USD:
+                logger.error(f"🚨 Risque ajusté ({risk_amount}) dépasse MAX_RISK_USD")
+                return 0
+            units = specs['min_units']
+        
+        logger.info(f"""
+        📊 Calcul Position {pair}:
+        • Risque: ${risk_amount:.2f}
+        • Entrée: {entry_price:.5f}
+        • Stop: {stop_loss:.5f}
+        • Distance: {distance_pips:.2f} pips
+        • Unités: {units}
+        """)
+        return units
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur calcul position {pair}: {str(e)}")
         return 0
-    
-    logger.info(f"""
-    📊 Calcul Position {pair}:
-    • Risque: ${risk_amount:.2f} ({RISK_PERCENTAGE}%)
-    • Entrée: {entry_price:.5f}
-    • Stop: {stop_loss:.5f}
-    • Distance (pips): {distance_pips:.1f} (Pip value: {pip_value})
-    • Unités: {units}
-    """)
-    
-    return units
-
 def send_trade_notification(trade_info, hit_type):
     """Envoie une notification email pour TP/SL"""
     try:
@@ -221,15 +226,26 @@ def analyze_pair(pair):
         logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
-    """Exécute un trade"""
+    """Exécute un trade avec vérifications supplémentaires"""
     if pair in active_trades:
         logger.info(f"⚠️ Trade actif existant sur {pair}")
         return None
 
     account_balance = get_account_balance()
+    if account_balance < 100:  # Minimum account balance
+        logger.error("🚨 Solde insuffisant (< $100)")
+        return None
+
     units = calculate_position_size(pair, account_balance, entry_price, stop_loss)
     if units <= 0:
         return None
+
+    # Vérification marge requise
+    specs = get_instrument_details(pair)
+    margin_required = (units * entry_price) * specs['margin_rate']
+    if margin_required > account_balance * 0.5:  # Max 50% de marge
+        logger.error(f"🚨 Marge insuffisante (requise: ${margin_required:.2f})")
+        return None   
 
     logger.info(
         f"\n🚀 NOUVEAU TRADE {'ACHAT' if direction == 'buy' else 'VENTE'} 🚀\n"
