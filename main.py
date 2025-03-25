@@ -96,17 +96,20 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     """Calcule la taille de position avec gestion précise du risque"""
     specs = get_instrument_details(pair)
     
-    # Calcul du montant à risquer
+    # Calcul du montant à risquer (1% du solde ou $100 max)
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), MAX_RISK_USD)
     
-    # Calcul spécial pour les cryptos
+    # Cas des cryptos (BTC, ETH)
     if pair in CRYPTO_PAIRS:
-        units = risk_amount / abs(entry_price - stop_loss)
+        risk_per_unit = abs(entry_price - stop_loss)
+        units = risk_amount / risk_per_unit
+    # Cas des paires Forex (EUR/USD, GBP/USD, etc.)
     else:
-        pip_value = 10 ** specs['pip_location']
-        distance_pips = abs(entry_price - stop_loss) / (10 ** specs['pip_location'])
-        units = risk_amount / (distance_pips * pip_value)
+        pip_value = 10 ** specs['pip_location']  # 0.0001 pour EUR/USD, 0.01 pour USD/JPY
+        distance_pips = abs(entry_price - stop_loss) / pip_value
+        units = risk_amount / distance_pips  # Pas besoin de multiplier par pip_value ici
     
+    # Arrondir selon la précision requise
     units = round(units, specs['units_precision'])
     
     # Validation finale
@@ -119,7 +122,7 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     • Risque: ${risk_amount:.2f} ({RISK_PERCENTAGE}%)
     • Entrée: {entry_price:.5f}
     • Stop: {stop_loss:.5f}
-    • Pip Location: 10^{specs['pip_location']}
+    • Distance (pips): {distance_pips:.1f} (Pip value: {pip_value})
     • Unités: {units}
     """)
     
