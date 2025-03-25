@@ -26,13 +26,13 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment="practice")
 
 # Paramètres de trading (avec BTC et ETH ajoutés)
-PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD", "BTC_USD", "ETH_USD"]
+PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
 CRYPTO_PAIRS = ["BTC_USD", "ETH_USD"]
 RISK_PERCENTAGE = 1  # 1% du capital
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 2.0
-SESSION_START = dtime(0, 5)  # 7h00
-SESSION_END = dtime(23, 50)   # 23h50
+SESSION_START = dtime(7, 0)  # 7h00
+SESSION_END = dtime(16, 25)   # 23h50
 MAX_RISK_USD = 100  # $100 max de risque par trade
 MIN_CRYPTO_UNITS = 0.001  # Unités minimales pour les cryptos
 
@@ -50,7 +50,7 @@ logger = logging.getLogger()
 SIMULATION_MODE = False  # Passer à False pour le trading réel
 trade_history = []
 active_trades = set()
-
+end_of_day_processed = False  # Pour éviter les fermetures répétées
 # Spécifications des instruments (avec crypto)
 INSTRUMENT_SPECS = {
     "EUR_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
@@ -315,6 +315,41 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
         trade_history.append(trade_info)
         logger.info("🧪 Mode simulation - Trade non envoyé")
         return "SIMULATION"
+
+def close_all_trades():
+    """Ferme tous les trades ouverts"""
+    try:
+        r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
+        open_trades = client.request(r).get('trades', [])
+        
+        if not open_trades:
+            logger.info("✅ Aucun trade à fermer")
+            return
+
+        for trade in open_trades:
+            trade_id = trade['id']
+            instrument = trade['instrument']
+            units = -float(trade['currentUnits'])  # Inverse la position
+            
+            if not SIMULATION_MODE:
+                data = {
+                    "order": {
+                        "type": "MARKET",
+                        "instrument": instrument,
+                        "units": str(units)
+                    }
+                }
+                r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=data)
+                client.request(r)
+                logger.info(f"🚪 Fermeture {instrument} (ID: {trade_id})")
+            else:
+                logger.info(f"🧪 [SIMULATION] Fermeture {instrument} (ID: {trade_id})")
+
+        active_trades.clear()
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur fermeture trades: {str(e)}")
+        
 def check_tp_sl():
     """Vérifie si TP/SL atteint"""
     try:
@@ -382,26 +417,47 @@ if __name__ == "__main__":
         time.sleep(0.5)
 
     while True:
-        now = datetime.now().time()
+    now = datetime.now()
+    current_time = now.time()
+    
+    # 1. Vérification week-end
+    if now.weekday() >= 5:
+        close_all_trades()  # Ferme tout avant le week-end
+        logger.info("⛔ Week-end - Trading suspendu")
+        time.sleep(3600)
+        continue
+    
+    # 2. Gestion de fin de session
+    if current_time >= SESSION_END:
+        if not end_of_day_processed:
+            logger.info("🕒 Fin de session détectée - Fermeture des trades...")
+            close_all_trades()
+            end_of_day_processed = True
+        time.sleep(60)  # Check toutes les minutes
+        continue
+    else:
+        end_of_day_processed = False
+    
+    # 2. Vérification horaires trading
+    if SESSION_START <= current_time <= SESSION_END:
+        start_time = time.time()
         
-        if SESSION_START <= now <= SESSION_END:
-            start_time = time.time()
-            
-            # 1. Vérifier les trades actifs
-            active_trades = check_active_trades()
-            
-            # 2. Analyser toutes les paires
-            for pair in PAIRS:
-                analyze_pair(pair)
-            
-            # 3. Vérifier les TP/SL
-            check_tp_sl()
-            
-            # 4. Gestion du timing
-            elapsed = time.time() - start_time
-            sleep_time = max(60 - elapsed, 5)
-            logger.info(f"⏳ Prochaine exécution dans {sleep_time:.1f}s")
-            time.sleep(sleep_time)
+        # Votre logique de trading ici
+        active_trades = check_active_trades()
+        for pair in PAIRS:
+            analyze_pair(pair)
+        check_tp_sl()
+        
+        elapsed = time.time() - start_time
+        time.sleep(max(60 - elapsed, 5))
+    else:
+        # Calcul du temps jusqu'à la prochaine session
+        if current_time < SESSION_START:
+            sleep_until = datetime.combine(now.date(), SESSION_START)
         else:
-            logger.info("\n😴 Hors session - Prochaine vérification dans 5 minutes")
-            time.sleep(300)
+            sleep_until = datetime.combine(now.date() + timedelta(days=1), SESSION_START)
+        
+        sleep_seconds = (sleep_until - now).total_seconds()
+        logger.info(f"😴 Session terminée - Prochaine ouverture à {SESSION_START.strftime('%H:%M')} UTC "
+                    f"(dans {sleep_seconds/3600:.1f} heures)")
+        time.sleep(min(sleep_seconds, 3600))  # Max 1h de sleep
