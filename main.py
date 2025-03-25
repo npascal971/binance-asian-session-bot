@@ -664,30 +664,30 @@ def identify_order_blocks(candles, lookback=100):
     return filtered_ob
     
 def analyze_pair(pair):
-    """Version finale avec tous les filtres (tendance, FVG/OB, confluence, corrélation, macro, range asiatique)"""
+    """Version finale avec tous les filtres et gestion d'erreur unique"""
     try:
+        # Vérification initiale des données
         htf_data = get_htf_data(pair)
         if not htf_data or len(htf_data) < 10:  # Minimum 10 bougies
             logger.warning(f"⚠️ Données insuffisantes pour {pair}")
             return
-    try:
+
         # 1. Vérification tendance HTF
         trend = check_htf_trend(pair)
         if trend == 'NEUTRAL':
             logger.debug(f"↔️ {pair} en range - Aucun trade")
             return
 
-        # 2. Récupération du range asiatique (nouveau)
+        # 2. Récupération du range asiatique
         asian_range = get_asian_range(pair)
         current_price = get_current_price(pair)
         
-        # 3. Vérification du contexte de prix par rapport au range
+        # 3. Vérification du contexte de prix
         if not is_price_in_valid_range(current_price, asian_range, trend):
             logger.debug(f"🔍 {pair}: Prix hors range asiatique valide")
             return
 
         # 4. Détection des zones de trading
-        htf_data = get_htf_data(pair)
         fvgs = identify_fvg(htf_data)
         obs = identify_order_blocks(htf_data)
 
