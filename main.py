@@ -282,13 +282,14 @@ def analyze_pair(pair):
         logger.error(f"❌ Erreur analyse SMC {pair}: {str(e)}")
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
-    """Exécute un trade avec vérifications supplémentaires"""
+    """Exécute un trade avec vérifications supplémentaires et gestion du slippage"""
     if pair in active_trades:
         logger.info(f"⚠️ Trade actif existant sur {pair}")
         return None
 
+    # Validation du solde et calcul des unités
     account_balance = get_account_balance()
-    if account_balance < 100:  # Minimum account balance
+    if account_balance < 100:
         logger.error("🚨 Solde insuffisant (< $100)")
         return None
 
@@ -296,12 +297,22 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     if units <= 0:
         return None
 
+    # Gestion du buffer pour le slippage
+    pip_location = get_instrument_details(pair)['pip_location']
+    BUFFER = 0.0002 if "JPY" not in pair else 0.02  # 2 pips standard, 20 pips pour JPY
+    adjusted_stop = round(
+        stop_loss + (BUFFER if direction == "sell" else -BUFFER),
+        abs(pip_location)
+    )
+    
+    logger.info(f"🔧 Stop ajusté: {stop_loss:.5f} → {adjusted_stop:.5f} (Buffer: {BUFFER})")
+
     # Vérification marge requise
     specs = get_instrument_details(pair)
     margin_required = (units * entry_price) * specs['margin_rate']
-    if margin_required > account_balance * 0.5:  # Max 50% de marge
+    if margin_required > account_balance * 0.5:
         logger.error(f"🚨 Marge insuffisante (requise: ${margin_required:.2f})")
-        return None   
+        return None 
 
     logger.info(
         f"\n🚀 NOUVEAU TRADE {'ACHAT' if direction == 'buy' else 'VENTE'} 🚀\n"
