@@ -1186,54 +1186,85 @@ def check_timeframe_validity(tf):
         raise ValueError(f"Timeframe invalide. Utiliser: {valid}")
 
 def analyze_asian_session():
+    """
+    Analyse complète de la session asiatique pour toutes les paires
+    Calcule et stocke les prix high/low pour chaque paire durant la session
+    """
     global asian_range_calculated
     
     if asian_range_calculated:
+        logger.debug("🔄 Session asiatique déjà analysée")
         return
         
-    logger.info("🌏 Début analyse rétroactive session asiatique")
-    start_dt = datetime.utcnow().replace(
-        hour=ASIAN_SESSION_START.hour,
-        minute=ASIAN_SESSION_START.minute,
-        second=0,
-        microsecond=0
-    )
-    end_dt = datetime.utcnow().replace(
-        hour=ASIAN_SESSION_END.hour,
-        minute=ASIAN_SESSION_END.minute,
-        second=0,
-        microsecond=0
-    )
+    logger.info("🌏 DÉBUT ANALYSE SESSION ASIATIQUE")
     
+    now = datetime.utcnow()
+    today = now.date()
+    
+    # Calcul des dates de début/fin exactes
+    start_dt = datetime.combine(today, ASIAN_SESSION_START)
+    end_dt = datetime.combine(today, ASIAN_SESSION_END)
+    
+    # Si on est encore dans la session asiatique
+    if now < end_dt:
+        end_dt = now  # On utilise l'heure actuelle comme fin
+        logger.info("⏳ Session asiatique en cours - Analyse partielle")
+    
+    logger.info(f"🔍 Plage analysée: {start_dt} à {end_dt} (UTC)")
+
     for pair in PAIRS:
         try:
             params = {
-                "granularity": "H1",
+                "granularity": "H1",  # Bougies horaires
                 "from": start_dt.isoformat() + "Z",
                 "to": end_dt.isoformat() + "Z",
-                "price": "M"
+                "price": "M"  # Prix mid
             }
-            candles = client.request(instruments.InstrumentsCandles(
-                instrument=pair,
-                params=params
-            ))['candles']
             
+            logger.debug(f"📡 Récupération données pour {pair}...")
+            candles = client.request(
+                instruments.InstrumentsCandles(
+                    instrument=pair,
+                    params=params
+                )
+            )['candles']
+            
+            # Filtrage des bougies complètes
             valid_candles = [c for c in candles if c['complete']]
-            if valid_candles:
-                highs = [float(c['mid']['h']) for c in valid_candles]
-                lows = [float(c['mid']['l']) for c in valid_candles]
+            
+            if not valid_candles:
+                logger.warning(f"⚠️ Aucune donnée valide pour {pair}")
+                continue
                 
-                asian_ranges[pair] = {
-                    'high': max(highs),
-                    'low': min(lows),
-                    'time': end_dt
-                }
+            # Extraction des prix
+            highs = [float(c['mid']['h']) for c in valid_candles]
+            lows = [float(c['mid']['l']) for c in valid_candles]
+            
+            if not highs or not lows:
+                logger.warning(f"⚠️ Données incomplètes pour {pair}")
+                continue
                 
+            # Stockage des résultats
+            asian_ranges[pair] = {
+                'high': max(highs),
+                'low': min(lows),
+                'time': end_dt,
+                'candles': len(valid_candles)
+            }
+            
+            logger.info(
+                f"📊 {pair}: "
+                f"Low={asian_ranges[pair]['low']:.5f} | "
+                f"High={asian_ranges[pair]['high']:.5f} | "
+                f"Bougies={asian_ranges[pair]['candles']}"
+            )
+            
         except Exception as e:
             logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
+            continue
     
     asian_range_calculated = True
-    logger.info("✅ Session asiatique analysée rétroactivement")
+    logger.info("✅ ANALYSE ASIATIQUE TERMINÉE")
 
 def close_all_trades():
     """Ferme tous les trades ouverts"""
