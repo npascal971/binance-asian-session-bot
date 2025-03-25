@@ -287,7 +287,6 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
         trade_history.append(trade_info)
         logger.info("🧪 Mode simulation - Trade non envoyé")
         return "SIMULATION"
-
 def check_tp_sl():
     """Vérifie si TP/SL atteint"""
     try:
@@ -295,28 +294,45 @@ def check_tp_sl():
         open_trades = client.request(r).get('trades', [])
         
         for trade in open_trades:
-            current_price = float(trade['price'])
-            tp_price = float(trade['takeProfitOrder']['price'])
-            sl_price = float(trade['stopLossOrder']['price'])
-            
-            if current_price >= tp_price:
-                send_trade_notification({
-                    'pair': trade['instrument'],
-                    'direction': 'buy' if float(trade['currentUnits']) > 0 else 'sell',
-                    'entry': float(trade['openPrice']),
-                    'stop': sl_price,
-                    'tp': tp_price,
-                    'units': abs(float(trade['currentUnits']))
-                }, "TP")
-            elif current_price <= sl_price:
-                send_trade_notification({
-                    'pair': trade['instrument'],
-                    'direction': 'buy' if float(trade['currentUnits']) > 0 else 'sell',
-                    'entry': float(trade['openPrice']),
-                    'stop': sl_price,
-                    'tp': tp_price,
-                    'units': abs(float(trade['currentUnits']))
-                }, "SL")
+            try:
+                current_price = float(trade['price'])
+                tp_order = trade.get('takeProfitOrder', {})
+                sl_order = trade.get('stopLossOrder', {})
+                
+                if not tp_order or not sl_order:
+                    continue
+                
+                tp_price = float(tp_order.get('price', 0))
+                sl_price = float(sl_order.get('price', 0))
+                
+                if not tp_price or not sl_price:
+                    continue
+                
+                # Get the correct open price field
+                open_price = float(trade.get('price') or trade.get('openPrice') or trade.get('averagePrice', 0))
+                
+                if current_price >= tp_price:
+                    send_trade_notification({
+                        'pair': trade['instrument'],
+                        'direction': 'buy' if float(trade['currentUnits']) > 0 else 'sell',
+                        'entry': open_price,
+                        'stop': sl_price,
+                        'tp': tp_price,
+                        'units': abs(float(trade['currentUnits']))
+                    }, "TP")
+                elif current_price <= sl_price:
+                    send_trade_notification({
+                        'pair': trade['instrument'],
+                        'direction': 'buy' if float(trade['currentUnits']) > 0 else 'sell',
+                        'entry': open_price,
+                        'stop': sl_price,
+                        'tp': tp_price,
+                        'units': abs(float(trade['currentUnits']))
+                    }, "SL")
+            except Exception as e:
+                logger.error(f"❌ Erreur traitement trade {trade.get('id', 'unknown')}: {str(e)}")
+                continue
+                
     except Exception as e:
         logger.error(f"❌ Erreur vérification TP/SL: {str(e)}")
 
