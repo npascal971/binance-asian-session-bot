@@ -1127,10 +1127,10 @@ if __name__ == "__main__":
 
     # Boucle principale
     while True:
-    try:
-        now = datetime.utcnow()
-        current_time = now.time()
-        weekday = now.weekday()
+        try:
+            now = datetime.utcnow()
+            current_time = now.time()
+            weekday = now.weekday()
 
         logger.info(f"🔄 Cycle début - {now} (UTC)")  # Nouveau log
 
