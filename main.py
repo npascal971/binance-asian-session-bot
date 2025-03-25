@@ -1275,65 +1275,87 @@ if __name__ == "__main__":
     
     update_daily_zones()  # Premier calcul après 00:30 UTC
 
-    # Boucle principale
-    while True:
-        try:
-            now = datetime.utcnow()
-            current_time = now.time()
-            weekday = now.weekday()
+# Boucle principale
+while True:
+    try:
+        now = datetime.utcnow()
+        current_time = now.time()
+        weekday = now.weekday()
 
-            logger.info(f"🔄 Cycle début - {now} (UTC)")  # Nouveau log
+        logger.info(f"🔄 Cycle début - {now} (UTC) | Session: {'ASIE' if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END else 'LON/NY' if LONDON_SESSION_START <= current_time <= NY_SESSION_END else 'HORS-SESSION'}")
 
         # 1. Gestion Week-End
-            if weekday >= 5:
-                handle_weekend(now)
-                continue
+        if weekday >= 5:
+            handle_weekend(now)
+            continue
 
         # 2. Réinitialisation quotidienne
-            if current_time.hour == 0 and current_time.minute < 30:
-                daily_data_updated = False
-                asian_range_calculated = False
-                end_of_day_processed = False
+        if current_time.hour == 0 and current_time.minute < 30:
+            daily_data_updated = False
+            asian_range_calculated = False
+            end_of_day_processed = False
 
         # 3. Mise à jour quotidienne
-            if not daily_data_updated and current_time >= dtime(0, 30):
-                update_daily_zones()
+        if not daily_data_updated and current_time >= dtime(0, 30):
+            update_daily_zones()
 
-        # 4. Session Asiatique
-            if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
-                if not asian_range_calculated:
-                    logger.info("🌏 Début analyse session asiatique")
-                    for pair in PAIRS:
-                        store_asian_range(pair)  # Utilisez cette fonction au lieu de process_asian_session()
-                    asian_range_calculated = True
-                    logger.info("✅ Analyse session asiatique terminée")
-                time.sleep(300)  # 5 minutes ATTENTION : doit être en dehors du if !
-                continue  # ← Important pour sauter le reste de la boucle
-
-        # 5. Session Active (Londres + NY)
-            if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-                cycle_start = time.time()  # <-- AJOUTEZ CETTE LIGNE
-                active_trades = check_active_trades()
-    
+        # 4. Session Asiatique (00:00-06:00 UTC)
+        if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+            if not asian_range_calculated:
+                logger.info("🌏 Début analyse session asiatique")
                 for pair in PAIRS:
-                    analyze_pair(pair)
-    
-                check_tp_sl()
-    
-                elapsed = time.time() - cycle_start
-                sleep_time = max(30 - elapsed, 5)  # 30s target avec minimum 5s
-                logger.debug(f"⏱ Prochain cycle dans {sleep_time:.1f}s (Traitement: {elapsed:.2f}s)")
-                time.sleep(sleep_time)
-                continue
+                    # Version optimisée de store_asian_range()
+                    candles = get_candles(pair, ASIAN_SESSION_START, current_time)
+                    if candles:
+                        highs = [float(c['mid']['h']) for c in candles if 'mid' in c]
+                        lows = [float(c['mid']['l']) for c in candles if 'mid' in c]
+                        if highs and lows:
+                            asian_ranges[pair] = {
+                                'high': max(highs),
+                                'low': min(lows),
+                                'time': now
+                            }
+                asian_range_calculated = True
+                logger.info("✅ Analyse session asiatique terminée")
+            time.sleep(300)  # Attente avant prochaine vérification
+            continue
 
-
-        # 6. Hors session
-            if not end_of_day_processed:
-                close_all_trades()
-                end_of_day_processed = True
-        
+        # 5. Pause Entre Sessions (06:00-07:00 UTC)
+        if ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
             time.sleep(60)
+            continue
 
-        except Exception as e:
-            logger.error(f"💥 Erreur critique: {str(e)}", exc_info=True)
-            time.sleep(300)
+        # 6. Session Active (Londres + NY, 07:00-16:30 UTC)
+        if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+            cycle_start = time.time()
+            
+            # Vérification événements macro
+            if check_high_impact_events():
+                time.sleep(300)
+                continue
+                
+            # Analyse des paires
+            active_trades = check_active_trades()
+            for pair in PAIRS:
+                analyze_pair(pair)
+            
+            check_tp_sl()
+            
+            # Timing dynamique
+            elapsed = time.time() - cycle_start
+            sleep_time = max(30 - elapsed, 5)
+            logger.debug(f"⏱ Prochain cycle trading dans {sleep_time:.1f}s")
+            time.sleep(sleep_time)
+            continue
+
+        # 7. Après Fermeture (16:30-00:00 UTC)
+        if not end_of_day_processed:
+            logger.info("🌙 Fermeture de session - Liquidation des positions")
+            close_all_trades()
+            end_of_day_processed = True
+            
+        time.sleep(60)
+
+    except Exception as e:
+        logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
+        time.sleep(300)
