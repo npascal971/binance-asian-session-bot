@@ -1323,11 +1323,7 @@ while True:
     
             if not asian_range_calculated:
                 logger.info("🔍 DÉBUT ANALYSE ASIATIQUE APPROFONDIE")
-                process_asian_session()  # Extraire cette logique dans une fonction
-            else:
-                logger.debug("Session asiatique déjà analysée")
-            time.sleep(60)
-            continue
+               
                 # 1. Récupération des données
                 start_dt = datetime.now(UTC).replace(hour=0, minute=0, second=0)
                 end_dt = datetime.now(UTC)
