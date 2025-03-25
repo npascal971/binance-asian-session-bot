@@ -91,33 +91,52 @@ def get_instrument_details(pair):
             'units_precision': 6 if pair in CRYPTO_PAIRS else 2,
             'margin_rate': 0.05 if pair in CRYPTO_PAIRS else 0.02
         }
-
 def calculate_position_size(pair, account_balance, entry_price, stop_loss):
-    """Calcule la taille de position avec gestion précise du risque"""
+    """Calcule la taille de position avec gestion de risque stricte"""
     specs = get_instrument_details(pair)
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), MAX_RISK_USD)
     
     try:
-        if pair in CRYPTO_PAIRS:
-            # Calcul pour les cryptos
-            risk_per_unit = abs(entry_price - stop_loss)
-            units = risk_amount / risk_per_unit
-            distance_pips = risk_per_unit  # Just for logging
-        else:
-            # Calcul pour Forex et autres
-            pip_value = 10 ** specs['pip_location']
-            distance_pips = abs(entry_price - stop_loss) / pip_value
-            units = risk_amount / distance_pips
+        # Calcul de la distance en pips
+        pip_value = 10 ** specs['pip_location']
+        distance_pips = abs(entry_price - stop_loss) / pip_value
         
-        units = round(units, specs['units_precision'])
+        # Vérification de la distance minimale
+        MIN_DISTANCE = 5  # pips minimum
+        if distance_pips < MIN_DISTANCE:
+            logger.warning(f"⚠️ Distance trop petite ({distance_pips:.1f}p) pour {pair}")
+            return 0
+            
+        # Calcul des unités de base
+        units = risk_amount / distance_pips
         
-        # Vérification des unités minimales
-        if units < specs['min_units']:
-            logger.warning(f"⚠️ Unités trop petites ({units}) < min ({specs['min_units']}). Ajustement du risque.")
-            risk_amount = specs['min_units'] * distance_pips
-            if risk_amount > MAX_RISK_USD:
-                logger.error(f"🚨 Risque ajusté ({risk_amount}) dépasse MAX_RISK_USD")
+        # Application des contraintes
+        if pair not in CRYPTO_PAIRS:
+            # Pour Forex: arrondir au multiple de min_units le plus proche
+            units = max(round(units / specs['min_units']) * specs['min_units'], specs['min_units'])
+            
+            # Vérification du risque ajusté
+            adjusted_risk = units * distance_pips
+            if adjusted_risk > MAX_RISK_USD * 1.1:  # 10% de tolérance
+                logger.error(f"🚨 Risque ajusté ${adjusted_risk:.2f} dépasse MAX_RISK_USD")
                 return 0
+        else:
+            # Pour Crypto: précision différente
+            units = round(units, specs['units_precision'])
+        
+        logger.info(f"""
+        📊 Position Validée {pair}:
+        • Entrée: {entry_price:.5f}
+        • Stop: {stop_loss:.5f}
+        • Distance: {distance_pips:.1f} pips
+        • Unités: {units}
+        • Risque: ${units * distance_pips:.2f}
+        """)
+        return units
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur calcul position {pair}: {str(e)}")
+        return 0
             units = specs['min_units']
         
         logger.info(f"""
