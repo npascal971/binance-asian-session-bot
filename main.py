@@ -417,8 +417,8 @@ if __name__ == "__main__":
         time.sleep(0.5)
 
     while True:
-    now = datetime.now()
-    current_time = now.time()
+        now = datetime.now()
+        current_time = now.time()
     
     # 1. Vérification week-end
     if now.weekday() >= 5:
