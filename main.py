@@ -426,6 +426,24 @@ def macro_filter(pair, direction):
 # Configuration Alpha Vantage
 ECONOMIC_CALENDAR_API = "https://www.alphavantage.co/query"
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")  # Clé gratuite sur leur site
+REQUEST_INTERVAL = 12  # secondes entre les requêtes (5 req/min)
+LAST_CALL_TIME = 0
+
+@lru_cache(maxsize=4)  # Cache pour les 4 principales devises
+def get_economic_events(country):
+    """Filtre les événements par devise"""
+    events = get_all_economic_events()
+    return [
+        {
+            'name': e['event'],
+            'time': datetime.strptime(e['time'], '%Y-%m-%dT%H:%M:%S'),
+            'currency': e.get('currency', country),
+            'impact': e.get('impact', 'medium').upper(),
+            'actual': e.get('actual'),
+            'forecast': e.get('forecast')
+        }
+        for e in events if e.get('currency', '').upper() == country.upper()
+    ]
 
 def check_economic_calendar(pair):
     """Récupère le calendrier économique via Alpha Vantage"""
