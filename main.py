@@ -15,6 +15,8 @@ import oandapyV20.endpoints.trades as trades
 import oandapyV20.endpoints.pricing as pricing
 import requests
 from datetime import timedelta
+import pytz
+UTC = pytz.UTC
 
 
 # Chargement des variables d'environnement
@@ -1300,46 +1302,54 @@ while True:
             update_daily_zones()
             
         # 4. Session Asiatique (00:00-06:00 UTC)
-        current_utc_time = datetime.utcnow().time()
-        if ASIAN_SESSION_START <= current_utc_time < ASIAN_SESSION_END:
-            logger.info(f"🌐 DÉTECTION SESSION ASIATIQUE ACTIVE (UTC: {current_utc_time})")
+        # Ajoutez en haut du fichier
+
+
+# Remplacez la condition de session asiatique par :
+        current_utc = datetime.now(UTC).time()
+        if ASIAN_SESSION_START <= current_utc < ASIAN_SESSION_END:
+            logger.info(f"🌏 DÉTECTION SESSION ASIATIQUE ({current_utc} UTC)")
     
             if not asian_range_calculated:
-                logger.info("🌏 LANCEMENT ANALYSE ASIATIQUE APPROFONDIE")
+                logger.info("🔍 DÉBUT ANALYSE ASIATIQUE APPROFONDIE")
+        
+                # 1. Récupération des données
+                start_dt = datetime.now(UTC).replace(hour=0, minute=0, second=0)
+                end_dt = datetime.now(UTC)
+        
                 for pair in PAIRS:
                     try:
-                        # Récupération depuis le début de session
-                        start_dt = datetime.combine(datetime.utcnow().date(), ASIAN_SESSION_START)
-                        end_dt = datetime.utcnow()
+                        # 2. Requête avec plage temporelle précise
+                        params = {
+                            "granularity": "H1",
+                            "from": start_dt.isoformat() + "Z",
+                            "to": end_dt.isoformat() + "Z",
+                            "price": "M"
+                        }
+                        candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
                 
-                        candles = get_candles(pair, start_dt.time(), end_dt.time())
-                
-                        if not candles:
-                            logger.warning(f"⚠️ Aucune donnée pour {pair}")
-                            continue
-                    
-                        # Validation des données
-                        valid_candles = [c for c in candles if c['complete'] and 'mid' in c]
+                        # 3. Validation des données
+                        valid_candles = [c for c in candles if c['complete']]
                         if not valid_candles:
                             continue
                     
+                        # 4. Calcul du range
                         highs = [float(c['mid']['h']) for c in valid_candles]
                         lows = [float(c['mid']['l']) for c in valid_candles]
                 
-                        # Calcul avec buffer
-                        buffer = BUFFER_SETTINGS.get(pair, 0.0003)
                         asian_ranges[pair] = {
-                            'high': max(highs) + buffer,
-                            'low': min(lows) - buffer,
-                            'time': datetime.utcnow(),
-                            'samples': len(valid_candles)
+                            'high': max(highs),
+                            'low': min(lows),
+                            'time': end_dt,
+                            'candles': len(valid_candles)
                         }
                 
                         logger.info(f"""
-                        📊 RÉSULTAT {pair}:
+                            📊 RÉSULTAT {pair}:
                         • High: {asian_ranges[pair]['high']:.5f}
-                        • Low: {asian_ranges[pair]['low']:.5f}
-                        • Bougies analysées: {asian_ranges[pair]['samples']}
+                        • Low: {asian_ranges[pair]['low']:.5f} 
+                        • Bougies analysées: {asian_ranges[pair]['candles']}
+                        • Dernière bougie: {valid_candles[-1]['time']}
                         """)
                 
                     except Exception as e:
@@ -1350,9 +1360,9 @@ while True:
                 logger.info("✅ ANALYSE ASIATIQUE TERMINÉE")
     
             # Surveillance continue
-            time.sleep(60)  # Réduisez l'intervalle
+            time.sleep(60)
             continue
-
+                
         # 5. Pause Entre Sessions (06:00-07:00 UTC)
         if ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
             time.sleep(60)
