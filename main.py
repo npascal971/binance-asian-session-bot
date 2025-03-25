@@ -1145,12 +1145,57 @@ while True:
         # =============================================
         # 4. SESSION ACTIVE (Londres + NY)
         # =============================================
+        
         if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-            asian_range = get_asian_range(pair)
-               if price > asian_range['high']:
-                # Signal d'achat sur breakout
-        elif price < asian_range['low']:
-                # Signal de vente sur breakdown
+            # Réinitialisation des flags
+            asian_range_calculated = False
+    
+            # Logique de trading
+            start_time = time.time()
+    
+            # A. Vérification trades actifs
+            active_trades = check_active_trades()
+    
+            # B. Analyse des paires
+            for pair in PAIRS:
+                # Récupération du range asiatique
+                asian_range = get_asian_range(pair)
+                current_price = get_current_price(pair)
+        
+                # Stratégie de breakout du range asiatique
+                if current_price > asian_range['high']:
+                    logger.info(f"🚀 Breakout haussier détecté sur {pair}")
+                    place_trade(
+                        pair=pair,
+                        direction="buy",
+                        entry_price=current_price,
+                        stop_loss=asian_range['low'] - 0.0005,  # Stop sous le low du range
+                        take_profit=current_price + (asian_range['high'] - asian_range['low']) * 1.5  # TP = 1.5x le range
+                    )
+                elif current_price < asian_range['low']:
+                    logger.info(f"🔻 Breakdown baissier détecté sur {pair}")
+                    place_trade(
+                        pair=pair,
+                        direction="sell",
+                        entry_price=current_price,
+                        stop_loss=asian_range['high'] + 0.0005,  # Stop au-dessus du high du range
+                        take_profit=current_price - (asian_range['high'] - asian_range['low']) * 1.5  # TP = 1.5x le range
+                    )
+    
+            # C. Gestion TP/SL
+            check_tp_sl()
+    
+            # D. Timing
+            elapsed = time.time() - start_time
+            time.sleep(max(60 - elapsed, 5))
+            continue
+            
+            # Signal de vente sur breakdown
+
+
+            
+
+
             
 
         # =============================================
