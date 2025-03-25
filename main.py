@@ -352,11 +352,16 @@ def check_economic_calendar(pair):
     try:
         if not ECONOMIC_CALENDAR_API:
             return []
-            
-        params = {
-            "currency": base_currency,
-            "importance": "HIGH,MEDIUM",
-            "api_key": MACRO_API_KEY
+        headers = {
+            "Authorization": f"Bearer {MACRO_API_KEY}",
+            "Accept": "application/json"
+    } 
+       params = {
+            "country": pair[:3],  # Format attendu par la nouvelle API
+            "importance": "high,medium",  # Format corrigé
+            "timezone": "UTC",
+            "start_date": datetime.utcnow().isoformat(),
+            "end_date": (datetime.utcnow() + timedelta(days=1)).isoformat()
         }
         response = requests.get(ECONOMIC_CALENDAR_API, params=params, timeout=5).json()
         
