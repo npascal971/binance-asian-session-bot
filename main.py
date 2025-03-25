@@ -791,7 +791,7 @@ def identify_order_blocks(candles, min_ratio=2):
         prev, curr = candles[i-1], candles[i]
         
         # Bullish OB: grosse bougie verte suivie de rouge
-        if (float(prev['mid']['c']) > float(prev['mid']['o']) and \
+        if (float(prev['mid']['c']) > float(prev['mid']['o'])) and \
            (float(curr['mid']['c']) < float(curr['mid']['o'])):
             body_size = abs(float(prev['mid']['c']) - float(prev['mid']['o']))
             if body_size > (prev['mid']['h'] - prev['mid']['l']) / min_ratio:
