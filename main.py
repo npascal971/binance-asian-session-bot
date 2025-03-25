@@ -712,46 +712,48 @@ def identify_order_blocks(candles, lookback=100):
     return filtered_ob
     
 def analyze_pair(pair):
-    """Version optimisée avec gestion des buffers dynamiques et requêtes API réduites"""
+    """Version corrigée avec déclaration correcte de 'direction'"""
     try:
-        # 1. Récupération initiale des données (une seule requête HTF)
+        # 1. Vérification initiale des données
         htf_data = get_htf_data(pair)
         if not htf_data or len(htf_data) < 10:
-            logger.warning(f"⚠️ Données HTF insuffisantes pour {pair} ({len(htf_data) if htf_data else 0} bougies)")
+            logger.warning(f"⚠️ Données insuffisantes pour {pair}")
             return
 
-        # 2. Récupération simultanée du prix et du range
-        current_price, asian_range = get_current_price(pair), get_asian_range(pair)
-        if None in (current_price, asian_range):
-            return
-
-        # 3. Vérification tendance avec cache
-        trend = check_htf_trend(pair, htf_data)  # Modifié pour utiliser les données existantes
+        # 2. Vérification tendance HTF
+        trend = check_htf_trend(pair)
         if trend == 'NEUTRAL':
-            logger.debug(f"↔️ {pair} en range (Prix: {current_price:.5f})")
+            logger.debug(f"↔️ {pair} en range - Aucun trade")
             return
 
-        # 4. Buffer dynamique selon l'instrument
-        buffer = get_buffer_size(pair)  # Nouvelle fonction à créer
+        # 3. Détermination de la direction ICI (avant utilisation)
+        direction = 'BUY' if trend == 'UP' else 'SELL'  # <-- DÉCLARATION AJOUTÉE
+
+        # 4. Récupération du range asiatique
+        asian_range = get_asian_range(pair)
+        current_price = get_current_price(pair)
         
-        # 5. Vérification prix dans le range élargi
-        if not (asian_range['low'] - buffer <= current_price <= asian_range['high'] + buffer):
-            logger.debug(f"🔍 {pair}: {current_price:.5f} hors range {asian_range['low']-buffer:.5f}-{asian_range['high']+buffer:.5f}")
+        # 5. Vérification du contexte de prix
+        if not is_price_in_valid_range(current_price, asian_range, trend):
+            logger.debug(f"🔍 {pair}: Prix hors range asiatique valide")
             return
 
-        # 6. Analyse des zones (utilise les données HTF déjà chargées)
+        # 6. Détection des zones de trading
         fvgs = identify_fvg(htf_data)
         obs = identify_order_blocks(htf_data)
-        
-        # 7. Vérification de la confluence
+
+        # 7. Vérification des zones FVG/OB
+        in_fvg, fvg_zone = is_price_in_fvg(current_price, fvgs)
+        near_ob, ob_zone = is_price_near_ob(current_price, obs, trend)
+
+        if not (in_fvg and near_ob):
+            logger.debug(f"🔍 {pair}: Aucune zone FVG/OB valide")
+            return
+
+        # 8. Vérification de la confluence (utilise direction déclarée plus haut)
         confluence_score = check_confluence(pair, direction)
         if confluence_score < MIN_CONFLUENCE_SCORE:
             logger.warning(f"⚠️ {pair}: Confluence insuffisante ({confluence_score}/{MIN_CONFLUENCE_SCORE})")
-            return
-
-        # 8. Vérification des corrélations
-        if not check_correlation(pair, direction):
-            logger.warning(f"⚠️ {pair}: Corrélations défavorables")
             return
 
         # 9. Filtre macroéconomique
