@@ -756,134 +756,181 @@ def get_candles(pair, start_time, end_time=None):
         return []
         
 def identify_fvg(candles, min_strength=5):
-    """Version optimisée avec détection de force relative"""
+    """Version corrigée avec gestion des types"""
     fvgs = []
-    for i in range(1, len(candles)):
-        prev, curr = candles[i-1]['mid'], candles[i]['mid']
-        bull_gap = float(curr['l']) > float(prev['h'])
-        bear_gap = float(curr['h']) < float(prev['l'])
-        
-        if bull_gap:
-            strength = (float(curr['l']) - float(prev['h'])) * 10000  # en pips
-            if strength >= min_strength:
-                fvgs.append({
-                    'type': 'BULLISH',
-                    'levels': (float(prev['h']), float(curr['l'])),
-                    'strength': strength
-                })
-                
-        elif bear_gap:
-            strength = (float(prev['l']) - float(curr['h'])) * 10000
-            if strength >= min_strength:
-                fvgs.append({
-                    'type': 'BEARISH', 
-                    'levels': (float(curr['h']), float(prev['l'])),
-                    'strength': strength
-                })
     
-    return sorted(fvgs, key=lambda x: x['strength'], reverse=True)
+    for i in range(1, len(candles)):
+        try:
+            prev = candles[i-1]['mid']
+            curr = candles[i]['mid']
+            
+            # Conversion en float
+            prev_h = float(prev['h'])
+            prev_l = float(prev['l'])
+            curr_h = float(curr['h'])
+            curr_l = float(curr['l'])
+            
+            # Détection FVG
+            bull_gap = curr_l > prev_h
+            bear_gap = curr_h < prev_l
+            
+            if bull_gap:
+                strength = (curr_l - prev_h) * 10000  # en pips
+                if strength >= min_strength:
+                    fvgs.append({
+                        'type': 'BULLISH',
+                        'top': prev_h,
+                        'bottom': curr_l,
+                        'strength': round(strength, 1)
+                    })
+                    
+            elif bear_gap:
+                strength = (prev_l - curr_h) * 10000
+                if strength >= min_strength:
+                    fvgs.append({
+                        'type': 'BEARISH',
+                        'top': prev_l,
+                        'bottom': curr_h,
+                        'strength': round(strength, 1)
+                    })
+                    
+        except (KeyError, ValueError) as e:
+            logger.warning(f"Erreur traitement FVG bougie {i}: {str(e)}")
+            continue
+    
+    return fvgs
 
 def identify_order_blocks(candles, min_ratio=2):
-    """Détection améliorée avec filtre volume/ratio"""
+    """Version corrigée avec conversion explicite des types"""
     blocks = {'bullish': [], 'bearish': []}
     
     for i in range(2, len(candles)):
-        prev, curr = candles[i-1], candles[i]
-        
-        # Bullish OB: grosse bougie verte suivie de rouge
-        if (float(prev['mid']['c']) > float(prev['mid']['o'])) and \
-           (float(curr['mid']['c']) < float(curr['mid']['o'])):
-            body_size = abs(float(prev['mid']['c']) - float(prev['mid']['o']))
-            if body_size > (prev['mid']['h'] - prev['mid']['l']) / min_ratio:
-                blocks['bullish'].append({
-                    'high': float(prev['mid']['h']),
-                    'low': float(prev['mid']['l']),
-                    'open': float(prev['mid']['o']),
-                    'close': float(prev['mid']['c'])
-                })
-                
-        # Bearish OB: grosse bougie rouge suivie de verte
-        elif (float(prev['mid']['c']) < float(prev['mid']['o'])) and \
-             (float(curr['mid']['c']) > float(curr['mid']['o'])):
-            body_size = abs(float(prev['mid']['o']) - float(prev['mid']['c']))
-            if body_size > (prev['mid']['h'] - prev['mid']['l']) / min_ratio:
-                blocks['bearish'].append({
-                    'high': float(prev['mid']['h']),
-                    'low': float(prev['mid']['l']),
-                    'open': float(prev['mid']['o']),
-                    'close': float(prev['mid']['c'])
-                })
-    
+        try:
+            prev = candles[i-1]['mid']
+            curr = candles[i]['mid']
+            
+            # Conversion explicite en float
+            prev_o = float(prev['o'])
+            prev_c = float(prev['c'])
+            prev_h = float(prev['h'])
+            prev_l = float(prev['l'])
+            curr_c = float(curr['c'])
+            curr_o = float(curr['o'])
+            
+            # Bullish OB
+            if (prev_c > prev_o) and (curr_c < curr_o):
+                body_size = abs(prev_c - prev_o)
+                candle_range = prev_h - prev_l
+                if candle_range > 0 and (body_size > (candle_range / min_ratio)):
+                    blocks['bullish'].append({
+                        'high': prev_h,
+                        'low': prev_l,
+                        'open': prev_o,
+                        'close': prev_c,
+                        'time': candles[i-1].get('time')
+                    })
+                    
+            # Bearish OB
+            elif (prev_c < prev_o) and (curr_c > curr_o):
+                body_size = abs(prev_o - prev_c)
+                candle_range = prev_h - prev_l
+                if candle_range > 0 and (body_size > (candle_range / min_ratio)):
+                    blocks['bearish'].append({
+                        'high': prev_h,
+                        'low': prev_l,
+                        'open': prev_o,
+                        'close': prev_c,
+                        'time': candles[i-1].get('time')
+                    })
+                    
+        except (KeyError, ValueError) as e:
+            logger.warning(f"Erreur traitement bougie {i}: {str(e)}")
+            continue
+            
+    logger.debug(f"OB détectés: {len(blocks['bullish'])} haussiers / {len(blocks['bearish'])} baissiers")
     return blocks
     
 def analyze_pair(pair):
-    """Version corrigée avec déclaration correcte de 'direction'"""
+    """Version optimisée avec gestion robuste des erreurs et conversion des types"""
     try:
-        # 1. Vérification initiale des données
+        # 1. Vérification initiale des données avec conversion sécurisée
         htf_data = get_htf_data(pair)
         if not htf_data or len(htf_data) < 10:
-            logger.warning(f"⚠️ Données insuffisantes pour {pair}")
+            logger.warning(f"⚠️ Données insuffisantes pour {pair} (HTF)")
             return
 
-        # 2. Vérification tendance HTF
+        # Conversion explicite des prix en float
+        for candle in htf_data:
+            if 'mid' in candle:
+                candle['mid'] = {k: float(v) for k, v in candle['mid'].items()}
+
+        # 2. Analyse de tendance HTF
         trend = check_htf_trend(pair)
         if trend == 'NEUTRAL':
             logger.debug(f"↔️ {pair} en range - Aucun trade")
             return
 
-        # 3. Détermination de la direction ICI (avant utilisation)
-        direction = 'BUY' if trend == 'UP' else 'SELL'  # <-- DÉCLARATION AJOUTÉE
+        direction = 'BUY' if trend == 'UP' else 'SELL'
 
-        # 4. Récupération du range asiatique
+        # 3. Contexte de prix et range asiatique
         asian_range = get_asian_range(pair)
-        current_price = get_current_price(pair)
-        
-        # 5. Vérification du contexte de prix
-        if not is_price_in_valid_range(current_price, asian_range, trend):
-            logger.debug(f"🔍 {pair}: Prix hors range asiatique valide")
+        try:
+            current_price = float(get_current_price(pair))
+        except (TypeError, ValueError) as e:
+            logger.error(f"❌ Erreur prix actuel {pair}: {str(e)}")
             return
 
-        # 6. Détection des zones de trading
+        if not is_price_in_valid_range(current_price, asian_range, trend):
+            logger.debug(f"🔍 {pair}: Prix {current_price:.5f} hors range valide "
+                        f"({asian_range['low']:.5f}-{asian_range['high']:.5f})")
+            return
+
+        # 4. Détection des zones techniques
         fvgs = identify_fvg(htf_data)
         obs = identify_order_blocks(htf_data)
 
-        # 7. Vérification des zones FVG/OB
-        in_fvg, fvg_zone = is_price_in_fvg(current_price, fvgs)
-        near_ob, ob_zone = is_price_near_ob(current_price, obs, trend)
-
-        if not (in_fvg and near_ob):
-            logger.debug(f"🔍 {pair}: Aucune zone FVG/OB valide")
+        # 5. Validation des zones avec gestion des erreurs
+        try:
+            in_fvg, fvg_zone = is_price_in_fvg(current_price, fvgs)
+            near_ob, ob_zone = is_price_near_ob(current_price, obs, trend)
+            
+            if not (in_fvg and near_ob):
+                logger.debug(f"🔍 {pair}: Aucune zone valide (FVG: {in_fvg}, OB: {near_ob})")
+                return
+                
+            stop_loss = calculate_stop(fvg_zone, ob_zone, asian_range, direction)
+            take_profit = calculate_tp(current_price, asian_range, direction, daily_zones.get(pair, {}))
+        except Exception as e:
+            logger.error(f"❌ Erreur calcul niveaux {pair}: {str(e)}")
             return
 
-        # 8. Vérification de la confluence (utilise direction déclarée plus haut)
+        # 6. Vérification de la confluence
         confluence_score = check_confluence(pair, direction)
         if confluence_score < MIN_CONFLUENCE_SCORE:
-            logger.warning(f"⚠️ {pair}: Confluence insuffisante ({confluence_score}/{MIN_CONFLUENCE_SCORE})")
+            logger.warning(f"⚠️ {pair}: Confluence faible ({confluence_score}/{MIN_CONFLUENCE_SCORE})")
             return
 
-        # 9. Filtre macroéconomique
+        # 7. Filtre macroéconomique
         if not macro_filter(pair, direction):
             logger.warning(f"⚠️ {pair}: Contexte macro défavorable")
             return
 
-        # 10. Calcul des niveaux avec référence au range asiatique (nouveau)
-        stop_loss = calculate_stop(fvg_zone, ob_zone, asian_range, direction)
-        take_profit = calculate_tp(current_price, asian_range, direction, daily_zones.get(pair, {}))
-        
-        # 11. Journalisation détaillée
+        # 8. Journalisation détaillée
         logger.info(f"""
-        🎯 Signal confirmé sur {pair}:
-        • Direction: {direction}
-        • Prix: {current_price:.5f}
-        • Range Asiatique: {asian_range['low']:.5f}-{asian_range['high']:.5f}
-        • Stop: {stop_loss:.5f} (Risque: {abs(current_price-stop_loss):.1f}pips)
-        • TP: {take_profit:.5f} (Gain potentiel: {abs(take_profit-current_price):.1f}pips)
-        • Ratio R/R: {abs(take_profit-current_price)/abs(current_price-stop_loss):.1f}
-        • Confluence: {confluence_score}/3
-        • Tendance HTF: {trend}
+        🎯 SIGNAL CONFIRMÉ {pair} 🎯
+        Direction: {'ACHAT' if direction == 'BUY' else 'VENTE'}
+        Prix actuel: {current_price:.5f}
+        Tendance HTF: {trend}
+        Range Asiatique: {asian_range['low']:.5f}-{asian_range['high']:.5f}
+        Stop Loss: {stop_loss:.5f} (Risque: {abs(current_price-stop_loss):.1f}pips)
+        Take Profit: {take_profit:.5f} (Ratio R/R: {abs(take_profit-current_price)/abs(current_price-stop_loss):.1f})
+        Confluence: {confluence_score}/3
+        Zones:
+        - FVG: {fvg_zone['type']} {fvg_zone.get('levels', [])}
+        - OB: {'Haussier' if near_ob == 'BUY' else 'Baissier'} {ob_zone.get('levels', [])}
         """)
 
-        # 12. Execution du trade
+        # 9. Exécution du trade
         place_trade(
             pair=pair,
             direction=direction.lower(),
@@ -893,7 +940,7 @@ def analyze_pair(pair):
         )
 
     except Exception as e:
-        logger.error(f"❌ Erreur analyse {pair}: {str(e)}", exc_info=True)
+        logger.error(f"❌ ERREUR CRITIQUE {pair}: {str(e)}", exc_info=True)
 
 def get_buffer_size(pair):
     """Retourne le buffer adapté à chaque instrument"""
