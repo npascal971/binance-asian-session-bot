@@ -755,107 +755,66 @@ def get_candles(pair, start_time, end_time=None):
         logger.error(f"❌ Erreur récupération candles {pair}: {str(e)}")
         return []
         
-def identify_fvg(candles, lookback=50):
-    """
-    Identifie les Fair Value Gaps (FVG) sur les données historiques
-    Args:
-        candles: Liste des bougies OHLC
-        lookback: Nombre de bougies à analyser
-    Returns:
-        Liste des FVG (haussiers et baissiers)
-    """
+def identify_fvg(candles, min_strength=5):
+    """Version optimisée avec détection de force relative"""
     fvgs = []
-    candles = candles[-lookback:]  # On ne garde que les N dernières bougies
-    
     for i in range(1, len(candles)):
-        prev = candles[i-1]['mid']
-        curr = candles[i]['mid']
+        prev, curr = candles[i-1]['mid'], candles[i]['mid']
+        bull_gap = float(curr['l']) > float(prev['h'])
+        bear_gap = float(curr['h']) < float(prev['l'])
         
-        # FVG haussier (l'actuel Low > précédent High)
-        if curr['l'] > prev['h']:
-            fvgs.append({
-                'type': 'BULLISH',
-                'top': float(prev['h']),
-                'bottom': float(curr['l']),
-                'time': candles[i]['time'],
-                'strength': round((float(curr['l']) - float(prev['h']))/float(prev['h'])*10000, 2)  # en pips
-            })
-        
-        # FVG baissier (l'actuel High < précédent Low)
-        elif curr['h'] < prev['l']:
-            fvgs.append({
-                'type': 'BEARISH',
-                'top': float(prev['l']),
-                'bottom': float(curr['h']),
-                'time': candles[i]['time'],
-                'strength': round((float(prev['l']) - float(curr['h']))/float(prev['l'])*10000, 2)
-            })
+        if bull_gap:
+            strength = (float(curr['l']) - float(prev['h'])) * 10000  # en pips
+            if strength >= min_strength:
+                fvgs.append({
+                    'type': 'BULLISH',
+                    'levels': (float(prev['h']), float(curr['l'])),
+                    'strength': strength
+                })
+                
+        elif bear_gap:
+            strength = (float(prev['l']) - float(curr['h'])) * 10000
+            if strength >= min_strength:
+                fvgs.append({
+                    'type': 'BEARISH', 
+                    'levels': (float(curr['h']), float(prev['l'])),
+                    'strength': strength
+                })
     
-    # Filtrage des FVG les plus significatifs (force > 5 pips)
-    significant_fvgs = [fvg for fvg in fvgs if fvg['strength'] >= 5]
-    
-    logger.debug(f"🔍 {len(significant_fvgs)} FVG significatifs détectés")
-    return significant_fvgs
+    return sorted(fvgs, key=lambda x: x['strength'], reverse=True)
 
-def identify_order_blocks(candles, lookback=100):
-    """
-    Identifie les Order Blocks (OB) sur les données historiques
-    Version corrigée pour gérer le format OANDA v3
-    """
-    ob_bullish = []
-    ob_bearish = []
-    candles = candles[-lookback:]
+def identify_order_blocks(candles, min_ratio=2):
+    """Détection améliorée avec filtre volume/ratio"""
+    blocks = {'bullish': [], 'bearish': []}
     
     for i in range(2, len(candles)):
-        prev = candles[i-1]
-        curr = candles[i]
+        prev, curr = candles[i-1], candles[i]
         
-        # Vérification que les données nécessaires existent
-        if not all(key in prev['mid'] for key in ['o', 'h', 'l', 'c']):
-            continue
-            
-        prev_open = float(prev['mid']['o'])
-        prev_close = float(prev['mid']['c'])
-        curr_open = float(curr['mid']['o'])
-        curr_close = float(curr['mid']['c'])
-        
-        # OB haussier (grosse bougie verte suivie d'une bougie rouge)
-        if prev_close > prev_open and curr_close < curr_open:
-            ob_bullish.append({
-                'high': float(prev['mid']['h']),
-                'low': float(prev['mid']['l']),
-                'open': prev_open,
-                'close': prev_close,
-                'time': prev.get('time', 'N/A'),  # Gestion du champ time manquant
-                'volume': int(prev.get('volume', 0))
-            })
-        
-        # OB baissier (grosse bougie rouge suivie d'une bougie verte)
-        elif prev_close < prev_open and curr_close > curr_open:
-            ob_bearish.append({
-                'high': float(prev['mid']['h']),
-                'low': float(prev['mid']['l']),
-                'open': prev_open,
-                'close': prev_close,
-                'time': prev.get('time', 'N/A'),  # Gestion du champ time manquant
-                'volume': int(prev.get('volume', 0))
-            })
+        # Bullish OB: grosse bougie verte suivie de rouge
+        if (float(prev['mid']['c']) > float(prev['mid']['o']) and \
+           (float(curr['mid']['c']) < float(curr['mid']['o'])):
+            body_size = abs(float(prev['mid']['c']) - float(prev['mid']['o']))
+            if body_size > (prev['mid']['h'] - prev['mid']['l']) / min_ratio:
+                blocks['bullish'].append({
+                    'high': float(prev['mid']['h']),
+                    'low': float(prev['mid']['l']),
+                    'open': float(prev['mid']['o']),
+                    'close': float(prev['mid']['c'])
+                })
+                
+        # Bearish OB: grosse bougie rouge suivie de verte
+        elif (float(prev['mid']['c']) < float(prev['mid']['o'])) and \
+             (float(curr['mid']['c']) > float(curr['mid']['o'])):
+            body_size = abs(float(prev['mid']['o']) - float(prev['mid']['c']))
+            if body_size > (prev['mid']['h'] - prev['mid']['l']) / min_ratio:
+                blocks['bearish'].append({
+                    'high': float(prev['mid']['h']),
+                    'low': float(prev['mid']['l']),
+                    'open': float(prev['mid']['o']),
+                    'close': float(prev['mid']['c'])
+                })
     
-    # Filtrage des OB significatifs
-    significant_volume = 100  # Volume minimum
-    min_size = 0.0005  # Taille minimum en pips
-    
-    filtered_ob = {
-        'bullish': [ob for ob in ob_bullish 
-                   if ob['volume'] >= significant_volume 
-                   and (ob['close'] - ob['open']) >= min_size],
-        'bearish': [ob for ob in ob_bearish 
-                   if ob['volume'] >= significant_volume 
-                   and (ob['open'] - ob['close']) >= min_size]
-    }
-    
-    logger.debug(f"🔍 OB détectés: {len(filtered_ob['bullish'])} haussiers / {len(filtered_ob['bearish'])} baissiers")
-    return filtered_ob
+    return blocks
     
 def analyze_pair(pair):
     """Version corrigée avec déclaration correcte de 'direction'"""
