@@ -443,36 +443,74 @@ def check_htf_trend(pair, timeframe='H4'):
         return 'NEUTRAL'
 
 def update_daily_zones():
-    """Met à jour les zones clés quotidiennes pour toutes les paires"""
+    """Met à jour les zones clés quotidiennes"""
     global daily_zones
     for pair in PAIRS:
-        candles = get_candles(pair, ASIAN_SESSION_START, NY_SESSION_END)
-        highs = [float(c['mid']['h']) for c in candles]
-        lows = [float(c['mid']['l']) for c in candles]
-        
-        daily_zones[pair] = {
-            'POC': (max(highs) + min(lows)) / 2,  # Point of Control
-            'VAH': max(highs),  # Value Area High
-            'VAL': min(lows),   # Value Area Low
-            'time': datetime.utcnow().date()
-        }
+        try:
+            # Utilisez None pour end_time pour éviter les problèmes de futur
+            candles = get_candles(pair, ASIAN_SESSION_START, None)
+            
+            if not candles:
+                logger.warning(f"⚠️ Aucune donnée pour {pair}")
+                continue
+                
+            highs = [float(c['mid']['h']) for c in candles if 'mid' in c]
+            lows = [float(c['mid']['l']) for c in candles if 'mid' in c]
+            
+            if not highs or not lows:
+                continue
+                
+            daily_zones[pair] = {
+                'POC': (max(highs) + min(lows)) / 2,
+                'VAH': max(highs),
+                'VAL': min(lows),
+                'time': datetime.utcnow().date()
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur MAJ zones {pair}: {str(e)}")
+    
     logger.info("📊 Zones quotidiennes mises à jour")
 
 
-def get_candles(pair, start_time, end_time):
-    """Récupère les bougies pour une plage horaire spécifique"""
+def get_candles(pair, start_time, end_time=None):
+    """
+    Récupère les bougies pour une plage horaire spécifique
+    Args:
+        pair: Paire de devises (ex: "EUR_USD")
+        start_time: Heure de début (datetime.time)
+        end_time: Heure de fin (datetime.time) - optionnel
+    Returns:
+        Liste des bougies
+    """
     now = datetime.utcnow()
-    start_date = datetime.combine(now.date(), start_time)
-    end_date = datetime.combine(now.date(), end_time)
     
+    # Si end_time n'est pas spécifié ou est dans le futur, utiliser maintenant
+    if end_time is None or datetime.combine(now.date(), end_time) > now:
+        end_date = now
+    else:
+        end_date = datetime.combine(now.date(), end_time)
+    
+    start_date = datetime.combine(now.date(), start_time)
+    
+    # Vérification que start_date est avant end_date
+    if start_date >= end_date:
+        end_date = start_date + timedelta(hours=1)  # Ajoute 1h si plage invalide
+        logger.warning(f"⚠️ Plage temporelle ajustée pour {pair}")
+
     params = {
         "granularity": "M5",
         "from": start_date.isoformat() + "Z",
         "to": end_date.isoformat() + "Z",
         "price": "M"
     }
-    r = instruments.InstrumentsCandles(instrument=pair, params=params)
-    return client.request(r)['candles']
+    
+    try:
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        return client.request(r)['candles']
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération candles {pair}: {str(e)}")
+        return []
 
 def identify_fvg(candles, lookback=50):
     """
@@ -977,7 +1015,14 @@ if __name__ == "__main__":
     for pair in PAIRS:
         get_instrument_details(pair)
         time.sleep(0.5)
-        
+
+while True:
+        now = datetime.utcnow()
+        if now.time() > dtime(0, 30):  # Attendre 30min après minuit
+            update_daily_zones()
+            break
+        time.sleep(60)        
+
 while True:
     try:
         now = datetime.utcnow()
