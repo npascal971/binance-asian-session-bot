@@ -124,6 +124,11 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
             # Pour Crypto: précision différente
             units = round(units, specs['units_precision'])
         
+        # Validation finale des unités minimales
+        if units < specs['min_units']:
+            logger.warning(f"⚠️ Forçage des unités au minimum {specs['min_units']}")
+            units = specs['min_units']
+        
         logger.info(f"""
         📊 Position Validée {pair}:
         • Entrée: {entry_price:.5f}
@@ -131,21 +136,6 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
         • Distance: {distance_pips:.1f} pips
         • Unités: {units}
         • Risque: ${units * distance_pips:.2f}
-        """)
-        return units
-        
-    except Exception as e:
-        logger.error(f"❌ Erreur calcul position {pair}: {str(e)}")
-        return 0
-            units = specs['min_units']
-        
-        logger.info(f"""
-        📊 Calcul Position {pair}:
-        • Risque: ${risk_amount:.2f}
-        • Entrée: {entry_price:.5f}
-        • Stop: {stop_loss:.5f}
-        • Distance: {distance_pips:.2f} pips
-        • Unités: {units}
         """)
         return units
         
