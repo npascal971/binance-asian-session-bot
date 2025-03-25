@@ -1185,6 +1185,56 @@ def check_timeframe_validity(tf):
     if tf not in valid:
         raise ValueError(f"Timeframe invalide. Utiliser: {valid}")
 
+def analyze_asian_session():
+    global asian_range_calculated
+    
+    if asian_range_calculated:
+        return
+        
+    logger.info("🌏 Début analyse rétroactive session asiatique")
+    start_dt = datetime.utcnow().replace(
+        hour=ASIAN_SESSION_START.hour,
+        minute=ASIAN_SESSION_START.minute,
+        second=0,
+        microsecond=0
+    )
+    end_dt = datetime.utcnow().replace(
+        hour=ASIAN_SESSION_END.hour,
+        minute=ASIAN_SESSION_END.minute,
+        second=0,
+        microsecond=0
+    )
+    
+    for pair in PAIRS:
+        try:
+            params = {
+                "granularity": "H1",
+                "from": start_dt.isoformat() + "Z",
+                "to": end_dt.isoformat() + "Z",
+                "price": "M"
+            }
+            candles = client.request(instruments.InstrumentsCandles(
+                instrument=pair,
+                params=params
+            ))['candles']
+            
+            valid_candles = [c for c in candles if c['complete']]
+            if valid_candles:
+                highs = [float(c['mid']['h']) for c in valid_candles]
+                lows = [float(c['mid']['l']) for c in valid_candles]
+                
+                asian_ranges[pair] = {
+                    'high': max(highs),
+                    'low': min(lows),
+                    'time': end_dt
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
+    
+    asian_range_calculated = True
+    logger.info("✅ Session asiatique analysée rétroactivement")
+
 def close_all_trades():
     """Ferme tous les trades ouverts"""
     try:
@@ -1339,48 +1389,24 @@ while True:
             logger.info(f"🌏 DÉBUT SESSION ASIATIQUE ({current_time})")
             
             if not asian_range_calculated:
-                logger.info("🔍 Calcul des ranges asiatiques...")
-                try:
-                    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                    end_dt = now
-                    
-                    for pair in PAIRS:
-                        params = {
-                            "granularity": "H1",
-                            "from": start_dt.isoformat() + "Z",
-                            "to": end_dt.isoformat() + "Z",
-                            "price": "M"
-                        }
-                        
-                        candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
-                        valid_candles = [c for c in candles if c['complete']]
-                        
-                        if valid_candles:
-                            highs = [float(c['mid']['h']) for c in valid_candles]
-                            lows = [float(c['mid']['l']) for c in valid_candles]
-                            
-                            asian_ranges[pair] = {
-                                'high': max(highs),
-                                'low': min(lows),
-                                'time': end_dt,
-                                'candles': len(valid_candles)
-                            }
-                            
-                            logger.info(f"📊 {pair} Range: {asian_ranges[pair]['low']:.5f}-{asian_ranges[pair]['high']:.5f}")
+                analyze_asian_session()  # Utilise la nouvelle fonction robuste
+            else:
+                # Vérification périodique du range
+                current_price = get_current_price("EUR_USD")  # Paire de référence
+                asian_range = asian_ranges.get("EUR_USD", {})
                 
-                    asian_range_calculated = True
-                    logger.info("✅ Analyse asiatique terminée")
-                    
-                except Exception as e:
-                    logger.error(f"❌ Erreur analyse asiatique: {str(e)}")
+                if asian_range:
+                    if current_price > asian_range['high']:
+                        logger.info(f"🚨 Prix {current_price} > High asiatique {asian_range['high']}")
+                    elif current_price < asian_range['low']:
+                        logger.info(f"🚨 Prix {current_price} < Low asiatique {asian_range['low']}")
             
-            # Vérification toutes les 5 minutes
-            time.sleep(300)
+            time.sleep(300)  # Vérification toutes les 5 minutes
             continue
 
         # 5. Pause Entre Sessions (06:00-07:00 UTC)
         if session_type == "HORS-SESSION" and ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
-            logger.debug("⏳ Pause entre sessions")
+            logger.debug("⏳ Pause entre sessions - Attente London")
             time.sleep(60)
             continue
 
@@ -1388,6 +1414,11 @@ while True:
         if session_type == "LON/NY":
             cycle_start = time.time()
             logger.info("🏙️ SESSION LONDRES/NY ACTIVE")
+            
+            # Vérification des ranges asiatiques (au cas où manqués)
+            if not asian_range_calculated:
+                logger.warning("⚠️ Aucun range asiatique détecté - Calcul rétroactif")
+                analyze_asian_session()
             
             # Vérification des événements macro
             if check_high_impact_events():
@@ -1401,12 +1432,10 @@ while True:
             
             for pair in PAIRS:
                 if pair not in active_trades:
-                    analyze_pair(pair)
+                    analyze_pair(pair)  # Utilise les ranges asiatiques
                 else:
-                    logger.debug(f"⏩ Trade actif sur {pair} - Analyse ignorée")
-            
-            # Gestion des TP/SL
-            check_tp_sl()
+                    logger.debug(f"⏩ Trade actif sur {pair} - Surveillance")
+                    check_tp_sl_for_pair(pair)  # Vérifie spécifiquement ce trade
             
             # Timing dynamique
             elapsed = time.time() - cycle_start
@@ -1420,10 +1449,15 @@ while True:
             logger.info("🌙 Fermeture de session - Vérification des positions")
             close_all_trades()
             end_of_day_processed = True
-            log_daily_summary()  # À implémenter pour un rapport journalier
+            
+            # Rapport journalier
+            try:
+                log_daily_summary()
+            except Exception as e:
+                logger.error(f"❌ Erreur rapport journalier: {str(e)}")
             
         time.sleep(60)
 
     except Exception as e:
         logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
-        time.sleep(300)
+        time.sleep(300)  # Long délai après une erreur grave
