@@ -881,7 +881,7 @@ def is_price_near_ob(price, obs, direction, buffer=0.0003):
             return True, ob
     return False, None
 
-ef store_asian_range(pair):
+def store_asian_range(pair):
     """Stocke le range asiatique pour une paire"""
     try:
         candles = get_candles(pair, ASIAN_SESSION_START, ASIAN_SESSION_END)
