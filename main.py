@@ -1119,7 +1119,7 @@ if __name__ == "__main__":
 
     # Attente initiale pour la première mise à jour
     if datetime.utcnow().time() < dtime(0, 30):
-    logger.info(f"⏳ Attente jusqu'à 00:30 UTC (actuellement {datetime.utcnow().time()})")
+        logger.info(f"⏳ Attente jusqu'à 00:30 UTC (actuellement {datetime.utcnow().time()})")
     while datetime.utcnow().time() < dtime(0, 30):
         time.sleep(60)
     
