@@ -463,33 +463,74 @@ def check_active_trades():
 def check_htf_trend(pair, timeframe='H4'):
     """
     Détermine la tendance sur un timeframe supérieur
-    Retourne: 'UP', 'DOWN' ou 'RANGE'
+    Retourne: 'UP', 'DOWN', 'RANGE' ou 'NEUTRAL'
+    
+    Args:
+        pair: str - Paire de trading (ex: 'EUR_USD')
+        timeframe: str - Période valide (S5, M1, M5, M15, H1, H4, D, W, M)
+    
+    Returns:
+        str - Direction de la tendance
     """
+    # Validation des paramètres
+    valid_timeframes = ["S5", "M1", "M5", "M15", "H1", "H4", "D", "W", "M"]
+    if timeframe not in valid_timeframes:
+        logger.error(f"❌ Timeframe invalide: {timeframe}. Utilisation de H4 par défaut")
+        timeframe = "H4"  # Valeur par défaut sécurisée
+
     params = {
         "granularity": timeframe,
         "count": 100,
-        "price": "M"
+        "price": "M"  # 'M' pour mid, 'B' pour bid, 'A' pour ask
     }
-    candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
-    closes = [float(c['mid']['c']) for c in candles if c['complete']]
-    
-    # Méthode EMA 20/50
-    ema20 = pd.Series(closes).ewm(span=20).mean().iloc[-1]
-    ema50 = pd.Series(closes).ewm(span=50).mean().iloc[-1]
-    
-    # Dernier swing
-    last_high = max(closes[-10:])
-    last_low = min(closes[-10:])
-    
-    if ema20 > ema50 and closes[-1] > ema20:
-        return 'UP'
-    elif ema20 < ema50 and closes[-1] < ema20:
-        return 'DOWN'
-    elif (last_high - last_low)/last_low < 0.005:  # Range < 0.5%
-        return 'RANGE'
-    else:
-        return 'NEUTRAL'
 
+    try:
+        # Requête API avec gestion d'erreur
+        candles = client.request(
+            instruments.InstrumentsCandles(
+                instrument=pair, 
+                params=params
+            )
+        )['candles']
+        
+        # Filtrage des bougies complètes
+        closes = []
+        for c in candles:
+            try:
+                if c['complete']:
+                    closes.append(float(c['mid']['c']))
+            except (KeyError, TypeError):
+                continue
+        
+        if len(closes) < 50:  # Minimum pour les EMA
+            logger.warning(f"⚠️ Données insuffisantes pour {pair} (reçu: {len(closes)} bougies)")
+            return 'NEUTRAL'
+
+        # Calcul des indicateurs
+        series = pd.Series(closes)
+        ema20 = series.ewm(span=20, min_periods=20).mean().iloc[-1]
+        ema50 = series.ewm(span=50, min_periods=50).mean().iloc[-1]
+        last_close = closes[-1]
+        
+        # Détection des swings
+        last_10 = closes[-10:] if len(closes) >= 10 else closes
+        last_high = max(last_10)
+        last_low = min(last_10)
+        range_pct = (last_high - last_low) / last_low if last_low != 0 else 0
+
+        # Décision de tendance
+        if ema20 > ema50 and last_close > ema20:
+            return 'UP'
+        elif ema20 < ema50 and last_close < ema20:
+            return 'DOWN'
+        elif range_pct < 0.005:  # Range < 0.5%
+            return 'RANGE'
+        else:
+            return 'NEUTRAL'
+
+    except Exception as e:
+        logger.error(f"❌ Erreur analyse tendance {pair}: {str(e)}")
+        return 'NEUTRAL'  # Retour neutre en cas d'erreur
 def update_daily_zones():
     """Met à jour les zones clés quotidiennes"""
     global daily_data_updated
