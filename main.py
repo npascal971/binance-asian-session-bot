@@ -13,6 +13,8 @@ import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.accounts as accounts
 import oandapyV20.endpoints.trades as trades
 import oandapyV20.endpoints.pricing as pricing
+import requests
+from datetime import timedelta
 
 # Chargement des variables d'environnement
 load_dotenv()
@@ -62,7 +64,7 @@ MACRO_API_KEY = os.getenv("MACRO_API_KEY")  # Clé pour FRED/Quandl
 ECONOMIC_CALENDAR_API = "https://economic-calendar.com/api"  # Exemple
 asian_ranges = {}  # Dictionnaire pour stocker les ranges
 asian_range_calculated = False  # Flag de contrôle
-end_of_day_processed = False
+
 IMPORTANT_EVENTS = {
     "USD": ["CPI", "NFP", "FOMC", "UNEMPLOYMENT"],
     "EUR": ["CPI", "ECB_RATE", "GDP"],
@@ -89,7 +91,7 @@ end_of_day_processed = False  # Pour éviter les fermetures répétées
 daily_zones = {}
 RSI_PERIOD = 14
 VOLUME_MA_PERIOD = 20
-MIN_CONFLUENCE_SCORE = 2
+
 # Spécifications des instruments (avec crypto)
 INSTRUMENT_SPECS = {
     "EUR_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
