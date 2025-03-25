@@ -213,73 +213,164 @@ def get_candles(pair, start_time, end_time):
     r = instruments.InstrumentsCandles(instrument=pair, params=params)
     return client.request(r)['candles']
 
-def identify_fvg(candles):
-    """Identifie les Fair Value Gaps"""
+def identify_fvg(candles, lookback=50):
+    """
+    Identifie les Fair Value Gaps (FVG) sur les données historiques
+    Args:
+        candles: Liste des bougies OHLC
+        lookback: Nombre de bougies à analyser
+    Returns:
+        Liste des FVG (haussiers et baissiers)
+    """
     fvgs = []
-    for i in range(1, len(candles)):
-        prev = candles[i-1]
-        curr = candles[i]
-        if curr['mid']['l'] > prev['mid']['h']:  # FVG haussier
-            fvgs.append((prev['mid']['h'], curr['mid']['l']))
-        elif curr['mid']['h'] < prev['mid']['l']:  # FVG baissier
-            fvgs.append((curr['mid']['h'], prev['mid']['l']))
-    return fvgs
-
-def is_in_zone(price, key_level, zones, direction):
-    """Vérifie si le prix est dans une zone d'intérêt"""
-    buffer = 0.0005 if "USD" in pair else 0.5  # Ajuster selon l'instrument
+    candles = candles[-lookback:]  # On ne garde que les N dernières bougies
     
-    if direction == "ACHAT":
-        return (abs(price - key_level) < buffer) or any(
-            zone[0] - buffer <= price <= zone[1] + buffer for zone in zones
-        )
-    else:
-        return (abs(price - key_level) < buffer) or any(
-            zone[0] - buffer <= price <= zone[1] + buffer for zone in zones
-        )
+    for i in range(1, len(candles)):
+        prev = candles[i-1]['mid']
+        curr = candles[i]['mid']
+        
+        # FVG haussier (l'actuel Low > précédent High)
+        if curr['l'] > prev['h']:
+            fvgs.append({
+                'type': 'BULLISH',
+                'top': float(prev['h']),
+                'bottom': float(curr['l']),
+                'time': candles[i]['time'],
+                'strength': round((float(curr['l']) - float(prev['h']))/float(prev['h'])*10000, 2)  # en pips
+            })
+        
+        # FVG baissier (l'actuel High < précédent Low)
+        elif curr['h'] < prev['l']:
+            fvgs.append({
+                'type': 'BEARISH',
+                'top': float(prev['l']),
+                'bottom': float(curr['h']),
+                'time': candles[i]['time'],
+                'strength': round((float(prev['l']) - float(curr['h']))/float(prev['l'])*10000, 2)
+            })
+    
+    # Filtrage des FVG les plus significatifs (force > 5 pips)
+    significant_fvgs = [fvg for fvg in fvgs if fvg['strength'] >= 5]
+    
+    logger.debug(f"🔍 {len(significant_fvgs)} FVG significatifs détectés")
+    return significant_fvgs
+
+def identify_order_blocks(candles, lookback=100):
+    """
+    Identifie les Order Blocks (OB) sur les données historiques
+    Args:
+        candles: Liste des bougies OHLC
+        lookback: Nombre de bougies à analyser
+    Returns:
+        Dictionnaire des OB (bullish et bearish)
+    """
+    ob_bullish = []
+    ob_bearish = []
+    candles = candles[-lookback:]
+    
+    for i in range(2, len(candles)):
+        prev = candles[i-1]['mid']
+        curr = candles[i]['mid']
+        
+        # OB haussier (grosse bougie verte suivie d'une bougie rouge)
+        if float(prev['c']) > float(prev['o']) and float(curr['c']) < float(curr['o']):
+            ob_bullish.append({
+                'high': float(prev['h']),
+                'low': float(prev['l']),
+                'open': float(prev['o']),
+                'close': float(prev['c']),
+                'time': prev['time'],
+                'volume': candles[i-1]['volume']
+            })
+        
+        # OB baissier (grosse bougie rouge suivie d'une bougie verte)
+        elif float(prev['c']) < float(prev['o']) and float(curr['c']) > float(curr['o']):
+            ob_bearish.append({
+                'high': float(prev['h']),
+                'low': float(prev['l']),
+                'open': float(prev['o']),
+                'close': float(prev['c']),
+                'time': prev['time'],
+                'volume': candles[i-1]['volume']
+            })
+    
+    # Filtrage des OB par volume et taille
+    filtered_ob = {
+        'bullish': [ob for ob in ob_bullish if ob['volume'] > 100 and (ob['close'] - ob['open']) > 0.0005],
+        'bearish': [ob for ob in ob_bearish if ob['volume'] > 100 and (ob['open'] - ob['close']) > 0.0005]
+    }
+    
+    logger.debug(f"🔍 OB détectés: {len(filtered_ob['bullish'])} haussiers / {len(filtered_ob['bearish'])} baissiers")
+    return filtered_ob
 
 def analyze_pair(pair):
-    """Analyse SMC avec range asiatique et liquidités HTF"""
+    """Analyse SMC avec FVG et Order Blocks optimisés"""
     try:
-        # 1. Récupérer les données pour 3 timeframes
-        params_htf = {"granularity": "H4", "count": 50, "price": "M"}
-        params_ltf = {"granularity": "M5", "count": 100, "price": "M"}
+        # 1. Récupération des données
+        params_htf = {"granularity": "H4", "count": 100, "price": "M"}
+        htf_candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params_htf))['candles']
         
-        # 2. Identifier le range asiatique
-        asian_candles = get_candles(pair, ASIAN_SESSION_START, ASIAN_SESSION_END)
-        asian_high = max([c['mid']['h'] for c in asian_candles)
-        asian_low = min([c['mid']['l'] for c in asian_candles)
-        
-        logger.info(f"🌏 Range Asiatique {pair}: H={asian_high:.5f} L={asian_low:.5f}")
-
-        # 3. Identifier les zones HTF (FVG/OB)
-        htf_candles = instruments.InstrumentsCandles(instrument=pair, params=params_htf)
-        htf_data = client.request(htf_candles)['candles']
-        fvg_zones = identify_fvg(htf_data)  # À implémenter
-        ob_zones = identify_order_blocks(htf_data)  # À implémenter
-
-        # 4. Stratégie de trading
+        # 2. Détection des zones
+        fvgs = identify_fvg(htf_candles)
+        obs = identify_order_blocks(htf_candles)
         current_price = get_current_price(pair)
         
-        if is_in_zone(current_price, asian_low, fvg_zones, "ACHAT"):
+        # 3. Vérification des conditions
+        in_fvg, fvg_zone = is_price_in_fvg(current_price, fvgs)
+        near_ob, ob_zone = is_price_near_ob(current_price, obs, 
+                                           'BUY' if current_price <= fvg_zone['bottom'] else 'SELL')
+        
+        if in_fvg and near_ob:
+            logger.info(f"🎯 Signal confirmé sur {pair}: FVG + OB")
+            direction = 'buy' if fvg_zone['type'] == 'BULLISH' else 'sell'
+            
             place_trade(
                 pair=pair,
-                direction="buy",
+                direction=direction,
                 entry_price=current_price,
-                stop_loss=asian_low - (0.001 if "USD" in pair else 10),
-                take_profit=current_price + (asian_high - asian_low)
+                stop_loss=fvg_zone['bottom'] if direction == 'buy' else fvg_zone['top'],
+                take_profit=calculate_tp_from_structure(fvg_zone, direction)  # À implémenter
             )
-        elif is_in_zone(current_price, asian_high, fvg_zones, "VENTE"):
-            place_trade(
-                pair=pair,
-                direction="sell",
-                entry_price=current_price,
-                stop_loss=asian_high + (0.001 if "USD" in pair else 10),
-                take_profit=current_price - (asian_high - asian_low)
-            )
-
+            
     except Exception as e:
-        logger.error(f"❌ Erreur analyse SMC {pair}: {str(e)}")
+        logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
+
+def calculate_tp_from_structure(fvg, direction):
+    """Calcule le TP basé sur la taille du FVG"""
+    fvg_size = abs(fvg['top'] - fvg['bottom'])
+    if direction == 'buy':
+        return fvg['top'] + fvg_size * 1.5  # TP = 1.5x la taille du FVG
+    else:
+        return fvg['bottom'] - fvg_size * 1.5
+
+def get_current_price(pair):
+    """Récupère le prix actuel"""
+    params = {"instruments": pair}
+    r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params=params)
+    return float(client.request(r)['prices'][0]['bids'][0]['price'])
+
+def is_price_in_fvg(price, fvgs, buffer=0.0002):
+    """
+    Vérifie si le prix est dans un FVG
+    """
+    for fvg in fvgs:
+        if fvg['type'] == 'BULLISH' and (fvg['bottom'] - buffer) <= price <= (fvg['top'] + buffer):
+            return True, fvg
+        elif fvg['type'] == 'BEARISH' and (fvg['bottom'] - buffer) <= price <= (fvg['top'] + buffer):
+            return True, fvg
+    return False, None
+
+def is_price_near_ob(price, obs, direction, buffer=0.0003):
+    """
+    Vérifie la proximité avec un Order Block
+    """
+    target_obs = obs['bullish'] if direction == 'BUY' else obs['bearish']
+    for ob in target_obs:
+        if direction == 'BUY' and (ob['low'] - buffer) <= price <= (ob['high'] + buffer):
+            return True, ob
+        elif direction == 'SELL' and (ob['low'] - buffer) <= price <= (ob['high'] + buffer):
+            return True, ob
+    return False, None
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     """Exécute un trade avec vérifications supplémentaires et gestion du slippage"""
