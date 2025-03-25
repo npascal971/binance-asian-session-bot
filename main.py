@@ -31,11 +31,15 @@ CRYPTO_PAIRS = ["BTC_USD", "ETH_USD"]
 RISK_PERCENTAGE = 1  # 1% du capital
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 2.0
-SESSION_START = dtime(7, 0)  # 7h00
-SESSION_END = dtime(16, 25)   # 23h50
+ASIAN_SESSION_START = dtime(0, 0)    # 00h00 UTC
+ASIAN_SESSION_END = dtime(6, 0)      # 06h00 UTC
+LONDON_SESSION_START = dtime(7, 0)   # 07h00 UTC
+NY_SESSION_END = dtime(16, 30)       # 16h30 UTC
 MAX_RISK_USD = 100  # $100 max de risque par trade
 MIN_CRYPTO_UNITS = 0.001  # Unités minimales pour les cryptos
 
+SESSION_START = LONDON_SESSION_START  # On garde pour compatibilité
+SESSION_END = NY_SESSION_END
 # Configuration des logs avec emojis
 logging.basicConfig(
     level=logging.INFO,
@@ -194,45 +198,88 @@ def check_active_trades():
         logger.error(f"❌ Erreur vérification trades: {str(e)}")
         return set()
 
+def get_candles(pair, start_time, end_time):
+    """Récupère les bougies pour une plage horaire spécifique"""
+    now = datetime.utcnow()
+    start_date = datetime.combine(now.date(), start_time)
+    end_date = datetime.combine(now.date(), end_time)
+    
+    params = {
+        "granularity": "M5",
+        "from": start_date.isoformat() + "Z",
+        "to": end_date.isoformat() + "Z",
+        "price": "M"
+    }
+    r = instruments.InstrumentsCandles(instrument=pair, params=params)
+    return client.request(r)['candles']
+
+def identify_fvg(candles):
+    """Identifie les Fair Value Gaps"""
+    fvgs = []
+    for i in range(1, len(candles)):
+        prev = candles[i-1]
+        curr = candles[i]
+        if curr['mid']['l'] > prev['mid']['h']:  # FVG haussier
+            fvgs.append((prev['mid']['h'], curr['mid']['l']))
+        elif curr['mid']['h'] < prev['mid']['l']:  # FVG baissier
+            fvgs.append((curr['mid']['h'], prev['mid']['l']))
+    return fvgs
+
+def is_in_zone(price, key_level, zones, direction):
+    """Vérifie si le prix est dans une zone d'intérêt"""
+    buffer = 0.0005 if "USD" in pair else 0.5  # Ajuster selon l'instrument
+    
+    if direction == "ACHAT":
+        return (abs(price - key_level) < buffer) or any(
+            zone[0] - buffer <= price <= zone[1] + buffer for zone in zones
+        )
+    else:
+        return (abs(price - key_level) < buffer) or any(
+            zone[0] - buffer <= price <= zone[1] + buffer for zone in zones
+        )
+
 def analyze_pair(pair):
-    """Analyse une paire et exécute les trades si conditions remplies"""
+    """Analyse SMC avec range asiatique et liquidités HTF"""
     try:
-        params = {"granularity": "M5", "count": 50, "price": "M"}
-        r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        candles = client.request(r)['candles']
+        # 1. Récupérer les données pour 3 timeframes
+        params_htf = {"granularity": "H4", "count": 50, "price": "M"}
+        params_ltf = {"granularity": "M5", "count": 100, "price": "M"}
+        
+        # 2. Identifier le range asiatique
+        asian_candles = get_candles(pair, ASIAN_SESSION_START, ASIAN_SESSION_END)
+        asian_high = max([c['mid']['h'] for c in asian_candles)
+        asian_low = min([c['mid']['l'] for c in asian_candles)
+        
+        logger.info(f"🌏 Range Asiatique {pair}: H={asian_high:.5f} L={asian_low:.5f}")
 
-        closes = [float(c['mid']['c']) for c in candles if c['complete']]
-        highs = [float(c['mid']['h']) for c in candles if c['complete']]
-        lows = [float(c['mid']['l']) for c in candles if c['complete']]
+        # 3. Identifier les zones HTF (FVG/OB)
+        htf_candles = instruments.InstrumentsCandles(instrument=pair, params=params_htf)
+        htf_data = client.request(htf_candles)['candles']
+        fvg_zones = identify_fvg(htf_data)  # À implémenter
+        ob_zones = identify_order_blocks(htf_data)  # À implémenter
 
-        if len(closes) < 20:
-            logger.warning(f"⚠️ Données insuffisantes pour {pair}")
-            return
+        # 4. Stratégie de trading
+        current_price = get_current_price(pair)
+        
+        if is_in_zone(current_price, asian_low, fvg_zones, "ACHAT"):
+            place_trade(
+                pair=pair,
+                direction="buy",
+                entry_price=current_price,
+                stop_loss=asian_low - (0.001 if "USD" in pair else 10),
+                take_profit=current_price + (asian_high - asian_low)
+            )
+        elif is_in_zone(current_price, asian_high, fvg_zones, "VENTE"):
+            place_trade(
+                pair=pair,
+                direction="sell",
+                entry_price=current_price,
+                stop_loss=asian_high + (0.001 if "USD" in pair else 10),
+                take_profit=current_price - (asian_high - asian_low)
+            )
 
-        # Calcul ATR
-        atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
-        last_close = closes[-1]
-
-        # Stratégie de breakout
-        if pair not in active_trades:
-            if last_close > max(closes[-10:-1]):  # Breakout haussier
-                place_trade(
-                    pair=pair,
-                    direction="buy",
-                    entry_price=last_close,
-                    stop_loss=last_close - (ATR_MULTIPLIER_SL * atr),
-                    take_profit=last_close + (ATR_MULTIPLIER_TP * atr)
-                )
-            elif last_close < min(closes[-10:-1]):  # Breakout baissier
-                place_trade(
-                    pair=pair,
-                    direction="sell",
-                    entry_price=last_close,
-                    stop_loss=last_close + (ATR_MULTIPLIER_SL * atr),
-                    take_profit=last_close - (ATR_MULTIPLIER_TP * atr)
-                )
     except Exception as e:
-        logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
+        logger.error(f"❌ Erreur analyse SMC {pair}: {str(e)}")
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     """Exécute un trade avec vérifications supplémentaires"""
@@ -417,47 +464,85 @@ if __name__ == "__main__":
         time.sleep(0.5)
 
     while True:
-        now = datetime.now()
-        current_time = now.time()
+    now = datetime.utcnow()
+    current_time = now.time()
+    weekday = now.weekday()  # 0-4 = Lun-Ven
+
+    # =============================================
+    # 1. GESTION FERMETURES (Priorité absolue)
+    # =============================================
     
-    # 1. Vérification week-end
-    if now.weekday() >= 5:
-        close_all_trades()  # Ferme tout avant le week-end
-        logger.info("⛔ Week-end - Trading suspendu")
-        time.sleep(3600)
+    # A. Week-end - Fermeture totale
+    if weekday >= 5:  # 5 = Sam, 6 = Dim
+        close_all_trades()
+        next_monday = now + timedelta(days=(7 - weekday))
+        sleep_hours = (next_monday - now).total_seconds() / 3600
+        logger.info(f"⛔ Week-end - Prochain trade lundi {LONDON_SESSION_START.strftime('%H:%M')} UTC")
+        time.sleep(min(sleep_hours * 3600, 21600))  # Max 6h de sleep
         continue
-    
-    # 2. Gestion de fin de session
-    if current_time >= SESSION_END:
+
+    # B. Fin de session NY - Fermeture des trades
+    if current_time >= NY_SESSION_END:
         if not end_of_day_processed:
-            logger.info("🕒 Fin de session détectée - Fermeture des trades...")
+            logger.info("🕒 Fermeture session NY - Liquidation des positions")
             close_all_trades()
             end_of_day_processed = True
-        time.sleep(60)  # Check toutes les minutes
+        time.sleep(60)
         continue
     else:
         end_of_day_processed = False
-    
-    # 2. Vérification horaires trading
-    if SESSION_START <= current_time <= SESSION_END:
+
+    # =============================================
+    # 2. ANALYSE ASIE (Sans trading)
+    # =============================================
+    if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+        if not asian_range_calculated:
+            for pair in PAIRS:
+                store_asian_range(pair)  # À implémenter
+            asian_range_calculated = True
+            logger.info("🌏 Range asiatique calculé")
+        time.sleep(300)  # Check toutes les 5 min
+        continue
+
+    # =============================================
+    # 3. PAUSE ENTRE ASIE ET LONDRES
+    # =============================================
+    if ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
+        time.sleep(60)
+        continue
+
+    # =============================================
+    # 4. SESSION ACTIVE (Londres + NY)
+    # =============================================
+    if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+        # Réinitialisation des flags
+        asian_range_calculated = False
+        
+        # Logique de trading
         start_time = time.time()
         
-        # Votre logique de trading ici
+        # A. Vérification trades actifs
         active_trades = check_active_trades()
+        
+        # B. Analyse des paires
         for pair in PAIRS:
-            analyze_pair(pair)
+            analyze_pair(pair)  # Votre stratégie SMC
+        
+        # C. Gestion TP/SL
         check_tp_sl()
         
+        # D. Timing
         elapsed = time.time() - start_time
         time.sleep(max(60 - elapsed, 5))
-    else:
-        # Calcul du temps jusqu'à la prochaine session
-        if current_time < SESSION_START:
-            sleep_until = datetime.combine(now.date(), SESSION_START)
-        else:
-            sleep_until = datetime.combine(now.date() + timedelta(days=1), SESSION_START)
-        
-        sleep_seconds = (sleep_until - now).total_seconds()
-        logger.info(f"😴 Session terminée - Prochaine ouverture à {SESSION_START.strftime('%H:%M')} UTC "
-                    f"(dans {sleep_seconds/3600:.1f} heures)")
-        time.sleep(min(sleep_seconds, 3600))  # Max 1h de sleep
+        continue
+
+    # =============================================
+    # 5. HORS SESSION (Backup)
+    # =============================================
+    next_session_start = datetime.combine(
+        now.date() + timedelta(days=1) if current_time > NY_SESSION_END else now.date(),
+        LONDON_SESSION_START
+    )
+    sleep_seconds = (next_session_start - now).total_seconds()
+    logger.info(f"😴 Prochaine session à {LONDON_SESSION_START.strftime('%H:%M')} UTC")
+    time.sleep(min(sleep_seconds, 3600))  # Max 1h
