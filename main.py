@@ -1390,7 +1390,7 @@ while True:
         weekday = now.weekday()
 
         # Détermination précise de la session
-        if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+        if ASIAN_SESSION_START <= current_time.time() < ASIAN_SESSION_END:
             session_type = "ASIE"
         elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
             session_type = "LON/NY"
