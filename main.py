@@ -1152,9 +1152,13 @@ if __name__ == "__main__":
         # 4. Session Asiatique
         if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
             if not asian_range_calculated:
-                process_asian_session()
-            time.sleep(60)
-            continue
+                logger.info("🌏 Début analyse session asiatique")
+                for pair in PAIRS:
+                    store_asian_range(pair)  # Utilisez cette fonction au lieu de process_asian_session()
+                asian_range_calculated = True
+                logger.info("✅ Analyse session asiatique terminée")
+            time.sleep(300)  # 5 minutes ATTENTION : doit être en dehors du if !
+            continue  # ← Important pour sauter le reste de la boucle
 
         # 5. Session Active (Londres + NY)
         if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
