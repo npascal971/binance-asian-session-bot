@@ -35,6 +35,9 @@ ASIAN_SESSION_START = dtime(0, 0)    # 00h00 UTC
 ASIAN_SESSION_END = dtime(6, 0)      # 06h00 UTC
 LONDON_SESSION_START = dtime(7, 0)   # 07h00 UTC
 NY_SESSION_END = dtime(16, 30)       # 16h30 UTC
+LONDON_SESSION_STR = LONDON_SESSION_START.strftime('%H:%M')
+NY_SESSION_STR = NY_SESSION_END.strftime('%H:%M')
+MACRO_UPDATE_HOUR = 8  # 08:00 UTC
 MAX_RISK_USD = 100  # $100 max de risque par trade
 MIN_CRYPTO_UNITS = 0.001  # Unités minimales pour les cryptos
 
@@ -50,11 +53,41 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger()
+# Variables globales
+# Ajoutez dans vos variables globales
+RISK_REWARD_RATIO = 1.5  # Ratio minimal risque/récompense
+MIN_CONFLUENCE_SCORE = 2  # Nombre minimal d'indicateurs favorables
+daily_data_updated = False
+MACRO_API_KEY = os.getenv("MACRO_API_KEY")  # Clé pour FRED/Quandl
+ECONOMIC_CALENDAR_API = "https://economic-calendar.com/api"  # Exemple
 
+IMPORTANT_EVENTS = {
+    "USD": ["CPI", "NFP", "FOMC", "UNEMPLOYMENT"],
+    "EUR": ["CPI", "ECB_RATE", "GDP"],
+    "JPY": ["BOJ_RATE", "CPI"],
+    "XAU": ["REAL_RATES", "INFLATION_EXPECTATIONS"]
+}
+
+EVENT_IMPACT = {
+    "HIGH": ["NFP", "FOMC", "CPI"],
+    "MEDIUM": ["UNEMPLOYMENT", "RETAIL_SALES"],
+    "LOW": ["PMI", "CONSUMER_SENTIMENT"]
+}
+CORRELATION_PAIRS = {
+    "EUR_USD": ["USD_INDEX", "XAU_USD", "US10Y"],
+    "XAU_USD": ["DXY", "SPX", "US_REAL_RATES"],
+    "USD_JPY": ["US10Y", "NIKKEI", "DXY"]
+}
+
+CORRELATION_THRESHOLD = 0.7  # Seuil de corrélation significative
 SIMULATION_MODE = False  # Passer à False pour le trading réel
 trade_history = []
 active_trades = set()
 end_of_day_processed = False  # Pour éviter les fermetures répétées
+daily_zones = {}
+RSI_PERIOD = 14
+VOLUME_MA_PERIOD = 20
+MIN_CONFLUENCE_SCORE = 2
 # Spécifications des instruments (avec crypto)
 INSTRUMENT_SPECS = {
     "EUR_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
@@ -146,6 +179,146 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     except Exception as e:
         logger.error(f"❌ Erreur calcul position {pair}: {str(e)}")
         return 0
+
+def calculate_correlation(main_pair, window=30):
+    """
+    Calcule les corrélations avec les actifs liés
+    Retourne un dict {actif: coefficient}
+    """
+    correlations = {}
+    main_prices = get_historical_prices(main_pair, window)
+    
+    for related_pair in CORRELATION_PAIRS.get(main_pair, []):
+        try:
+            related_prices = get_historical_prices(related_pair, window)
+            if len(related_prices) == len(main_prices):
+                corr = np.corrcoef(main_prices, related_prices)[0, 1]
+                correlations[related_pair] = corr
+        except Exception as e:
+            logger.warning(f"⚠️ Erreur corrélation {main_pair}-{related_pair}: {str(e)}")
+    
+    return correlations
+
+def check_correlation(main_pair, direction):
+    """
+    Vérifie la cohérence inter-marchés
+    Retourne True si les corrélations confirment le trade
+    """
+    correlations = calculate_correlation(main_pair)
+    confirmation_score = 0
+    
+    for pair, corr in correlations.items():
+        if abs(corr) >= CORRELATION_THRESHOLD:
+            # Vérifie la direction des actifs corrélés
+            pair_trend = get_asset_trend(pair)
+            
+            if (corr > 0 and pair_trend == direction) or (corr < 0 and pair_trend != direction):
+                confirmation_score += 1
+            else:
+                confirmation_score -= 1
+    
+    return confirmation_score >= 1  # Au moins une confirmation
+
+def get_asset_trend(instrument):
+    """
+    Détermine la tendance courte d'un actif
+    """
+    prices = get_historical_prices(instrument, 5)  # 5 dernières heures
+    if len(prices) < 2:
+        return 'NEUTRAL'
+    
+    return 'UP' if prices[-1] > prices[0] else 'DOWN'
+
+def get_macro_data(currency, indicator):
+    """Récupère les données macro via API"""
+    try:
+        if indicator == "CPI":
+            # Exemple avec FRED (Federal Reserve Economic Data)
+            url = f"https://api.stlouisfed.org/fred/series/observations?series_id=CPIAUCSL&api_key={MACRO_API_KEY}&file_type=json"
+            response = requests.get(url).json()
+            return float(response["observations"][-1]["value"])
+        
+        elif indicator == "NFP":
+            # Exemple avec Alpha Vantage
+            url = f"https://www.alphavantage.co/query?function=NONFARM_PAYROLL&apikey={MACRO_API_KEY}"
+            return requests.get(url).json()["data"][0]["value"]
+            
+    except Exception as e:
+        logger.error(f"❌ Erreur macro {indicator}: {str(e)}")
+        return None
+
+def macro_filter(pair, direction):
+    """
+    Vérifie la cohérence macroéconomique
+    Retourne True si les conditions sont favorables
+    """
+    base_currency = pair[:3]
+    
+    # 1. Vérification des événements imminents
+    upcoming = check_economic_calendar(pair)
+    if any(e[2] == "HIGH" for e in upcoming):
+        logger.warning(f"⚠️ Événement macro majeur imminent - Trade annulé")
+        return False
+    
+    # 2. Analyse des indicateurs clés
+    if base_currency == "USD":
+        cpi = get_macro_data("USD", "CPI")
+        if cpi and cpi > 5.0:  # Inflation élevée
+            if direction == "BUY":
+                logger.info("✅ Contexte inflationniste favorable aux positions long USD")
+                return True
+    
+    # 3. Contexte des taux d'intérêt
+    rates = get_central_bank_rates(base_currency)
+    if rates and rates["trend"] != direction:
+        logger.warning(f"⚠️ Politique monétaire défavorable")
+        return False
+        
+    return True
+
+def check_economic_calendar(pair):
+    """Vérifie les événements à venir pour la paire"""
+    base_currency = pair[:3]
+    events = IMPORTANT_EVENTS.get(base_currency, [])
+    
+    try:
+        # Exemple d'API calendrier économique
+        params = {
+            "currency": base_currency,
+            "importance": "HIGH,MEDIUM",
+            "api_key": MACRO_API_KEY
+        }
+        response = requests.get(ECONOMIC_CALENDAR_API, params=params).json()
+        
+        upcoming_events = [
+            (e["title"], e["date"], e["impact"])
+            for e in response["events"]
+            if e["title"] in events
+        ]
+        
+        return upcoming_events
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Erreur calendrier: {str(e)}")
+        return []
+
+def get_historical_prices(instrument, periods):
+    """
+    Récupère les prix historiques selon l'instrument
+    """
+    if instrument in PAIRS:  # Paires OANDA
+        params = {"granularity": "H1", "count": periods, "price": "M"}
+        candles = client.request(instruments.InstrumentsCandles(instrument=instrument, params=params))['candles']
+        return [float(c['mid']['c']) for c in candles]
+    
+    # Pour les autres actifs (exemple simplifié)
+    elif instrument == "DXY":
+        # Implémentez une API DXY (ex: FRED)
+        return [...]  # Données fictives
+    else:
+        logger.warning(f"Instrument non géré: {instrument}")
+        return []
+
 def send_trade_notification(trade_info, hit_type):
     """Envoie une notification email pour TP/SL"""
     try:
@@ -189,6 +362,47 @@ def send_trade_notification(trade_info, hit_type):
     except Exception as e:
         logger.error(f"❌ Erreur envoi email: {str(e)}")
 
+def check_confluence(pair, direction):
+    """
+    Vérifie la confluence des indicateurs
+    Retourne un score de 0 à 3
+    """
+    score = 0
+    
+    # 1. RSI (M30)
+    params = {"granularity": "M30", "count": 14}
+    candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+    closes = [float(c['mid']['c']) for c in candles if c['complete']]
+    rsi = calculate_rsi(closes)
+    
+    if (direction == 'BUY' and rsi < 30) or (direction == 'SELL' and rsi > 70):
+        score += 1
+    
+    # 2. Volume relatif (D1)
+    current_volume = sum(float(c['volume']) for c in candles[-5:])  # 5 dernières bouches M30
+    avg_volume = sum(float(c['volume']) for c in candles[-20:]) / 20
+    
+    if current_volume > avg_volume * 1.5:
+        score += 1
+    
+    # 3. Confluence avec zones quotidiennes
+    current_price = get_current_price(pair)
+    if direction == 'BUY' and current_price < daily_zones.get(pair, {}).get('POC', 0):
+        score += 1
+    elif direction == 'SELL' and current_price > daily_zones.get(pair, {}).get('POC', 0):
+        score += 1
+    
+    return score
+
+def calculate_rsi(prices, period=14):
+    """Calcul du RSI"""
+    deltas = np.diff(prices)
+    seed = deltas[:period+1]
+    up = seed[seed >= 0].sum()/period
+    down = -seed[seed < 0].sum()/period
+    rs = up/down
+    return 100 - (100/(1+rs))
+
 def check_active_trades():
     """Vérifie les trades actuellement ouverts"""
     try:
@@ -197,6 +411,53 @@ def check_active_trades():
     except Exception as e:
         logger.error(f"❌ Erreur vérification trades: {str(e)}")
         return set()
+
+def check_htf_trend(pair, timeframe='H4'):
+    """
+    Détermine la tendance sur un timeframe supérieur
+    Retourne: 'UP', 'DOWN' ou 'RANGE'
+    """
+    params = {
+        "granularity": timeframe,
+        "count": 100,
+        "price": "M"
+    }
+    candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+    closes = [float(c['mid']['c']) for c in candles if c['complete']]
+    
+    # Méthode EMA 20/50
+    ema20 = pd.Series(closes).ewm(span=20).mean().iloc[-1]
+    ema50 = pd.Series(closes).ewm(span=50).mean().iloc[-1]
+    
+    # Dernier swing
+    last_high = max(closes[-10:])
+    last_low = min(closes[-10:])
+    
+    if ema20 > ema50 and closes[-1] > ema20:
+        return 'UP'
+    elif ema20 < ema50 and closes[-1] < ema20:
+        return 'DOWN'
+    elif (last_high - last_low)/last_low < 0.005:  # Range < 0.5%
+        return 'RANGE'
+    else:
+        return 'NEUTRAL'
+
+def update_daily_zones():
+    """Met à jour les zones clés quotidiennes pour toutes les paires"""
+    global daily_zones
+    for pair in PAIRS:
+        candles = get_candles(pair, ASIAN_SESSION_START, NY_SESSION_END)
+        highs = [float(c['mid']['h']) for c in candles]
+        lows = [float(c['mid']['l']) for c in candles]
+        
+        daily_zones[pair] = {
+            'POC': (max(highs) + min(lows)) / 2,  # Point of Control
+            'VAH': max(highs),  # Value Area High
+            'VAL': min(lows),   # Value Area Low
+            'time': datetime.utcnow().date()
+        }
+    logger.info("📊 Zones quotidiennes mises à jour")
+
 
 def get_candles(pair, start_time, end_time):
     """Récupère les bougies pour une plage horaire spécifique"""
@@ -304,36 +565,74 @@ def identify_order_blocks(candles, lookback=100):
     return filtered_ob
 
 def analyze_pair(pair):
-    """Analyse SMC avec FVG et Order Blocks optimisés"""
+    """Version finale avec tous les filtres (tendance, FVG/OB, confluence, corrélation, macro)"""
     try:
-        # 1. Récupération des données
-        params_htf = {"granularity": "H4", "count": 100, "price": "M"}
-        htf_candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params_htf))['candles']
-        
-        # 2. Détection des zones
-        fvgs = identify_fvg(htf_candles)
-        obs = identify_order_blocks(htf_candles)
+        # 1. Vérification tendance HTF
+        trend = check_htf_trend(pair)
+        if trend == 'NEUTRAL':
+            logger.debug(f"↔️ {pair} en range - Aucun trade")
+            return
+
+        # 2. Détection des zones de trading
+        htf_data = get_htf_data(pair)
+        fvgs = identify_fvg(htf_data)
+        obs = identify_order_blocks(htf_data)
         current_price = get_current_price(pair)
-        
-        # 3. Vérification des conditions
+
+        # 3. Vérification des zones
         in_fvg, fvg_zone = is_price_in_fvg(current_price, fvgs)
-        near_ob, ob_zone = is_price_near_ob(current_price, obs, 
-                                           'BUY' if current_price <= fvg_zone['bottom'] else 'SELL')
+        near_ob, ob_zone = is_price_near_ob(current_price, obs, trend)
+
+        if not (in_fvg and near_ob):
+            logger.debug(f"🔍 {pair}: Aucune zone FVG/OB valide")
+            return
+
+        # 4. Détermination de la direction
+        direction = 'BUY' if trend == 'UP' else 'SELL'
         
-        if in_fvg and near_ob:
-            logger.info(f"🎯 Signal confirmé sur {pair}: FVG + OB")
-            direction = 'buy' if fvg_zone['type'] == 'BULLISH' else 'sell'
-            
-            place_trade(
-                pair=pair,
-                direction=direction,
-                entry_price=current_price,
-                stop_loss=fvg_zone['bottom'] if direction == 'buy' else fvg_zone['top'],
-                take_profit=calculate_tp_from_structure(fvg_zone, direction)  # À implémenter
-            )
-            
+        # 5. Vérification de la confluence
+        confluence_score = check_confluence(pair, direction)
+        if confluence_score < MIN_CONFLUENCE_SCORE:
+            logger.warning(f"⚠️ {pair}: Confluence insuffisante ({confluence_score}/{MIN_CONFLUENCE_SCORE})")
+            return
+
+        # 6. Vérification des corrélations
+        if not check_correlation(pair, direction):
+            logger.warning(f"⚠️ {pair}: Corrélations défavorables")
+            return
+
+        # 7. Filtre macroéconomique
+        if not macro_filter(pair, direction):
+            logger.warning(f"⚠️ {pair}: Contexte macro défavorable")
+            return
+
+        # 8. Calcul des niveaux
+        stop_loss = calculate_stop(fvg_zone, ob_zone, direction)
+        take_profit = calculate_tp(current_price, direction, daily_zones.get(pair, {})
+        
+        # 9. Journalisation détaillée
+        logger.info(f"""
+        🎯 Signal confirmé sur {pair}:
+        • Direction: {direction}
+        • Prix: {current_price:.5f}
+        • Stop: {stop_loss:.5f} (Risque: {abs(current_price-stop_loss):.1f}pips)
+        • TP: {take_profit:.5f} (Gain potentiel: {abs(take_profit-current_price):.1f}pips)
+        • Ratio R/R: {abs(take_profit-current_price)/abs(current_price-stop_loss):.1f}
+        • Confluence: {confluence_score}/3
+        • Tendance HTF: {trend}
+        """)
+
+        # 10. Execution du trade
+        place_trade(
+            pair=pair,
+            direction=direction.lower(),
+            entry_price=current_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit
+        )
+
     except Exception as e:
-        logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
+        logger.error(f"❌ Erreur analyse {pair}: {str(e)}", exc_info=True)
 
 def calculate_tp_from_structure(fvg, direction):
     """Calcule le TP basé sur la taille du FVG"""
@@ -342,6 +641,110 @@ def calculate_tp_from_structure(fvg, direction):
         return fvg['top'] + fvg_size * 1.5  # TP = 1.5x la taille du FVG
     else:
         return fvg['bottom'] - fvg_size * 1.5
+def get_central_bank_rates(currency):
+    """Récupère les décisions de taux"""
+    try:
+        if currency == "USD":
+            url = f"https://api.federalreserve.gov/data/DPCREDIT/current?api_key={MACRO_API_KEY}"
+            data = requests.get(url).json()
+            return {
+                "rate": float(data["observations"][0]["value"]),
+                "trend": data["trend"]  # 'hawkish'/'dovish'
+            }
+    except Exception as e:
+        logger.error(f"❌ Erreur taux {currency}: {str(e)}")
+        return None
+
+def log_macro_context(pair):
+    """Affiche le contexte macro"""
+    base_currency = pair[:3]
+    events = check_economic_calendar(pair)
+    
+    logger.info(f"""
+    📊 Contexte Macro {base_currency}:
+    • Prochains événements: {[e[0] for e in events]}
+    • Taux directeur: {get_central_bank_rates(base_currency)}
+    • Inflation (CPI): {get_macro_data(base_currency, "CPI")}
+    """)
+
+def inflation_adjustment(pair):
+    """Ajuste le TP/SL en fonction de l'inflation"""
+    cpi = get_macro_data(pair[:3], "CPI")
+    if not cpi:
+        return 1.0
+        
+    # Exemple: Augmente le TP si inflation haute
+    return 1.1 if cpi > 3.0 else 0.9
+
+def get_htf_data(pair):
+    """Récupère les données une seule fois par paire"""
+    params = {"granularity": "H4", "count": 100, "price": "M"}
+    return client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+
+def calculate_stop(fvg_zone, ob_zone, direction):
+    """Version plus sécurisée avec buffer"""
+    buffer = 0.0005 if "JPY" not in pair else 0.05
+    if direction == 'BUY':
+        return min(fvg_zone['bottom'], ob_zone['low']) - buffer
+    return max(fvg_zone['top'], ob_zone['high']) + buffer
+
+def calculate_tp(entry, direction, daily_zone):
+    """TP avec gestion des cas où daily_zones n'est pas disponible"""
+    base_tp = entry * 1.005 if direction == 'BUY' else entry * 0.995
+    if not daily_zone:
+        return base_tp
+    return max(base_tp, daily_zone.get('VAH', 0)) if direction == 'BUY' else min(base_tp, daily_zone.get('VAL', float('inf')))
+
+def handle_weekend(now):
+    """Gère spécifiquement la fermeture du week-end"""
+    close_all_trades()
+    next_monday = now + timedelta(days=(7 - now.weekday()))
+    sleep_time = min((next_monday - now).total_seconds(), 21600)  # Max 6h
+    logger.info(f"⛔ Week-end - Reprise le lundi à {LONDON_SESSION_STR}")
+    time.sleep(sleep_time)
+
+def log_session_status():
+    """Affiche un résumé complet du statut"""
+    logger.info(f"""
+    🕒 Statut à {datetime.utcnow().strftime('%H:%M UTC')}
+    • Trades actifs: {len(active_trades)}
+    • Prochain événement macro: {get_next_macro_event()}
+    • Liquidité moyenne: {calculate_market_liquidity()}
+    """)
+
+def check_high_impact_events():
+    """Vérifie les événements macro à haut impact"""
+    events = []
+    for pair in PAIRS:
+        currency = pair[:3]
+        events += check_economic_calendar(currency)
+    
+    # Filtre les événements à haut impact dans les 2h
+    critical_events = [
+        e for e in events 
+        if e["impact"] == "HIGH" 
+        and e["time"] - datetime.utcnow() < timedelta(hours=2)
+    ]
+    
+    return len(critical_events) > 0
+
+def process_trading_session():
+    """Gère la session de trading active"""
+    start_time = time.time()
+    
+    # Vérification des événements macro imminents
+    if check_high_impact_events():
+        logger.warning("⚠️ Événement macro majeur - Trading suspendu temporairement")
+        time.sleep(300)
+        return
+
+    # Analyse normale
+    analyze_markets()
+    
+    # Optimisation du timing
+    elapsed = time.time() - start_time
+    sleep_time = max(30 - elapsed, 5)  # Cycle plus rapide
+    time.sleep(sleep_time)
 
 def get_current_price(pair):
     """Récupère le prix actuel"""
@@ -371,6 +774,16 @@ def is_price_near_ob(price, obs, direction, buffer=0.0003):
         elif direction == 'SELL' and (ob['low'] - buffer) <= price <= (ob['high'] + buffer):
             return True, ob
     return False, None
+
+def update_macro_data():
+    """Actualise tous les indicateurs macro"""
+    global daily_data_updated
+    try:
+        for currency in set(pair[:3] for pair in PAIRS):
+            fetch_macro_indicators(currency)
+        daily_data_updated = True
+    except Exception as e:
+        logger.error(f"❌ Échec MAJ données macro: {str(e)}")
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     """Exécute un trade avec vérifications supplémentaires et gestion du slippage"""
@@ -551,8 +964,8 @@ def check_tp_sl():
 # ========================
 # 🔄 BOUCLE PRINCIPALE
 # ========================
-
 if __name__ == "__main__":
+    update_daily_zones()  # Premier calcul
     logger.info("\n"
         "✨✨✨✨✨✨✨✨✨✨✨✨✨\n"
         "   OANDA TRADING BOT v4.0\n"
@@ -566,85 +979,61 @@ if __name__ == "__main__":
         time.sleep(0.5)
 
     while True:
-    now = datetime.utcnow()
-    current_time = now.time()
-    weekday = now.weekday()  # 0-4 = Lun-Ven
+    try:
+        now = datetime.utcnow()
+        current_time = now.time()
+        weekday = now.weekday()
 
-    # =============================================
-    # 1. GESTION FERMETURES (Priorité absolue)
-    # =============================================
-    
-    # A. Week-end - Fermeture totale
-    if weekday >= 5:  # 5 = Sam, 6 = Dim
-        close_all_trades()
-        next_monday = now + timedelta(days=(7 - weekday))
-        sleep_hours = (next_monday - now).total_seconds() / 3600
-        logger.info(f"⛔ Week-end - Prochain trade lundi {LONDON_SESSION_START.strftime('%H:%M')} UTC")
-        time.sleep(min(sleep_hours * 3600, 21600))  # Max 6h de sleep
-        continue
-
-    # B. Fin de session NY - Fermeture des trades
-    if current_time >= NY_SESSION_END:
-        if not end_of_day_processed:
-            logger.info("🕒 Fermeture session NY - Liquidation des positions")
-            close_all_trades()
-            end_of_day_processed = True
-        time.sleep(60)
-        continue
-    else:
-        end_of_day_processed = False
-
-    # =============================================
-    # 2. ANALYSE ASIE (Sans trading)
-    # =============================================
-    if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
-        if not asian_range_calculated:
-            for pair in PAIRS:
-                store_asian_range(pair)  # À implémenter
-            asian_range_calculated = True
-            logger.info("🌏 Range asiatique calculé")
-        time.sleep(300)  # Check toutes les 5 min
-        continue
-
-    # =============================================
-    # 3. PAUSE ENTRE ASIE ET LONDRES
-    # =============================================
-    if ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
-        time.sleep(60)
-        continue
-
-    # =============================================
-    # 4. SESSION ACTIVE (Londres + NY)
-    # =============================================
-    if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-        # Réinitialisation des flags
-        asian_range_calculated = False
+        # =============================================
+        # 0. MISE À JOUR QUOTIDIENNE (08:00 UTC)
+        # =============================================
+        if current_time.hour == 8 and not daily_data_updated:
+            update_macro_data()  # Actualisation des données macro
+            update_daily_zones()  # Calcul des nouvelles zones quotidiennes
+            daily_data_updated = True
+            logger.info("🔄 Données macro et zones quotidiennes mises à jour")
         
-        # Logique de trading
-        start_time = time.time()
-        
-        # A. Vérification trades actifs
-        active_trades = check_active_trades()
-        
-        # B. Analyse des paires
-        for pair in PAIRS:
-            analyze_pair(pair)  # Votre stratégie SMC
-        
-        # C. Gestion TP/SL
-        check_tp_sl()
-        
-        # D. Timing
-        elapsed = time.time() - start_time
-        time.sleep(max(60 - elapsed, 5))
-        continue
+        # Réinitialisation du flag à minuit
+        if current_time.hour == 0:
+            daily_data_updated = False
 
-    # =============================================
-    # 5. HORS SESSION (Backup)
-    # =============================================
-    next_session_start = datetime.combine(
-        now.date() + timedelta(days=1) if current_time > NY_SESSION_END else now.date(),
-        LONDON_SESSION_START
-    )
-    sleep_seconds = (next_session_start - now).total_seconds()
-    logger.info(f"😴 Prochaine session à {LONDON_SESSION_START.strftime('%H:%M')} UTC")
-    time.sleep(min(sleep_seconds, 3600))  # Max 1h
+        # =============================================
+        # 1. GESTION FERMETURES (Priorité absolue)
+        # =============================================
+        if weekday >= 5:  # Week-end
+            handle_weekend(now)
+            continue
+
+        if current_time >= NY_SESSION_END:
+            handle_end_of_day()
+            continue
+
+        # =============================================
+        # 2. ANALYSE ASIE (Sans trading)
+        # =============================================
+        if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+            process_asian_session()
+            continue
+
+        # =============================================
+        # 3. PAUSE ENTRE ASIE ET LONDRES
+        # =============================================
+        if ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
+            time.sleep(60)
+            continue
+
+        # =============================================
+        # 4. SESSION ACTIVE (Londres + NY)
+        # =============================================
+        if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+            process_trading_session()
+            continue
+
+        # =============================================
+        # 5. HORS SESSION (Backup)
+        # =============================================
+        handle_off_session(now)
+
+    except Exception as e:
+        logger.critical(f"💥 ERREUR GLOBALE: {str(e)}", exc_info=True)
+        time.sleep(300)  # Attente avant redémarrage
