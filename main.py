@@ -105,9 +105,12 @@ INSTRUMENT_SPECS = {
 
 BUFFER_SETTINGS = {
     'FOREX': 0.0003,    # 3 pips
-    'JPY_PAIRS': 0.03,  # 30 pips
-    'XAU_USD': 0.3,     # 30 cents
-    'CRYPTO': 5.0       # $5 pour BTC/ETH
+    'JPY_PAIRS': 0.03,  # 30 pips     
+    'CRYPTO': 5.0,
+    'EUR_USD': 0.0003,  # 3 pips
+    'GBP_USD': 0.0003,
+    'USD_JPY': 0.03,    # 30 pips
+    'XAU_USD': 0.3      # 30 cents# $5 pour BTC/ETH
 }
 
 def get_account_balance():
@@ -461,6 +464,7 @@ def check_active_trades():
         return set()
 
 def check_htf_trend(pair, timeframe='H4'):
+    check_timeframe_validity(timeframe)
     """
     Détermine la tendance sur un timeframe supérieur
     Retourne: 'UP', 'DOWN', 'RANGE' ou 'NEUTRAL'
@@ -844,14 +848,54 @@ def inflation_adjustment(pair):
     # Exemple: Augmente le TP si inflation haute
     return 1.1 if cpi > 3.0 else 0.9
 
-def get_htf_data(pair):
+def get_htf_data(pair, timeframe='H4'):
+    """
+    Récupère les données HTF avec cache et gestion d'erreur robuste
+    Args:
+        pair: str - Paire de trading (ex: 'EUR_USD')
+        timeframe: str - Période valide (S5, M1, M5, M15, H1, H4, D, W, M)
+    Returns:
+        list - Liste des bougies ou None en cas d'erreur
+    """
+    # Initialisation du cache si inexistant
+    if not hasattr(get_htf_data, 'cache'):
+        get_htf_data.cache = {}
+    
+    # Validation du timeframe
+    valid_timeframes = ["S5", "M1", "M5", "M15", "H1", "H4", "D", "W", "M"]
+    if timeframe not in valid_timeframes:
+        logger.error(f"❌ Timeframe {timeframe} invalide. Utilisation de H4 par défaut")
+        timeframe = "H4"
+
+    # Vérification du cache
+    cache_key = f"{pair}_{timeframe}"
+    if cache_key in get_htf_data.cache:
+        cache_data = get_htf_data.cache[cache_key]
+        if time.time() - cache_data['timestamp'] < 900:  # 15 minutes
+            return cache_data['data']
+
+    # Configuration des paramètres
+    params = {
+        "granularity": timeframe,
+        "count": 100,
+        "price": "M"
+    }
+
     try:
-        params = {"granularity": "H4", "count": 100, "price": "M"}
-        candles = client.request(instruments.InstrumentsCandles(
-            instrument=pair, params=params))['candles']
-        return [c for c in candles if c['complete']]  # Ne garder que les bougies complètes
+        # Requête API
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        data = client.request(r)['candles']
+        
+        # Mise en cache
+        get_htf_data.cache[cache_key] = {
+            'data': data,
+            'timestamp': time.time()
+        }
+        
+        return data
+
     except Exception as e:
-        logger.error(f"❌ Erreur données HTF {pair}: {str(e)}")
+        logger.error(f"❌ Erreur récupération HTF {pair} ({timeframe}): {str(e)}")
         return None
 
 def is_price_in_valid_range(price, asian_range, trend):
@@ -1089,12 +1133,40 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
         return "SIMULATION"
 
 def get_asian_range(pair):
-    """Récupère le range asiatique calculé"""
-    return asian_ranges.get(pair, {
-        'high': float('inf'),
-        'low': 0,
-        'time': None
-    })
+    """
+    Calcule et retourne le range asiatique sous forme de dictionnaire
+    Format:
+    {
+        'low': float,  # Plus bas de la session
+        'high': float, # Plus haut de la session 
+        'time': datetime # Heure de calcul
+    }
+    """
+    try:
+        candles = get_candles(pair, ASIAN_SESSION_START, ASIAN_SESSION_END)
+        if not candles:
+            return None
+            
+        highs = [float(c['mid']['h']) for c in candles if 'mid' in c]
+        lows = [float(c['mid']['l']) for c in candles if 'mid' in c]
+        
+        if not highs or not lows:
+            return None
+            
+        return {
+            'low': min(lows),
+            'high': max(highs), 
+            'time': datetime.utcnow()  # Horodatage du calcul
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur calcul range {pair}: {str(e)}")
+        return None
+
+def check_timeframe_validity(tf):
+    valid = ["S5","M1","M5","M15","H1","H4","D","W","M"]
+    if tf not in valid:
+        raise ValueError(f"Timeframe invalide. Utiliser: {valid}")
 
 def close_all_trades():
     """Ferme tous les trades ouverts"""
