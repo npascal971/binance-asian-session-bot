@@ -1146,12 +1146,12 @@ while True:
         # 4. SESSION ACTIVE (Londres + NY)
         # =============================================
         if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-            asian_range = get_asian_range(pair)
-            if price > asian_range['high']:
+           asian_range = get_asian_range(pair)
+           if price > asian_range['high']:
                 # Signal d'achat sur breakout
-            elif price < asian_range['low']:
+           elif price < asian_range['low']:
                 # Signal de vente sur breakdown
-                    continue
+            
 
         # =============================================
         # 5. HORS SESSION (Backup)
