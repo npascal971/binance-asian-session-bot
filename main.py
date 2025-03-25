@@ -15,7 +15,6 @@ import oandapyV20.endpoints.trades as trades
 import oandapyV20.endpoints.pricing as pricing
 import requests
 from datetime import timedelta
-from datetime import time
 
 
 # Chargement des variables d'environnement
