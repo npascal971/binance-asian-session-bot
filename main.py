@@ -62,7 +62,7 @@ MACRO_API_KEY = os.getenv("MACRO_API_KEY")  # Clé pour FRED/Quandl
 ECONOMIC_CALENDAR_API = "https://economic-calendar.com/api"  # Exemple
 asian_ranges = {}  # Dictionnaire pour stocker les ranges
 asian_range_calculated = False  # Flag de contrôle
-
+end_of_day_processed = False
 IMPORTANT_EVENTS = {
     "USD": ["CPI", "NFP", "FOMC", "UNEMPLOYMENT"],
     "EUR": ["CPI", "ECB_RATE", "GDP"],
@@ -804,9 +804,10 @@ def handle_weekend(now):
     """Gère spécifiquement la fermeture du week-end"""
     close_all_trades()
     next_monday = now + timedelta(days=(7 - now.weekday()))
-    sleep_time = min((next_monday - now).total_seconds(), 21600)  # Max 6h
-    logger.info(f"⛔ Week-end - Reprise le lundi à {LONDON_SESSION_STR}")
-    time.sleep(sleep_time)
+    sleep_seconds = (next_monday - now).total_seconds()
+    logger.info(f"⛔ Week-end - Prochaine ouverture à {LONDON_SESSION_START.strftime('%H:%M')} UTC")
+    time.sleep(min(sleep_seconds, 21600))  # Max 6h
+
 
 def log_session_status():
     """Affiche un résumé complet du statut"""
@@ -879,6 +880,20 @@ def is_price_near_ob(price, obs, direction, buffer=0.0003):
         elif direction == 'SELL' and (ob['low'] - buffer) <= price <= (ob['high'] + buffer):
             return True, ob
     return False, None
+
+ef store_asian_range(pair):
+    """Stocke le range asiatique pour une paire"""
+    try:
+        candles = get_candles(pair, ASIAN_SESSION_START, ASIAN_SESSION_END)
+        highs = [float(c['mid']['h']) for c in candles]
+        lows = [float(c['mid']['l']) for c in candles]
+        asian_ranges[pair] = {
+            'high': max(highs),
+            'low': min(lows),
+            'time': datetime.utcnow()
+        }
+    except Exception as e:
+        logger.error(f"❌ Erreur calcul range {pair}: {str(e)}")
 
 def update_macro_data():
     """Actualise tous les indicateurs macro"""
@@ -1104,105 +1119,58 @@ while True:
         current_time = now.time()
         weekday = now.weekday()
 
-        # =============================================
-        # 0. MISE À JOUR QUOTIDIENNE (08:00 UTC)
-        # =============================================
-        if current_time.hour == 8 and not daily_data_updated:
-            update_macro_data()  # Actualisation des données macro
-            update_daily_zones()  # Calcul des nouvelles zones quotidiennes
-            daily_data_updated = True
-            logger.info("🔄 Données macro et zones quotidiennes mises à jour")
-        
-        # Réinitialisation du flag à minuit
-        if current_time.hour == 0:
-            daily_data_updated = False
-
-        # =============================================
-        # 1. GESTION FERMETURES (Priorité absolue)
-        # =============================================
-        if weekday >= 5:  # Week-end
+        # 1. Gestion Week-End
+        if weekday >= 5:  # Samedi (5) ou Dimanche (6)
             handle_weekend(now)
             continue
 
-        if current_time >= NY_SESSION_END:
-            handle_end_of_day()
-            continue
-
-        # =============================================
-        # 2. ANALYSE ASIE (Sans trading)
-        # =============================================
+        # 2. Session Asiatique (00:00 - 06:00 UTC)
         if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
-            process_asian_session()
+            if not asian_range_calculated:
+                logger.info("🌏 Début analyse session asiatique")
+                for pair in PAIRS:
+                    store_asian_range(pair)
+                asian_range_calculated = True
+                logger.info("✅ Analyse session asiatique terminée")
+            time.sleep(300)  # Attendre 5 minutes
             continue
 
-        # =============================================
-        # 3. PAUSE ENTRE ASIE ET LONDRES
-        # =============================================
+        # 3. Pause Entre Sessions (06:00 - 07:00 UTC)
         if ASIAN_SESSION_END <= current_time < LONDON_SESSION_START:
             time.sleep(60)
             continue
 
-        # =============================================
-        # 4. SESSION ACTIVE (Londres + NY)
-        # =============================================
-        
+        # 4. Session Active (Londres + NY, 07:00 - 16:30 UTC)
         if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-            # Réinitialisation des flags
-            asian_range_calculated = False
-    
-            # Logique de trading
             start_time = time.time()
-    
-            # A. Vérification trades actifs
+            
+            # A. Vérifier les trades actifs
             active_trades = check_active_trades()
-    
-            # B. Analyse des paires
+            
+            # B. Analyser chaque paire
             for pair in PAIRS:
-                # Récupération du range asiatique
-                asian_range = get_asian_range(pair)
-                current_price = get_current_price(pair)
-        
-                # Stratégie de breakout du range asiatique
-                if current_price > asian_range['high']:
-                    logger.info(f"🚀 Breakout haussier détecté sur {pair}")
-                    place_trade(
-                        pair=pair,
-                        direction="buy",
-                        entry_price=current_price,
-                        stop_loss=asian_range['low'] - 0.0005,  # Stop sous le low du range
-                        take_profit=current_price + (asian_range['high'] - asian_range['low']) * 1.5  # TP = 1.5x le range
-                    )
-                elif current_price < asian_range['low']:
-                    logger.info(f"🔻 Breakdown baissier détecté sur {pair}")
-                    place_trade(
-                        pair=pair,
-                        direction="sell",
-                        entry_price=current_price,
-                        stop_loss=asian_range['high'] + 0.0005,  # Stop au-dessus du high du range
-                        take_profit=current_price - (asian_range['high'] - asian_range['low']) * 1.5  # TP = 1.5x le range
-                    )
-    
-            # C. Gestion TP/SL
+                analyze_pair(pair)
+            
+            # C. Vérifier les TP/SL
             check_tp_sl()
-    
-            # D. Timing
+            
+            # D. Contrôle du timing
             elapsed = time.time() - start_time
-            time.sleep(max(60 - elapsed, 5))
+            sleep_time = max(60 - elapsed, 5)  # Minimum 5 secondes
+            time.sleep(sleep_time)
             continue
-            
-            # Signal de vente sur breakdown
 
-
-            
-
-
-            
-
-        # =============================================
-        # 5. HORS SESSION (Backup)
-        # =============================================
-        handle_off_session(now)
+        # 5. Après la Fermeture (16:30 - 00:00 UTC)
+        if current_time > NY_SESSION_END:
+            if not end_of_day_processed:
+                logger.info("🕒 Fermeture session NY - Liquidation des positions")
+                close_all_trades()
+                end_of_day_processed = True
+            time.sleep(60)
+            continue
+        else:
+            end_of_day_processed = False
 
     except Exception as e:
-        logger.critical(f"💥 ERREUR GLOBALE: {str(e)}", exc_info=True)
-        time.sleep(300)  # Attente avant redémarrage
+        logger.error(f"💥 Erreur dans la boucle principale: {str(e)}", exc_info=True)
+        time.sleep(60)  # Attendre avant de réessayer
