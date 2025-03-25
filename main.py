@@ -482,7 +482,7 @@ def check_htf_trend(pair, timeframe='H4'):
 
 def update_daily_zones():
     """Met à jour les zones clés quotidiennes"""
-    global daily_zones
+    global daily_data_updated
     for pair in PAIRS:
         try:
             # Utilisez None pour end_time pour éviter les problèmes de futur
@@ -505,10 +505,12 @@ def update_daily_zones():
                 'time': datetime.utcnow().date()
             }
             
-        except Exception as e:
-            logger.error(f"❌ Erreur MAJ zones {pair}: {str(e)}")
-    
+            
     logger.info("📊 Zones quotidiennes mises à jour")
+        daily_data_updated = True
+    except Exception as e:
+        logger.error(f"❌ Erreur MAJ zones quotidiennes: {str(e)}")
+        daily_data_updated = False
 
 
 def get_candles(pair, start_time, end_time=None):
