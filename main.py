@@ -1132,51 +1132,51 @@ if __name__ == "__main__":
             current_time = now.time()
             weekday = now.weekday()
 
-        logger.info(f"🔄 Cycle début - {now} (UTC)")  # Nouveau log
+            logger.info(f"🔄 Cycle début - {now} (UTC)")  # Nouveau log
 
         # 1. Gestion Week-End
-        if weekday >= 5:
-            handle_weekend(now)
-            continue
+            if weekday >= 5:
+                handle_weekend(now)
+                continue
 
         # 2. Réinitialisation quotidienne
-        if current_time.hour == 0 and current_time.minute < 30:
-            daily_data_updated = False
-            asian_range_calculated = False
-            end_of_day_processed = False
+            if current_time.hour == 0 and current_time.minute < 30:
+                daily_data_updated = False
+                asian_range_calculated = False
+                end_of_day_processed = False
 
         # 3. Mise à jour quotidienne
-        if not daily_data_updated and current_time >= dtime(0, 30):
-            update_daily_zones()
+            if not daily_data_updated and current_time >= dtime(0, 30):
+                update_daily_zones()
 
         # 4. Session Asiatique
-        if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
-            if not asian_range_calculated:
-                logger.info("🌏 Début analyse session asiatique")
-                for pair in PAIRS:
-                    store_asian_range(pair)  # Utilisez cette fonction au lieu de process_asian_session()
-                asian_range_calculated = True
-                logger.info("✅ Analyse session asiatique terminée")
-            time.sleep(300)  # 5 minutes ATTENTION : doit être en dehors du if !
-            continue  # ← Important pour sauter le reste de la boucle
+            if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+                if not asian_range_calculated:
+                    logger.info("🌏 Début analyse session asiatique")
+                    for pair in PAIRS:
+                        store_asian_range(pair)  # Utilisez cette fonction au lieu de process_asian_session()
+                    asian_range_calculated = True
+                    logger.info("✅ Analyse session asiatique terminée")
+                time.sleep(300)  # 5 minutes ATTENTION : doit être en dehors du if !
+                continue  # ← Important pour sauter le reste de la boucle
 
         # 5. Session Active (Londres + NY)
-        if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-            active_trades = check_active_trades()
+            if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+                active_trades = check_active_trades()
             
-            for pair in PAIRS:
-                analyze_pair(pair)
+                for pair in PAIRS:
+                    analyze_pair(pair)
             
-            check_tp_sl()
-            time.sleep(max(30 - (time.time() - start_time), 5))
-            continue
+                check_tp_sl()
+                time.sleep(max(30 - (time.time() - start_time), 5))
+                continue
 
         # 6. Hors session
-        if not end_of_day_processed:
-            close_all_trades()
-            end_of_day_processed = True
+            if not end_of_day_processed:
+                close_all_trades()
+                end_of_day_processed = True
         
-        time.sleep(60)
+            time.sleep(60)
 
     except Exception as e:
         logger.error(f"💥 Erreur critique: {str(e)}", exc_info=True)
