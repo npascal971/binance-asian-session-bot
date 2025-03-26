@@ -2,6 +2,7 @@ import os
 import logging
 from datetime import datetime, timedelta
 import pytz
+import pandas as pd
 import numpy as np
 from functools import lru_cache, wraps
 import oandapyV20
@@ -92,6 +93,55 @@ def safe_execute(func, *args, error_message="Erreur inconnue"):
         logger.error(f"{error_message}: {str(e)}")
         return None
 
+
+
+def calculate_ema(pair, period=200):
+    """
+    Calcule l'EMA (Exponential Moving Average) pour une paire donnée.
+    
+    Args:
+        pair (str): La paire de devises (ex: "EUR_USD").
+        period (int): Période de l'EMA (par défaut 200).
+    
+    Returns:
+        float: Valeur de l'EMA si calculée avec succès, sinon None.
+    """
+    try:
+        # Récupération des données historiques
+        candles = get_candles(pair, granularity="H4", count=period * 2)  # Récupère suffisamment de bougies
+        if not candles or len(candles) < period:
+            logger.warning(f"EMA{period}: Données insuffisantes ({len(candles) if candles else 0}/{period} bougies)")
+            return None
+
+        # Extraction des prix de clôture
+        closes = []
+        for candle in candles:
+            try:
+                if 'mid' in candle and 'c' in candle['mid']:
+                    closes.append(float(candle['mid']['c']))
+            except (KeyError, TypeError, ValueError) as e:
+                logger.debug(f"Bougie ignorée - {str(e)}")
+                continue
+
+        if len(closes) < period:
+            logger.warning(f"EMA{period}: Trop de valeurs invalides ({len(closes)}/{period} valides)")
+            return None
+
+        # Calcul de l'EMA avec pandas
+        series = pd.Series(closes)
+        ema = series.ewm(span=period, adjust=False).mean()
+
+        # Vérification du résultat final
+        if pd.isna(ema.iloc[-1]):
+            logger.warning(f"EMA{period}: Calcul invalide (valeur NaN)")
+            return None
+
+        return float(ema.iloc[-1])
+
+    except Exception as e:
+        logger.error(f"❌ Erreur EMA{period} pour {pair}: {str(e)}")
+        return None
+
 def analyze_session(session_type, pairs):
     """Analyse une session (asiatique ou européenne)."""
     global asian_ranges, european_ranges
@@ -126,27 +176,30 @@ def analyze_pair(pair, range_to_use):
     try:
         logger.info(f"🔍 Début analyse approfondie pour {pair}")
 
-        # Vérification si le prix est dans la plage valide
+        # 1. Vérification si le prix est dans la plage valide
         current_price = get_current_price(pair)
         if not is_price_in_valid_range(current_price, range_to_use):
             logger.info(f"❌ Prix hors range valide pour {pair}")
             return
 
-        # Calcul des indicateurs techniques
+        # 2. Calcul des indicateurs techniques
         rsi = calculate_rsi(pair)
         macd_signal = calculate_macd(pair)
+        ema200 = calculate_ema(pair)  # Calcul de l'EMA200
 
         # Logs détaillés
         logger.info(f"📊 Analyse {pair} - Prix: {current_price:.5f}, Range: {range_to_use['low']:.5f} - {range_to_use['high']:.5f}")
-        logger.info(f"📈 RSI: {rsi:.2f}, MACD Signal: {macd_signal}")
+        logger.info(f"📈 RSI: {rsi:.2f}, MACD Signal: {macd_signal}, EMA200: {ema200:.5f}")
 
-        # Décision de placement de trade
-        if rsi < 40 and macd_signal == "BUY":  # RSI ajusté à 40
+        # 3. Décision de placement de trade avec confirmation EMA200
+        if ema200 and current_price > ema200 and rsi < 40 and macd_signal == "BUY":
             place_trade(pair, "buy", current_price, range_to_use["low"], range_to_use["high"])
-        elif rsi > 60 and macd_signal == "SELL":  # RSI ajusté à 60
+            logger.info(f"🎯 Configuration haussière confirmée par EMA200 pour {pair}")
+        elif ema200 and current_price < ema200 and rsi > 60 and macd_signal == "SELL":
             place_trade(pair, "sell", current_price, range_to_use["high"], range_to_use["low"])
+            logger.info(f"🎯 Configuration baissière confirmée par EMA200 pour {pair}")
         else:
-            logger.debug(f"❌ Conditions non remplies pour {pair} - RSI: {rsi}, MACD: {macd_signal}")
+            logger.debug(f"❌ Conditions non remplies pour {pair} - RSI: {rsi}, MACD: {macd_signal}, EMA200: {ema200}")
 
     except Exception as e:
         logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
