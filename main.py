@@ -84,39 +84,69 @@ def check_high_impact_events():
     # Implémentez ici l'appel à une API économique ou calendrier économique.
     return False
 
+def is_price_in_valid_range(current_price, asian_range, buffer=0.0002):
+    """
+    Vérifie si le prix actuel est dans la plage valide définie par le range asiatique.
+    
+    Args:
+        current_price (float): Le prix actuel de la paire.
+        asian_range (dict): Dictionnaire contenant les clés 'high' et 'low' pour le range asiatique.
+        buffer (float): Une marge de sécurité pour éviter les faux signaux (en pips ou en unités).
+    
+    Returns:
+        bool: True si le prix est dans la plage valide, False sinon.
+    """
+    if not asian_range or "high" not in asian_range or "low" not in asian_range:
+        logger.warning("⚠️ Range asiatique invalide ou manquant")
+        return False
+    
+    # Appliquer un buffer pour éviter les faux signaux près des bords
+    lower_bound = asian_range["low"] - buffer
+    upper_bound = asian_range["high"] + buffer
+    
+    # Vérifier si le prix actuel est dans la plage avec le buffer
+    if lower_bound <= current_price <= upper_bound:
+        logger.info(f"✅ Prix {current_price:.5f} dans la plage valide ({lower_bound:.5f} - {upper_bound:.5f})")
+        return True
+    else:
+        logger.info(f"❌ Prix {current_price:.5f} hors de la plage valide ({lower_bound:.5f} - {upper_bound:.5f})")
+        return False
+
 def analyze_pair(pair):
     """Analyse une paire pour détecter des opportunités de trading."""
-    if check_high_impact_events():
-        logger.warning("⚠️ Événement macro majeur - Pause de 5 min")
-        return
+    try:
+        logger.info(f"🔍 Début analyse approfondie pour {pair}")
+        
+        # Récupération du range asiatique
+        asian_range = asian_ranges.get(pair)
+        if not asian_range:
+            logger.warning(f"⚠️ Aucun range asiatique disponible pour {pair}")
+            return
+        
+        # Récupération du prix actuel
+        current_price = get_current_price(pair)
+        
+        # Vérification si le prix est dans la plage valide
+        if not is_price_in_valid_range(current_price, asian_range):
+            logger.info(f"❌ Prix hors range valide pour {pair}")
+            return
+        
+        # Calcul des indicateurs techniques
+        rsi = calculate_rsi(pair)
+        macd_signal = calculate_macd(pair)
+        
+        # Logs détaillés
+        logger.info(f"📊 Analyse {pair} - Prix: {current_price:.5f}, Range: {asian_range['low']:.5f} - {asian_range['high']:.5f}")
+        logger.info(f"📈 RSI: {rsi:.2f}, MACD Signal: {macd_signal}")
+        
+        # Décision de placement de trade
+        if rsi < 30 and macd_signal == "BUY":
+            place_trade(pair, "buy", current_price, asian_range["low"], asian_range["high"])
+        elif rsi > 70 and macd_signal == "SELL":
+            place_trade(pair, "sell", current_price, asian_range["high"], asian_range["low"])
     
-    # Récupération du range asiatique
-    asian_range = asian_ranges.get(pair)
-    if not asian_range:
-        logger.warning(f"⚠️ Aucun range asiatique disponible pour {pair}")
-        return
-    
-    # Récupération du prix actuel
-    current_price = get_current_price(pair)
-    
-    # Vérification si le prix est dans la plage valide
-    if not is_price_in_valid_range(current_price, asian_range):
-        logger.info(f"❌ Prix hors range valide pour {pair}")
-        return
-    
-    # Calcul des indicateurs techniques
-    rsi = calculate_rsi(pair)
-    macd_signal = calculate_macd(pair)
-    
-    # Logs détaillés
-    logger.info(f"📊 Analyse {pair} - Prix: {current_price:.5f}, Range: {asian_range['low']:.5f} - {asian_range['high']:.5f}")
-    logger.info(f"📈 RSI: {rsi:.2f}, MACD Signal: {macd_signal}")
-    
-    # Décision de placement de trade
-    if rsi < 30 and macd_signal == "BUY":
-        place_trade(pair, "buy", current_price, asian_range["low"], asian_range["high"])
-    elif rsi > 70 and macd_signal == "SELL":
-        place_trade(pair, "sell", current_price, asian_range["high"], asian_range["low"])
+    except Exception as e:
+        logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
 
 def main_loop():
     """Boucle principale du bot."""
