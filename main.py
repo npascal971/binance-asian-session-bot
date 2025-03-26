@@ -1408,79 +1408,92 @@ def check_timeframe_validity(tf):
         raise ValueError(f"Timeframe invalide. Utiliser: {valid}")
 
 def analyze_asian_session():
-    """Version robuste avec gestion des erreurs et réessais automatiques"""
+    """Version robuste avec gestion des données partielles et réessais intelligents"""
     global asian_ranges, asian_range_calculated
     
-    logger.info("🌏 DÉBUT ANALYSE SESSION ASIATIQUE")
-    pairs_to_analyze = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
+    logger.info("🌏 LANCEMENT ANALYSE ASIATIQUE AVANCÉE")
+    pairs = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
     success_count = 0
-    max_retries = 3
-    retry_delay = 5  # secondes
+    max_retries = 2
+    retry_delay = 30  # secondes entre les tentatives
 
-    for pair in pairs_to_analyze:
-        retry_count = 0
-        while retry_count < max_retries:
+    for attempt in range(1, max_retries + 1):
+        logger.info(f"🔁 Tentative {attempt}/{max_retries}")
+        
+        for pair in pairs:
+            if pair in asian_ranges:  # Ne pas réessayer les paires déjà réussies
+                continue
+                
             try:
-                # 1. Configuration des paramètres temporels
+                # 1. Configuration temporelle dynamique
                 now = datetime.utcnow()
                 start_time = datetime.combine(now.date(), ASIAN_SESSION_START)
                 end_time = min(datetime.combine(now.date(), ASIAN_SESSION_END), now)
-
-                # 2. Récupération des données avec timeout
+                
+                # 2. Récupération des données avec granularité adaptative
+                granularity = "M30" if attempt == 2 else "H1"  # Essaie plus fin en 2ème tentative
                 params = {
-                    "granularity": "H1",
+                    "granularity": granularity,
                     "from": start_time.isoformat() + "Z",
                     "to": end_time.isoformat() + "Z",
                     "price": "M"
                 }
                 
-                logger.debug(f"📡 Tentative {retry_count+1} pour {pair}...")
+                logger.debug(f"📡 Récupération {pair} ({granularity})...")
                 candles = client.request(
                     instruments.InstrumentsCandles(
                         instrument=pair,
                         params=params
-                    ),
-                    timeout=10
+                    )
                 )['candles']
-
-                # 3. Vérification des données reçues
-                if not candles or len(candles) < 3:  # Au moins 3 bougies
-                    raise ValueError("Données insuffisantes")
-
-                # 4. Extraction des prix
-                valid_candles = [c for c in candles if c['complete']]
-                highs = [float(c['mid']['h']) for c in valid_candles]
-                lows = [float(c['mid']['l']) for c in valid_candles]
-
-                if not highs or not lows:
-                    raise ValueError("Données de prix manquantes")
-
-                # 5. Enregistrement des résultats
+                
+                # 3. Validation renforcée des données
+                if not candles:
+                    raise ValueError("Aucune donnée reçue")
+                    
+                valid_candles = [c for c in candles if c.get('complete', False)]
+                if len(valid_candles) < 4:  # Minimum 4 bougies complètes
+                    raise ValueError(f"Seulement {len(valid_candles)} bougies valides")
+                
+                # 4. Calcul des prix avec vérification
+                try:
+                    highs = [float(c['mid']['h']) for c in valid_candles]
+                    lows = [float(c['mid']['l']) for c in valid_candles]
+                    if not highs or not lows:
+                        raise ValueError("Données de prix manquantes")
+                except (KeyError, TypeError) as e:
+                    raise ValueError(f"Format de prix invalide: {str(e)}")
+                
+                # 5. Enregistrement du range
                 asian_ranges[pair] = {
                     'high': max(highs),
                     'low': min(lows),
                     'time': end_time,
-                    'candles': len(valid_candles)
+                    'candles': len(valid_candles),
+                    'granularity': granularity
                 }
-                
-                logger.info(f"✅ {pair}: Range {asian_ranges[pair]['low']:.5f}-{asian_ranges[pair]['high']:.5f}")
                 success_count += 1
-                break
-
+                logger.info(f"✅ {pair}: {asian_ranges[pair]['low']:.5f}-{asian_ranges[pair]['high']:.5f} ({len(valid_candles)} bouches {granularity})")
+                
             except Exception as e:
-                retry_count += 1
-                logger.warning(f"⚠️ Tentative {retry_count} échouée pour {pair}: {str(e)}")
-                if retry_count < max_retries:
-                    time.sleep(retry_delay)
-                else:
-                    logger.error(f"❌ Échec après {max_retries} tentatives pour {pair}")
-
-    # Vérification du succès global
-    if success_count >= len(pairs_to_analyze) // 2:  # Au moins 50% de réussite
+                logger.warning(f"⚠️ {pair} tentative {attempt} échouée: {str(e)}")
+                if attempt == max_retries:
+                    logger.error(f"❌ Échec final pour {pair}")
+        
+        # Évaluation intermédiaire
+        if success_count >= len(pairs) - 1:  # Au plus 1 échec toléré
+            break
+            
+        if attempt < max_retries:
+            logger.info(f"⏳ Prochaine tentative dans {retry_delay}s...")
+            time.sleep(retry_delay)
+    
+    # Résultat final
+    if success_count >= 2:  # Minimum 2 paires valides
         asian_range_calculated = True
-        logger.info(f"✅ ANALYSE TERMINÉE ({success_count}/{len(pairs_to_analyze)} paires valides)")
+        logger.info(f"🏁 ANALYSE TERMINÉE: {success_count}/{len(pairs)} paires valides")
     else:
-        logger.error("❌ ANALYSE INCOMPLÈTE - Données insuffisantes")
+        logger.error("💥 ÉCHEC CRITIQUE: Données insuffisantes pour trading")
 
 def close_all_trades():
     """Ferme tous les trades ouverts"""
@@ -1636,7 +1649,7 @@ while True:
             logger.info(f"🌏 DÉBUT SESSION ASIATIQUE ({current_time})")
             
             if not asian_range_calculated:
-                analyze_asian_session_v2()  # Utilise la nouvelle fonction robuste
+                analyze_asian_session()  # Utilise la nouvelle fonction robuste
             else:
                 # Vérification périodique du range
                 current_price = get_current_price("EUR_USD")  # Paire de référence
@@ -1665,7 +1678,7 @@ while True:
             # Vérification des ranges asiatiques (au cas où manqués)
             if not asian_range_calculated:
                 logger.warning("⚠️ Aucun range asiatique détecté - Calcul rétroactif")
-                analyze_asian_session_v2()
+                analyze_asian_session()
             
             # Vérification des événements macro
             if check_high_impact_events():
