@@ -168,6 +168,59 @@ def calculate_rsi(closes, period=14):
         logger.error(f"❌ Erreur lors du calcul du RSI: {str(e)}")
         return None
 
+
+
+def calculate_macd(closes, fast=12, slow=26, signal=9):
+    """
+    Calcule le MACD (Moving Average Convergence Divergence) à partir des prix de clôture.
+    
+    Args:
+        closes (list): Liste des prix de clôture (float).
+        fast (int): Période de la moyenne mobile exponentielle rapide (par défaut 12).
+        slow (int): Période de la moyenne mobile exponentielle lente (par défaut 26).
+        signal (int): Période de la ligne de signal (par défaut 9).
+    
+    Returns:
+        tuple: 
+            - macd_line (float): Valeur actuelle de la ligne MACD.
+            - signal_line (float): Valeur actuelle de la ligne de signal.
+            - histogram (float): Différence entre la ligne MACD et la ligne de signal.
+    """
+    try:
+        # Vérification que nous avons suffisamment de données
+        if len(closes) < max(fast, slow, signal):
+            logger.warning(f"⚠️ Données insuffisantes pour MACD ({len(closes)} points)")
+            return None, None, None
+
+        # Conversion en série pandas pour les calculs
+        series = pd.Series(closes)
+
+        # Calcul des moyennes mobiles exponentielles
+        ema_fast = series.ewm(span=fast, adjust=False).mean()
+        ema_slow = series.ewm(span=slow, adjust=False).mean()
+
+        # Calcul de la ligne MACD
+        macd_line = ema_fast - ema_slow
+
+        # Calcul de la ligne de signal
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+
+        # Calcul de l'histogramme
+        histogram = macd_line.iloc[-1] - signal_line.iloc[-1]
+
+        # Récupération des valeurs actuelles
+        macd_value = float(macd_line.iloc[-1])
+        signal_value = float(signal_line.iloc[-1])
+
+        # Logs détaillés
+        logger.info(f"📊 MACD calculé - Ligne MACD: {macd_value:.5f}, Ligne Signal: {signal_value:.5f}, Histogramme: {histogram:.5f}")
+
+        return macd_value, signal_value, histogram
+
+    except Exception as e:
+        logger.error(f"❌ Erreur lors du calcul du MACD: {str(e)}")
+        return None, None, None
+
 def calculate_ema(pair, period=200):
     """
     Calcule l'EMA (Exponential Moving Average) pour une paire donnée.
