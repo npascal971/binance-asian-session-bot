@@ -950,78 +950,104 @@ def identify_order_blocks(candles, min_ratio=2):
     return blocks
     
 def analyze_pair(pair):
-    """Version finale corrigée avec gestion robuste des erreurs et optimisations"""
+    """Version finale ultra-robuste avec gestion complète des erreurs"""
     try:
-        logger.info(f"🔍 Début analyse pour {pair}")
+        logger.info(f"🔍 Début analyse approfondie pour {pair}")
         
-        # 1. Récupération et validation des données avec timeout
+        # 1. Récupération et validation des données
         try:
             candles = get_htf_data(pair, "H4")
-            if not candles or len(candles) < 100:
-                logger.warning(f"Données insuffisantes pour {pair} (reçu: {len(candles) if candles else 0}/100 bougies)")
+            if not candles or len(candles) < 200:  # Minimum 200 bougies pour EMA200 fiable
+                logger.warning(f"Données insuffisantes pour {pair} (reçu: {len(candles) if candles else 0}/200 bougies)")
                 return
         except Exception as e:
-            logger.error(f"Erreur récupération données {pair}: {str(e)}")
+            logger.error(f"ERREUR récupération données {pair}: {str(e)}")
             return
 
-        # 2. Nettoyage approfondi des données
+        # 2. Nettoyage et validation des prix
         closes = []
         volumes = []
-        valid_candles = 0
+        bad_candles = 0
         
-        for candle in candles:
+        for i, candle in enumerate(candles):
             try:
-                # Vérification en profondeur de la structure des données
-                if not isinstance(candle, dict) or 'mid' not in candle:
-                    continue
-                    
-                mid_data = candle['mid']
-                if not isinstance(mid_data, dict) or 'c' not in mid_data:
+                # Vérification ultra-robuste de la structure
+                if (not isinstance(candle, dict) or 
+                    'mid' not in candle or 
+                    not isinstance(candle['mid'], dict) or 
+                    'c' not in candle['mid']):
+                    bad_candles += 1
                     continue
                 
-                # Conversion sécurisée
-                close_price = float(mid_data['c'])
+                close_price = float(candle['mid']['c'])
                 volume = float(candle.get('volume', 0))
+                
+                # Détection des valeurs aberrantes
+                if i > 0:
+                    prev_price = closes[-1]
+                    price_change = abs(close_price - prev_price)
+                    avg_change = np.mean(np.abs(np.diff(closes[-10:]))) if len(closes) > 10 else 0.0001
+                    
+                    if price_change > 10 * avg_change:
+                        logger.warning(f"Prix anormal détecté à l'index {i}: {close_price} (changement: {price_change:.5f})")
+                        bad_candles += 1
+                        continue
                 
                 closes.append(close_price)
                 volumes.append(volume)
-                valid_candles += 1
-                
-            except (TypeError, ValueError, AttributeError) as e:
-                logger.debug(f"Bougie ignorée - erreur traitement: {str(e)}")
+                    
+            except Exception as e:
+                logger.debug(f"Bougie {i} ignorée - {str(e)}")
+                bad_candles += 1
                 continue
 
-        if valid_candles < 100:
-            logger.warning(f"Données valides insuffisantes pour {pair} (reçu: {valid_candles}/100 bougies valides)")
+        if bad_candles > 20:  # Seuil tolérable de bougies corrompues (10%)
+            logger.warning(f"Trop de bougies invalides ({bad_candles}/{len(candles)}) pour {pair}")
+            return
+            
+        if len(closes) < 180:  # On accepte jusqu'à 20 bougies invalides
+            logger.warning(f"Trop peu de prix valides ({len(closes)}/180 minimum)")
             return
 
-        # 3. Calcul des indicateurs avec vérification renforcée
+        # 3. Calcul EMA200 ultra-sécurisé
+        try:
+            ema200 = pd.Series(closes).ewm(span=200, adjust=False).mean().iloc[-1]
+            if np.isnan(ema200):
+                raise ValueError("EMA200 est NaN")
+            ema200 = float(ema200)
+            logger.info(f"✅ EMA200 calculé avec succès: {ema200:.5f}")
+        except Exception as e:
+            logger.error(f"ERREUR critique EMA200 - {str(e)} - Valeurs récentes: {closes[-5:]}")
+            return
+
+        # 4. Calcul des autres indicateurs
         current_price = closes[-1]
         
-        # EMA200
-        ema200 = calculate_ema(closes, 200)
-        if ema200 is None:
-            logger.warning("Échec calcul EMA200 - données peut-être corrompues")
-            return
+        # RSI avec vérification de données
+        rsi = None
+        if len(closes) >= 15:
+            rsi = calculate_rsi(closes[-15:])
+            if rsi is None:
+                logger.warning("Échec calcul RSI")
             
-        # RSI
-        rsi = calculate_rsi(closes[-15:])  # Only need last 15 periods for RSI14
-        if rsi is None:
-            logger.warning("Échec calcul RSI - vérifier les données de prix")
-            return
-            
-        # MACD
-        macd_line, signal_line = calculate_macd(closes)
-        if None in (macd_line, signal_line):
-            logger.warning("Échec calcul MACD - série temporelle trop courte?")
+        # MACD avec vérification
+        macd_line, signal_line = None, None
+        if len(closes) >= 35:  # 26 (slow) + 9 (signal)
+            macd_line, signal_line = calculate_macd(closes)
+            if None in (macd_line, signal_line):
+                logger.warning("Échec calcul MACD")
+        
+        # Validation des indicateurs
+        if None in (rsi, macd_line, signal_line):
+            logger.warning("Indicateurs incomplets - abandon de l'analyse")
             return
             
         macd_hist = macd_line - signal_line
 
-        # 4. Analyse de tendance améliorée
+        # 5. Analyse de tendance améliorée
         trend = 'UP' if current_price > ema200 else 'DOWN' if current_price < ema200 else 'NEUTRAL'
         
-        # 5. Filtres de confluence stricts
+        # 6. Filtres de confluence stricts
         if trend == 'UP' and not (30 <= rsi < 70 and macd_hist > 0):
             logger.warning(f"Confluence haussière insuffisante (RSI: {rsi:.1f}, MACD: {'↑' if macd_hist > 0 else '↓'})")
             return
@@ -1029,19 +1055,19 @@ def analyze_pair(pair):
             logger.warning(f"Confluence baissière insuffisante (RSI: {rsi:.1f}, MACD: {'↑' if macd_hist > 0 else '↓'})")
             return
 
-        # 6. Analyse avancée (range, structures)
+        # 7. Analyse avancée (range, structures)
         analysis = enhanced_analyze_pair(pair)
         if not analysis:
             logger.warning("Échec analyse avancée")
             return
 
-        # 7. Contexte de prix et range asiatique
+        # 8. Contexte de prix et range asiatique
         asian_range = asian_ranges.get(pair)
         if not asian_range:
             logger.warning("Aucun range asiatique disponible")
             return
 
-        # 8. Détection des zones techniques (FVG/OB)
+        # 9. Détection des zones techniques (FVG/OB)
         fvgs = identify_fvg(candles)
         obs = identify_order_blocks(candles)
         
@@ -1052,9 +1078,13 @@ def analyze_pair(pair):
             logger.info("Aucune zone technique valide détectée")
             return
 
-        # 9. Calcul des niveaux de trading
+        # 10. Calcul des niveaux de trading avec buffer dynamique
         direction = 'BUY' if trend == 'UP' else 'SELL'
+        buffer = get_buffer_size(pair)
+        
         stop_loss = calculate_stop(fvg_zone, ob_zone, asian_range, direction)
+        stop_loss = stop_loss - buffer if direction == 'BUY' else stop_loss + buffer
+        
         take_profit = calculate_tp(current_price, asian_range, direction, daily_zones.get(pair, {}))
         
         # Ajustement pour les structures de retournement
@@ -1062,7 +1092,7 @@ def analyze_pair(pair):
             logger.info(f"Structure {analysis['reversal_structure']['type']} détectée - ajustement TP")
             take_profit = analysis['reversal_structure'].get('target', take_profit)
 
-        # 10. Validation finale du trade
+        # 11. Validation finale du trade
         rr_ratio = abs(take_profit-current_price)/abs(current_price-stop_loss)
         if rr_ratio < RISK_REWARD_RATIO:
             logger.warning(f"Ratio R/R inacceptable ({rr_ratio:.1f} < {RISK_REWARD_RATIO})")
@@ -1072,19 +1102,19 @@ def analyze_pair(pair):
             logger.warning("Conditions macroéconomiques défavorables")
             return
 
-        # 11. Journalisation avant exécution
+        # 12. Journalisation avant exécution
         logger.info(f"""
-        ✅ SIGNAL VALIDE {pair} ✅
+        ✅ SIGNAL CONFIRMÉ {pair} ✅
         Direction: {'ACHAT' if direction == 'BUY' else 'VENTE'}
         Contexte: {'Range' if analysis['range_info'].get('is_range') else 'Tendance'}
         Structure: {analysis['reversal_structure']['type'] if analysis['reversal_structure'] else 'Aucune'}
-        Prix: {current_price:.5f} | EMA200: {ema200:.5f}
+        Prix: {current_price:.5f} | EMA200: {ema200:.5f} | Buffer: {buffer:.5f}
         RSI(14): {rsi:.1f} | MACD: {'↑' if macd_hist > 0 else '↓'} {macd_hist:.5f}
         Stop: {stop_loss:.5f} | TP: {take_profit:.5f} | R/R: {rr_ratio:.1f}
         Volume récent: {sum(volumes[-5:]):.0f} (moyenne: {sum(volumes[-20:])/20:.0f})
         """)
 
-        # 12. Exécution du trade
+        # 13. Exécution du trade
         place_trade(
             pair=pair,
             direction=direction.lower(),
@@ -1094,19 +1124,7 @@ def analyze_pair(pair):
         )
 
     except Exception as e:
-        logger.error(f"ERREUR {pair}: {str(e)}", exc_info=True)
-
-def get_buffer_size(pair):
-    """Retourne le buffer adapté à chaque instrument"""
-    buffers = {
-        'EUR_USD': 0.0003,  # 3 pips
-        'GBP_USD': 0.0003,
-        'USD_JPY': 0.03,    # 30 pips
-        'XAU_USD': 0.3,      # 0.3$
-        'BTC_USD': 10.0,
-        'ETH_USD': 5.0
-    }
-    return buffers.get(pair, 0.0005)  # Valeur par défaut
+        logger.error(f"ERREUR CRITIQUE {pair}: {str(e)}", exc_info=True)
 
 def calculate_tp_from_structure(fvg, direction):
     """Calcule le TP basé sur la taille du FVG"""
