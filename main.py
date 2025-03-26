@@ -426,21 +426,50 @@ def fetch_historical_asian_range(pair):
             return None
     return None
 
+def check_active_trades():
+    """Retourne une liste des paires avec des trades actifs."""
+    try:
+        r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
+        open_trades = client.request(r).get('trades', [])
+        active_pairs = [trade['instrument'] for trade in open_trades]
+        return active_pairs
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération trades actifs: {str(e)}")
+        return []
+
 def main_loop():
     """Boucle principale du bot."""
     while True:
         now = datetime.utcnow()
         current_time = now.time()
+        
+        # Vérification des trades actifs
+        active_trades = check_active_trades()
+        logger.info(f"📊 Trades actifs: {len(active_trades)}")
+        
+        # Limite globale de 1 trade maximum
+        if len(active_trades) >= 1:
+            logger.info("⚠️ Limite de 1 trade atteinte - Attente...")
+            time.sleep(60)
+            continue
+        
+        # Session asiatique
         if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
             logger.info("🌏 SESSION ASIATIQUE EN COURS")
             analyze_asian_session()
+        
+        # Session Londres/NY
         elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
             logger.info("🏙️ SESSION LONDRES/NY EN COURS")
             for pair in PAIRS:
-                analyze_pair(pair)
+                if pair not in active_trades:  # Éviter les doublons sur la même paire
+                    analyze_pair(pair)
+        
+        # Vérification des stops et take-profits
         check_tp_sl()
+        
+        # Pause entre les cycles
         time.sleep(60)
-
 
 if __name__ == "__main__":
     logger.info("✨ DÉMARRAGE DU BOT DE TRADING ✨")
