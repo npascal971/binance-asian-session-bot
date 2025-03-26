@@ -171,6 +171,34 @@ def analyze_session(session_type, pairs):
     else:
         logger.warning(f"⚠️ Échec analyse session {session_type}")
 
+def check_active_trades():
+    """
+    Vérifie les trades actuellement ouverts sur le compte OANDA.
+    
+    Returns:
+        set: Ensemble des paires avec des trades actifs (ex: {"EUR_USD", "GBP_USD"}).
+    """
+    try:
+        # Requête pour récupérer les trades ouverts
+        r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
+        response = client.request(r)
+
+        # Extraction des paires actives
+        open_trades = response.get("trades", [])
+        active_pairs = {trade["instrument"] for trade in open_trades}
+
+        # Logs pour suivre les trades actifs
+        if active_pairs:
+            logger.info(f"📊 Trades actifs détectés: {', '.join(active_pairs)}")
+        else:
+            logger.info("📊 Aucun trade actif détecté")
+
+        return active_pairs
+
+    except Exception as e:
+        logger.error(f"❌ Erreur lors de la récupération des trades actifs: {str(e)}")
+        return set()
+
 def analyze_pair(pair, range_to_use):
     """Analyse une paire pour détecter des opportunités de trading."""
     try:
