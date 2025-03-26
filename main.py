@@ -120,6 +120,45 @@ def is_price_in_valid_range(current_price, asian_range, buffer=0.0002):
         logger.info(f"❌ Prix {current_price:.5f} hors de la plage valide ({lower_bound:.5f} - {upper_bound:.5f})")
         return False
 
+def calculate_macd(candles, fast=12, slow=26, signal=9):
+    """
+    Calcule le MACD et la ligne de signal pour une série de prix.
+    
+    Args:
+        candles (list): Liste des bougies contenant les prix de clôture.
+        fast (int): Période pour la moyenne mobile rapide (par défaut 12).
+        slow (int): Période pour la moyenne mobile lente (par défaut 26).
+        signal (int): Période pour la ligne de signal (par défaut 9).
+    
+    Returns:
+        tuple: (macd_line, signal_line)
+    """
+    try:
+        # Extraction des prix de clôture
+        closes = [float(c['mid']['c']) for c in candles]
+        
+        # Vérification des données
+        if len(closes) < max(fast, slow, signal):
+            logger.warning("⚠️ Données insuffisantes pour le calcul MACD")
+            return None, None
+        
+        # Calcul des moyennes mobiles exponentielles (EMA)
+        ema_fast = pd.Series(closes).ewm(span=fast, adjust=False).mean()
+        ema_slow = pd.Series(closes).ewm(span=slow, adjust=False).mean()
+        
+        # Calcul de la ligne MACD
+        macd_line = ema_fast - ema_slow
+        
+        # Calcul de la ligne de signal
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        
+        # Retourner les dernières valeurs
+        return macd_line.iloc[-1], signal_line.iloc[-1]
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur calcul MACD: {str(e)}")
+        return None, None
+
 def analyze_pair(pair):
     """Analyse une paire pour détecter des opportunités de trading."""
     try:
