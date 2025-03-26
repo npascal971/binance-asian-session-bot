@@ -365,27 +365,27 @@ def main_loop():
             # Limite globale de 1 trade maximum
             if len(active_trades) >= 1:
                 logger.info("⚠️ Limite de 1 trade atteinte - Attente...")
-                time.sleep(60)  # Utilisez le module standard time
+                time.sleep(60)
                 continue
             
             # Session asiatique
             if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
                 logger.info("🌏 SESSION ASIATIQUE EN COURS")
                 analyze_asian_session()
-            
-            # Session Londres/NY
             elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
                 logger.info("🏙️ SESSION LONDRES/NY EN COURS")
                 for pair in PAIRS:
                     if pair not in active_trades:
                         analyze_pair(pair)
+            else:
+                logger.info("🌆 HORS SESSION - Attente...")
             
             # Vérification des stops et take-profits
             check_tp_sl()
             
             logger.info("⏰ Pause avant le prochain cycle...")
-            time.sleep(60)  # Utilisez le module standard time
+            time.sleep(60)
         
         except Exception as e:
             logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
-            time.sleep(300)  # Utilisez le module standard time
+            time.sleep(300)  # Pause avant de reprendre
