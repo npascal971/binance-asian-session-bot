@@ -18,6 +18,9 @@ import pytz
 # Chargement des variables d'environnement
 load_dotenv()
 
+# Mode simulation ou trading réel
+SIMULATION_MODE = True  # Mettez False pour activer le trading réel
+
 # Configuration API OANDA
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
@@ -273,18 +276,16 @@ def get_account_balance():
         return 0  # Retourne 0 en cas d'erreur pour éviter des plantages
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
-    """Place un trade avec vérifications supplémentaires."""
+    """Place un trade avec trailing SL/TP."""
+    global SIMULATION_MODE  # Assure l'accès à la variable globale
+    
     account_balance = get_account_balance()
-    if account_balance <= 0:
-        logger.error("🚨 Solde insuffisant (< $0)")
-        return None
-
     units = calculate_position_size(pair, account_balance, entry_price, stop_loss)
+    
     if units <= 0:
         logger.warning(f"❌ Impossible de placer le trade {pair} - Taille de position invalide")
-        return None
-
-    # Journalisation avant exécution
+        return
+    
     logger.info(f"""
     🚀 NOUVEAU TRADE {'ACHAT' if direction == 'buy' else 'VENTE'} 🚀
     • Paire: {pair}
@@ -293,14 +294,13 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     • Stop: {stop_loss:.5f}
     • TP: {take_profit:.5f}
     • Unités: {units}
-    • Risque: ${units * abs(entry_price - stop_loss):.2f}
+    • Risque: ${min(account_balance * (RISK_PERCENTAGE / 100), MAX_RISK_USD):.2f}
     """)
-
-    # Mode simulation ou réel
+    
     if SIMULATION_MODE:
         logger.info("🧪 Mode simulation - Trade non envoyé")
         return "SIMULATION"
-
+    
     try:
         order_data = {
             "order": {
@@ -317,6 +317,7 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     except Exception as e:
         logger.error(f"❌ Erreur placement trade {pair}: {str(e)}")
         return None
+
 def detect_breakout(pair, current_price, asian_range):
     """
     Détecte un breakout au-dessus ou en dessous du range asiatique.
@@ -443,7 +444,11 @@ def main_loop():
 
 if __name__ == "__main__":
     logger.info("✨ DÉMARRAGE DU BOT DE TRADING ✨")
-    
+    # Affichage du mode actuel
+    if SIMULATION_MODE:
+        logger.info("🧪 MODE SIMULATION ACTIVÉ")
+    else:
+        logger.info("🚀 MODE TRADING RÉEL ACTIVÉ")
     # Initialisation des données asiatiques
     for pair in PAIRS:
         if pair not in asian_ranges:
