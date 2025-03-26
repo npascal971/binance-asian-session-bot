@@ -332,23 +332,6 @@ def close_trade(pair):
     except Exception as e:
         logger.error(f"❌ Erreur fermeture trade {pair}: {str(e)}")
 
-if __name__ == "__main__":
-    try:
-        logger.info("✨ DÉMARRAGE DU BOT DE TRADING ✨")
-        if SIMULATION_MODE:
-            logger.info("🧪 MODE SIMULATION ACTIVÉ")
-        else:
-            logger.info("🚀 MODE TRADING RÉEL ACTIVÉ")
-        
-        # Initialisation des données asiatiques
-        for pair in PAIRS:
-            if pair not in asian_ranges:
-                logger.info(f"🌏 Récupération des données asiatiques historiques pour {pair}...")
-                historical_range = fetch_historical_asian_range(pair)
-                if historical_range:
-                    asian_ranges[pair] = historical_range
-        
-        # Boucle principale
 def main_loop():
     """Boucle principale du bot."""
     while True:
@@ -388,4 +371,27 @@ def main_loop():
         
         except Exception as e:
             logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
-            time.sleep(300)  # Pause avant de reprendre
+            time.sleep(300)
+
+if __name__ == "__main__":
+    try:
+        logger.info("✨ DÉMARRAGE DU BOT DE TRADING ✨")
+        if SIMULATION_MODE:
+            logger.info("🧪 MODE SIMULATION ACTIVÉ")
+        else:
+            logger.info("🚀 MODE TRADING RÉEL ACTIVÉ")
+        
+        # Initialisation des données asiatiques
+        for pair in PAIRS:
+            if pair not in asian_ranges:
+                logger.info(f"🌏 Récupération des données asiatiques historiques pour {pair}...")
+                historical_range = fetch_historical_asian_range(pair)
+                if historical_range:
+                    asian_ranges[pair] = historical_range
+        
+        # Boucle principale
+        main_loop()
+
+    except Exception as e:
+        logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
+        time.sleep(300)
