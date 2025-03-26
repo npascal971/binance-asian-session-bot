@@ -62,14 +62,22 @@ client = oandapyV20.API(access_token=OANDA_API_KEY, environment="practice")
 def get_candles(pair, start_time, end_time=None):
     """Récupère les bougies pour une plage horaire spécifique."""
     now = datetime.utcnow()
-    end_date = datetime.combine(now.date(), end_time) if end_time else now
+    
+    # Calcul de start_date et end_date
     start_date = datetime.combine(now.date(), start_time)
+    end_date = datetime.combine(now.date(), end_time) if end_time else now
+    
+    # S'assurer que end_date n'est pas dans le futur
+    end_date = min(end_date, now)
+    
+    # Paramètres de la requête
     params = {
-        "granularity": "M15",
+        "granularity": "M15",  # Granularité des bougies
         "from": start_date.isoformat() + "Z",
         "to": end_date.isoformat() + "Z",
-        "price": "M"
+        "price": "M"  # Mid prices
     }
+    
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         candles = client.request(r)['candles']
