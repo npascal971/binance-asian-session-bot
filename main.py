@@ -14,7 +14,18 @@ import oandapyV20.endpoints.pricing as pricing
 from oandapyV20.endpoints import accounts
 import requests
 import pytz
+import logging
 
+# Configuration des logs
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),  # Affiche les logs dans la console
+        logging.FileHandler("trading.log")  # Enregistre les logs dans un fichier
+    ]
+)
+logger = logging.getLogger()
 # Chargement des variables d'environnement
 load_dotenv()
 
