@@ -1,8 +1,7 @@
 import os
 import time
-from datetime import datetime, time
 import logging
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, timedelta, time as dt_time
 from email.message import EmailMessage
 from dotenv import load_dotenv
 import numpy as np
@@ -350,7 +349,43 @@ if __name__ == "__main__":
                     asian_ranges[pair] = historical_range
         
         # Boucle principale
-        main_loop()
-    except Exception as e:
-        logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
-        time.sleep(300)  # Pause avant de reprendre
+def main_loop():
+    """Boucle principale du bot."""
+    while True:
+        try:
+            now = datetime.utcnow()
+            current_time = now.time()
+            
+            logger.info(f"⏳ Heure actuelle: {current_time}")
+            
+            # Vérification des trades actifs
+            active_trades = check_active_trades()
+            logger.info(f"📊 Trades actifs: {len(active_trades)}")
+            
+            # Limite globale de 1 trade maximum
+            if len(active_trades) >= 1:
+                logger.info("⚠️ Limite de 1 trade atteinte - Attente...")
+                time.sleep(60)  # Utilisez le module standard time
+                continue
+            
+            # Session asiatique
+            if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+                logger.info("🌏 SESSION ASIATIQUE EN COURS")
+                analyze_asian_session()
+            
+            # Session Londres/NY
+            elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+                logger.info("🏙️ SESSION LONDRES/NY EN COURS")
+                for pair in PAIRS:
+                    if pair not in active_trades:
+                        analyze_pair(pair)
+            
+            # Vérification des stops et take-profits
+            check_tp_sl()
+            
+            logger.info("⏰ Pause avant le prochain cycle...")
+            time.sleep(60)  # Utilisez le module standard time
+        
+        except Exception as e:
+            logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
+            time.sleep(300)  # Utilisez le module standard time
