@@ -32,10 +32,10 @@ logger = logging.getLogger()
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 SIMULATION_MODE = True  # Passer à False pour le trading réel
-ASIAN_SESSION_START = datetime.strptime("00:00", "%H:%M").time()
-ASIAN_SESSION_END = datetime.strptime("08:00", "%H:%M").time()
-LONDON_SESSION_START = datetime.strptime("08:00", "%H:%M").time()
-NY_SESSION_END = datetime.strptime("16:00", "%H:%M").time()
+ASIAN_SESSION_START = time(0, 0)  # 00h00 UTC
+ASIAN_SESSION_END = time(6, 0)    # 06h00 UTC
+LONDON_SESSION_START = time(7, 0) # 07h00 UTC
+NY_SESSION_END = time(16, 30)     # 16h30 UTC
 PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
 RSI_PERIOD = 14
 VOLUME_MA_PERIOD = 20
@@ -126,6 +126,8 @@ def main_loop():
         now = datetime.utcnow()
         current_time = now.time()
         
+        logger.info(f"⏳ Heure actuelle: {current_time}")
+        
         # Vérification des trades actifs
         active_trades = check_active_trades()
         logger.info(f"📊 Trades actifs: {len(active_trades)}")
@@ -140,17 +142,22 @@ def main_loop():
         if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
             logger.info("🌏 SESSION ASIATIQUE EN COURS")
             analyze_asian_session()
+        else:
+            logger.info("🌍 Hors session asiatique")
         
         # Session Londres/NY
-        elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+        if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
             logger.info("🏙️ SESSION LONDRES/NY EN COURS")
             for pair in PAIRS:
                 if pair not in active_trades:
                     analyze_pair(pair)
+        else:
+            logger.info("🌆 Hors session Londres/NY")
         
         # Vérification des stops et take-profits
         check_tp_sl()
         
+        logger.info("⏰ Pause avant le prochain cycle...")
         time.sleep(60)
 
 def check_active_trades():
@@ -325,7 +332,7 @@ def close_trade(pair):
     except Exception as e:
         logger.error(f"❌ Erreur fermeture trade {pair}: {str(e)}")
 
-if __name__ == "__main__":
+iif __name__ == "__main__":
     try:
         logger.info("✨ DÉMARRAGE DU BOT DE TRADING ✨")
         if SIMULATION_MODE:
