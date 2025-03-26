@@ -1404,16 +1404,40 @@ def get_clean_prices(candles):
     return prices
 
 def calculate_ema(prices, period):
-    """Version robuste du calcul EMA"""
+    """Version ultra-robuste du calcul EMA"""
     try:
+        # Vérification approfondie des données d'entrée
         if not prices or len(prices) < period:
+            logger.warning(f"EMA{period}: données insuffisantes ({len(prices) if prices else 0}/{period} prix)")
             return None
             
-        series = pd.Series(prices)
-        return float(series.ewm(span=period, adjust=False).mean().iloc[-1])
+        # Conversion et nettoyage des prix
+        clean_prices = []
+        for p in prices:
+            try:
+                clean_prices.append(float(p))
+            except (TypeError, ValueError):
+                continue
+                
+        if len(clean_prices) < period:
+            logger.warning(f"EMA{period}: trop de valeurs invalides ({len(clean_prices)}/{period} valides)")
+            return None
+            
+        # Calcul avec pandas
+        series = pd.Series(clean_prices)
+        ema = series.ewm(span=period, adjust=False).mean()
+        
+        # Vérification du résultat
+        if pd.isna(ema.iloc[-1]):
+            logger.warning(f"EMA{period}: calcul invalide (valeur NaN)")
+            return None
+            
+        return float(ema.iloc[-1])
+        
     except Exception as e:
-        logger.error(f"Erreur EMA {period}: {str(e)}")
+        logger.error(f"ERREUR EMA{period}: {str(e)}")
         return None
+
 
 def calculate_macd(prices, fast=12, slow=26, signal=9):
     """MACD sécurisé avec gestion d'erreur"""
