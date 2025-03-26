@@ -228,20 +228,11 @@ def main_loop():
         except Exception as e:
             logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
 
-def analyze_pair(pair):
+def analyze_pair(pair, range_to_use):
     """Analyse une paire pour détecter des opportunités de trading."""
     try:
         logger.info(f"🔍 Début analyse approfondie pour {pair}")
-
-        # Récupération du range asiatique ou européen
-        if ASIAN_SESSION_START <= datetime.utcnow().time() < ASIAN_SESSION_END:
-            range_to_use = asian_ranges.get(pair)
-        elif LONDON_SESSION_START <= datetime.utcnow().time() <= NY_SESSION_END:
-            range_to_use = european_ranges.get(pair)
-        else:
-            logger.info(f"⚠️ Hors plage horaire définie pour {pair}")
-            return
-
+        
         # Vérification si le prix est dans la plage valide
         current_price = get_current_price(pair)
         if not is_price_in_valid_range(current_price, range_to_use):
@@ -261,12 +252,9 @@ def analyze_pair(pair):
             place_trade(pair, "buy", current_price, range_to_use["low"], range_to_use["high"])
         elif rsi > 60 and macd_signal == "SELL":  # RSI ajusté à 60
             place_trade(pair, "sell", current_price, range_to_use["high"], range_to_use["low"])
-        else:
-            logger.debug(f"❌ Conditions non remplies pour {pair} - RSI: {rsi}, MACD: {macd_signal}")
 
     except Exception as e:
         logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
-
 def main_loop():
     """Boucle principale du bot."""
     while True:
