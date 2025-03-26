@@ -1,7 +1,7 @@
 import os
 import time
 import logging
-from datetime import datetime, timedelta, time as dtime
+from datetime import time as dtime
 from email.message import EmailMessage
 from dotenv import load_dotenv
 import numpy as np
