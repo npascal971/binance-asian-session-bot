@@ -1,7 +1,7 @@
 import os
-import time
+import time  # Module standard pour sleep()
 import logging
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta, time as dt_time  # Importation explicite de time
 from email.message import EmailMessage
 from dotenv import load_dotenv
 import numpy as np
@@ -14,8 +14,6 @@ import oandapyV20.endpoints.pricing as pricing
 from oandapyV20.endpoints import accounts
 import requests
 import pytz
-import logging
-
 
 # Configuration des logs
 logging.basicConfig(
@@ -32,10 +30,10 @@ logger = logging.getLogger()
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 SIMULATION_MODE = True  # Passer à False pour le trading réel
-ASIAN_SESSION_START = time(0, 0)  # 00h00 UTC
-ASIAN_SESSION_END = time(6, 0)    # 06h00 UTC
-LONDON_SESSION_START = time(7, 0) # 07h00 UTC
-NY_SESSION_END = time(16, 30)     # 16h30 UTC
+ASIAN_SESSION_START = dt_time(0, 0)  # 00h00 UTC
+ASIAN_SESSION_END = dt_time(6, 0)    # 06h00 UTC
+LONDON_SESSION_START = dt_time(7, 0) # 07h00 UTC
+NY_SESSION_END = dt_time(16, 30)     # 16h30 UTC
 PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
 RSI_PERIOD = 14
 VOLUME_MA_PERIOD = 20
