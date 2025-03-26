@@ -10,6 +10,7 @@ import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.trades as trades
+import oandapyV20.endpoints.pricing as pricing
 import requests
 import pytz
 
@@ -224,6 +225,19 @@ def calculate_macd(pair):
     macd_line = ema12 - ema26
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     return "BUY" if macd_line.iloc[-1] > signal_line.iloc[-1] else "SELL"
+
+def get_account_balance():
+    """Récupère le solde du compte."""
+    try:
+        r = accounts.AccountSummary(OANDA_ACCOUNT_ID)
+        return float(client.request(r)["account"]["balance"])
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération solde: {str(e)}")
+        return 0
+
+def is_price_in_valid_range(current_price, asian_range):
+    """Vérifie si le prix est dans le range asiatique."""
+    return asian_range["low"] <= current_price <= asian_range["high"]
 
 def main_loop():
     """Boucle principale du bot."""
