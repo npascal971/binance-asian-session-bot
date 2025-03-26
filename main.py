@@ -205,42 +205,74 @@ def analyze_pair(pair):
 def main_loop():
     """Boucle principale du bot."""
     while True:
-        now = datetime.utcnow()
-        current_time = now.time()
-        
-        logger.info(f"⏳ Heure actuelle: {current_time}")
-        
-        # Vérification des trades actifs
-        active_trades = check_active_trades()
-        logger.info(f"📊 Trades actifs: {len(active_trades)}")
-        
-        # Limite globale de 1 trade maximum
-        if len(active_trades) >= 1:
-            logger.info("⚠️ Limite de 1 trade atteinte - Attente...")
+        try:
+            now = datetime.utcnow()
+            current_time = now.time()
+            logger.info(f"⏳ Heure actuelle: {current_time}")
+
+            # Vérification des trades actifs
+            active_trades = check_active_trades()
+            logger.info(f"📊 Trades actifs: {len(active_trades)}")
+
+            # Surveillance des TP/SL pour chaque trade actif
+            for pair in active_trades:
+                check_tp_sl_for_pair(pair)  # Vérifie spécifiquement ce trade
+
+            # Limite globale de 1 trade maximum
+            if len(active_trades) >= 1:
+                logger.info("⚠️ Limite de 1 trade atteinte - Attente...")
+                time.sleep(60)
+                continue
+
+            # Détermination de la session active
+            if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+                logger.info("🌏 SESSION ASIATIQUE EN COURS")
+                analyze_asian_session()
+            elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+                logger.info("🏙️ SESSION LONDRES/NY EN COURS")
+                for pair in PAIRS:
+                    if pair not in active_trades:  # Éviter les doublons sur la même paire
+                        analyze_pair(pair)
+            else:
+                logger.info("🌆 Hors session - Attente...")
+
+            # Pause avant le prochain cycle
+            logger.info("⏰ Pause avant le prochain cycle...")
             time.sleep(60)
-            continue
-        
-        # Session asiatique
-        if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
-            logger.info("🌏 SESSION ASIATIQUE EN COURS")
-            analyze_asian_session()
-        else:
-            logger.info("🌍 Hors session asiatique")
-        
-        # Session Londres/NY
-        if LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-            logger.info("🏙️ SESSION LONDRES/NY EN COURS")
-            for pair in PAIRS:
-                if pair not in active_trades:
-                    analyze_pair(pair)
-        else:
-            logger.info("🌆 Hors session Londres/NY")
-        
-        # Vérification des stops et take-profits
-        check_tp_sl()
-        
-        logger.info("⏰ Pause avant le prochain cycle...")
-        time.sleep(60)
+
+        except Exception as e:
+            logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
+
+def check_tp_sl_for_pair(pair):
+    """Vérifie si le TP ou SL est atteint pour une paire spécifique."""
+    try:
+        trade = active_trades.get(pair)
+        if not trade:
+            logger.warning(f"⚠️ Aucun trade actif trouvé pour {pair}")
+            return
+
+        current_price = get_current_price(pair)
+        direction = trade["direction"]
+        stop_loss = trade["stop"]
+        take_profit = trade["tp"]
+
+        if direction == "buy":
+            if current_price >= take_profit:
+                logger.info(f"🎯 Take Profit atteint pour {pair}")
+                close_trade(pair)
+            elif current_price <= stop_loss:
+                logger.info(f"🛑 Stop Loss atteint pour {pair}")
+                close_trade(pair)
+        elif direction == "sell":
+            if current_price <= take_profit:
+                logger.info(f"🎯 Take Profit atteint pour {pair}")
+                close_trade(pair)
+            elif current_price >= stop_loss:
+                logger.info(f"🛑 Stop Loss atteint pour {pair}")
+                close_trade(pair)
+
+    except Exception as e:
+        logger.error(f"❌ Erreur vérification TP/SL pour {pair}: {str(e)}")
 
 def check_active_trades():
     """Retourne une liste des paires avec des trades actifs."""
@@ -407,10 +439,16 @@ def check_tp_sl():
 def close_trade(pair):
     """Ferme un trade."""
     try:
+        if SIMULATION_MODE:
+            logger.info(f"🧪 [SIMULATION] Fermeture du trade {pair}")
+            del active_trades[pair]
+            return
+
         r = trades.TradeClose(accountID=OANDA_ACCOUNT_ID, tradeID=pair)
         client.request(r)
         logger.info(f"✅ Trade fermé: {pair}")
-        active_trades.remove(pair)
+        del active_trades[pair]
+
     except Exception as e:
         logger.error(f"❌ Erreur fermeture trade {pair}: {str(e)}")
 
