@@ -225,35 +225,29 @@ def analyze_pair(pair):
         logger.warning("⚠️ Événement macro majeur - Pause de 5 min")
         return
     
+    # Récupération du range asiatique
     asian_range = asian_ranges.get(pair)
     if not asian_range:
         logger.warning(f"⚠️ Aucun range asiatique disponible pour {pair}")
         return
     
+    # Récupération du prix actuel
     current_price = get_current_price(pair)
     
-    # Vérification de breakout
-    breakout_direction = detect_breakout(pair, current_price, asian_range)
-    if breakout_direction:
-        logger.info(f"🔥 Breakout détecté pour {pair} - Direction: {breakout_direction}")
-        if breakout_direction == "UP":
-            place_trade(pair, "buy", current_price, current_price - 0.002, current_price + 0.005)
-        elif breakout_direction == "DOWN":
-            place_trade(pair, "sell", current_price, current_price + 0.002, current_price - 0.005)
-        return
-    
-    # Analyse standard si pas de breakout
+    # Vérification si le prix est dans la plage valide
     if not is_price_in_valid_range(current_price, asian_range):
         logger.info(f"❌ Prix hors range valide pour {pair}")
         return
     
+    # Calcul des indicateurs techniques
     rsi = calculate_rsi(pair)
     macd_signal = calculate_macd(pair)
     
-    if rsi is None or macd_signal is None:
-        logger.warning(f"⚠️ Données insuffisantes pour {pair}")
-        return
+    # Ajout des logs détaillés
+    logger.info(f"📊 Analyse {pair} - Prix: {current_price:.5f}, Range: {asian_range['low']:.5f} - {asian_range['high']:.5f}")
+    logger.info(f"📈 RSI: {rsi:.2f}, MACD Signal: {macd_signal}")
     
+    # Décision de placement de trade
     if rsi < 30 and macd_signal == "BUY":
         place_trade(pair, "buy", current_price, asian_range["low"], asian_range["high"])
     elif rsi > 70 and macd_signal == "SELL":
