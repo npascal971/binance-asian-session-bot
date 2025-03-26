@@ -52,19 +52,51 @@ NY_SESSION_END = datetime.strptime("23:00", "%H:%M").time()
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment="practice")
 
 # Fonctions utilitaires
-def get_candles(pair, start_time, end_time=None):
-    """Récupère les bougies pour une plage horaire spécifique."""
-    now = datetime.utcnow()
-    end_date = datetime.combine(now.date(), end_time) if end_time else now
-    start_date = datetime.combine(now.date(), start_time)
-    end_date = min(end_date, now)  # Prevent future dates
+def get_candles(pair, granularity="M15", count=None, from_time=None, to_time=None):
+    """
+    Récupère les bougies avec des options supplémentaires.
     
+    Args:
+        pair (str): La paire de devises (ex: "GBP_USD").
+        granularity (str): Granularité des bougies (ex: "M15").
+        count (int): Nombre de bougies à récupérer (optionnel).
+        from_time (datetime): Heure de début (optionnel).
+        to_time (datetime): Heure de fin (optionnel).
+    
+    Returns:
+        list: Liste des bougies récupérées.
+    """
+    # Limites maximales pour count en fonction de la granularité
+    MAX_COUNT = {
+        "S5": 5000,   # 5 secondes
+        "M1": 5000,   # 1 minute
+        "M5": 5000,   # 5 minutes
+        "M15": 5000,  # 15 minutes
+        "H1": 2000,   # 1 heure
+        "H4": 2000,   # 4 heures
+        "D": 1000,    # Quotidien
+        "W": 500,     # Hebdomadaire
+        "M": 100      # Mensuel
+    }
+
     params = {
-        "granularity": "M15",
-        "from": start_date.isoformat() + "Z",
-        "to": end_date.isoformat() + "Z",
+        "granularity": granularity,
         "price": "M"
     }
+
+    # Validation et ajout de count
+    if count:
+        max_count = MAX_COUNT.get(granularity, 5000)  # Valeur par défaut si granularité inconnue
+        if count > max_count:
+            logger.warning(f"⚠️ Count ajusté pour {pair} ({count} -> {max_count})")
+            count = max_count
+        params["count"] = count
+
+    # Ajout des paramètres de plage horaire
+    if from_time and to_time:
+        params["from"] = from_time.isoformat() + "Z"
+        params["to"] = to_time.isoformat() + "Z"
+
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         candles = client.request(r)['candles']
@@ -72,7 +104,6 @@ def get_candles(pair, start_time, end_time=None):
     except Exception as e:
         logger.error(f"❌ Erreur récupération candles {pair}: {str(e)}")
         return []
-
 
 
 def calculate_session_range(pairs, session_start, session_end):
@@ -222,32 +253,21 @@ def calculate_ema(pair, period=200):
     Calcule l'EMA (Exponential Moving Average) pour une paire donnée.
     
     Args:
-        pair (str): La paire de devises (ex: "EUR_USD").
+        pair (str): La paire de devises (ex: "GBP_USD").
         period (int): Période de l'EMA (par défaut 200).
     
     Returns:
         float: Valeur de l'EMA si calculée avec succès, sinon None.
     """
     try:
-        # Récupération des données historiques
-        candles = get_candles(pair, granularity="H4", count=period * 2)  # Récupère suffisamment de bougies
+        # Récupération des données historiques avec count ajusté
+        candles = get_candles(pair=pair, granularity="H4", count=period * 2)
         if not candles or len(candles) < period:
             logger.warning(f"EMA{period}: Données insuffisantes ({len(candles) if candles else 0}/{period} bougies)")
             return None
 
         # Extraction des prix de clôture
-        closes = []
-        for candle in candles:
-            try:
-                if 'mid' in candle and 'c' in candle['mid']:
-                    closes.append(float(candle['mid']['c']))
-            except (KeyError, TypeError, ValueError) as e:
-                logger.debug(f"Bougie ignorée - {str(e)}")
-                continue
-
-        if len(closes) < period:
-            logger.warning(f"EMA{period}: Trop de valeurs invalides ({len(closes)}/{period} valides)")
-            return None
+        closes = [float(c['mid']['c']) for c in candles]
 
         # Calcul de l'EMA avec pandas
         series = pd.Series(closes)
@@ -263,6 +283,48 @@ def calculate_ema(pair, period=200):
     except Exception as e:
         logger.error(f"❌ Erreur EMA{period} pour {pair}: {str(e)}")
         return None
+
+def analyze_asian_session():
+    """Analyse la session asiatique pour calculer le range."""
+    global asian_ranges
+    pairs = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
+    success_count = 0
+    max_retries = 3
+
+    for attempt in range(1, max_retries + 1):
+        for pair in pairs:
+            try:
+                # Récupération des données historiques avec count ajusté
+                candles = get_candles(pair=pair, granularity="H1", count=200)
+                if not candles or len(candles) < 3:
+                    logger.warning(f"⚠️ Données insuffisantes pour {pair}")
+                    continue
+
+                # Extraction des prix hauts et bas
+                highs = [float(c['mid']['h']) for c in candles]
+                lows = [float(c['mid']['l']) for c in candles]
+
+                # Stockage du range asiatique
+                asian_ranges[pair] = {"high": max(highs), "low": min(lows)}
+                logger.info(f"🌏 Range asiatique {pair}: {min(lows):.5f} - {max(highs):.5f}")
+                success_count += 1
+
+            except Exception as e:
+                logger.warning(f"⚠️ {pair} tentative {attempt} échouée: {str(e)}")
+                if attempt == max_retries:
+                    logger.error(f"❌ Échec final pour {pair}")
+
+        if success_count >= len(pairs) - 1:
+            break
+
+        if attempt < max_retries:
+            logger.info(f"⏳ Prochaine tentative dans 5 secondes...")
+            time.sleep(5)
+
+    if success_count >= 2:
+        logger.info("✅ ANALYSE ASIATIQUE COMPLÈTE")
+    else:
+        logger.error("❌ ANALYSE ASIATIQUE INCOMPLÈTE")
 
 def analyze_session(session_type, pairs):
     """Analyse une session (asiatique ou européenne)."""
@@ -357,30 +419,31 @@ def analyze_pair(pair, range_to_use):
     try:
         logger.info(f"🔍 Début analyse approfondie pour {pair}")
 
-        # 1. Vérification si le prix est dans la plage valide
-        current_price = get_current_price(pair)
-        if not is_price_in_valid_range(current_price, range_to_use):
-            logger.info(f"❌ Prix hors range valide pour {pair}")
+        # Récupération des données historiques avec count ajusté
+        candles = get_candles(pair=pair, granularity="H4", count=200)
+        if not candles or len(candles) < 200:
+            logger.warning(f"⚠️ Données insuffisantes pour {pair}")
             return
 
-        # 2. Calcul des indicateurs techniques
-        rsi = calculate_rsi(pair)
-        macd_signal = calculate_macd(pair)
-        ema200 = calculate_ema(pair)  # Calcul de l'EMA200
+        # Extraction des prix de clôture
+        closes = [float(c['mid']['c']) for c in candles]
+
+        # Calcul des indicateurs techniques
+        rsi = calculate_rsi(closes, period=14)
+        macd_signal = calculate_macd(closes)
 
         # Logs détaillés
-        logger.info(f"📊 Analyse {pair} - Prix: {current_price:.5f}, Range: {range_to_use['low']:.5f} - {range_to_use['high']:.5f}")
-        logger.info(f"📈 RSI: {rsi:.2f}, MACD Signal: {macd_signal}, EMA200: {ema200:.5f}")
+        logger.info(f"📊 Analyse {pair} - Prix: {closes[-1]:.5f}, Range: {range_to_use['low']:.5f} - {range_to_use['high']:.5f}")
+        logger.info(f"📈 RSI: {rsi:.2f}, MACD Signal: {macd_signal}")
 
-        # 3. Décision de placement de trade avec confirmation EMA200
-        if ema200 and current_price > ema200 and rsi < 40 and macd_signal == "BUY":
+        # Décision de placement de trade
+        current_price = closes[-1]
+        if current_price > range_to_use["high"] and rsi < 40 and macd_signal == "BUY":
             place_trade(pair, "buy", current_price, range_to_use["low"], range_to_use["high"])
-            logger.info(f"🎯 Configuration haussière confirmée par EMA200 pour {pair}")
-        elif ema200 and current_price < ema200 and rsi > 60 and macd_signal == "SELL":
+        elif current_price < range_to_use["low"] and rsi > 60 and macd_signal == "SELL":
             place_trade(pair, "sell", current_price, range_to_use["high"], range_to_use["low"])
-            logger.info(f"🎯 Configuration baissière confirmée par EMA200 pour {pair}")
         else:
-            logger.debug(f"❌ Conditions non remplies pour {pair} - RSI: {rsi}, MACD: {macd_signal}, EMA200: {ema200}")
+            logger.debug(f"❌ Conditions non remplies pour {pair} - RSI: {rsi}, MACD: {macd_signal}")
 
     except Exception as e:
         logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
@@ -474,6 +537,14 @@ def main_loop():
 
 # Exécution principale
 if __name__ == "__main__":
-    asian_ranges = {}
-    european_ranges = {}
-    main_loop()
+    logger.info("🚀 DÉMARRAGE DU BOT DE TRADING 🚀")
+    
+    # Initialisation des données asiatiques
+    for pair in PAIRS:
+        if pair not in asian_ranges:
+            logger.info(f"🔍 Récupération des données asiatiques historiques pour {pair}...")
+            historical_range = fetch_historical_asian_range(pair)
+            if historical_range:
+                asian_ranges[pair] = historical_range
+            else:
+                analyze_asian_session()  # Appel ici
