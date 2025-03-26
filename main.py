@@ -125,6 +125,49 @@ def is_price_in_valid_range(current_price, range_to_use, buffer=0.0002):
         logger.error(f"❌ Erreur validation du range: {str(e)}")
         return False
 
+
+
+def calculate_rsi(closes, period=14):
+    """
+    Calcule l'indice de force relative (RSI) à partir des prix de clôture.
+    
+    Args:
+        closes (list): Liste des prix de clôture (float).
+        period (int): Période utilisée pour le calcul du RSI (par défaut 14).
+    
+    Returns:
+        float: Valeur du RSI si calculée avec succès, sinon None.
+    """
+    try:
+        # Vérification que nous avons suffisamment de données
+        if len(closes) < period + 1:
+            logger.warning(f"⚠️ Données insuffisantes pour RSI ({len(closes)} points)")
+            return None
+
+        # Calcul des variations quotidiennes
+        deltas = np.diff(closes)
+        gains = np.where(deltas > 0, deltas, 0)  # Gains (positifs)
+        losses = np.where(deltas < 0, -deltas, 0)  # Pertes (positifs)
+
+        # Moyenne des gains et pertes initiaux
+        avg_gain = np.mean(gains[:period])
+        avg_loss = np.mean(losses[:period])
+
+        # Éviter une division par zéro
+        if avg_loss == 0:
+            return 100
+
+        # Calcul du RS (Relative Strength)
+        rs = avg_gain / avg_loss
+
+        # Calcul du RSI
+        rsi = 100 - (100 / (1 + rs))
+        return round(rsi, 2)
+
+    except Exception as e:
+        logger.error(f"❌ Erreur lors du calcul du RSI: {str(e)}")
+        return None
+
 def calculate_ema(pair, period=200):
     """
     Calcule l'EMA (Exponential Moving Average) pour une paire donnée.
