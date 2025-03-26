@@ -120,41 +120,48 @@ def is_price_in_valid_range(current_price, asian_range, buffer=0.0002):
         logger.info(f"❌ Prix {current_price:.5f} hors de la plage valide ({lower_bound:.5f} - {upper_bound:.5f})")
         return False
 
-def calculate_macd(candles, fast=12, slow=26, signal=9):
+def calculate_macd(pair):
     """
-    Calcule le MACD et la ligne de signal pour une série de prix.
-    
-    Args:
-        candles (list): Liste des bougies contenant les prix de clôture.
-        fast (int): Période pour la moyenne mobile rapide (par défaut 12).
-        slow (int): Période pour la moyenne mobile lente (par défaut 26).
-        signal (int): Période pour la ligne de signal (par défaut 9).
-    
+    Calcule le MACD pour une paire.
     Returns:
-        tuple: (macd_line, signal_line)
+        tuple: ("BUY" ou "SELL", histogram)
     """
     try:
-        # Extraction des prix de clôture
-        closes = [float(c['mid']['c']) for c in candles]
-        
-        # Vérification des données
-        if len(closes) < max(fast, slow, signal):
-            logger.warning("⚠️ Données insuffisantes pour le calcul MACD")
+        # Récupération des bougies pour la session européenne/NY
+        candles = get_candles(pair, LONDON_SESSION_START, NY_SESSION_END)
+        if not candles or len(candles) < 26:  # Minimum 26 points pour le MACD
+            logger.warning(f"⚠️ Données insuffisantes pour MACD ({len(candles)} points)")
             return None, None
-        
-        # Calcul des moyennes mobiles exponentielles (EMA)
-        ema_fast = pd.Series(closes).ewm(span=fast, adjust=False).mean()
-        ema_slow = pd.Series(closes).ewm(span=slow, adjust=False).mean()
-        
-        # Calcul de la ligne MACD
-        macd_line = ema_fast - ema_slow
-        
-        # Calcul de la ligne de signal
-        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-        
-        # Retourner les dernières valeurs
-        return macd_line.iloc[-1], signal_line.iloc[-1]
-    
+
+        # Extraction des prix de clôture avec validation
+        closes = []
+        for c in candles:
+            try:
+                close_price = float(c['mid']['c'])  # Accès sécurisé au prix de clôture
+                closes.append(close_price)
+            except (KeyError, TypeError, ValueError):
+                logger.debug(f"Donnée invalide ignorée: {c}")
+                continue
+
+        if len(closes) < 26:  # Vérification après filtrage
+            logger.warning(f"⚠️ Trop peu de données valides pour MACD ({len(closes)} points)")
+            return None, None
+
+        # Calcul du MACD
+        ema12 = pd.Series(closes).ewm(span=12, adjust=False).mean()
+        ema26 = pd.Series(closes).ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+
+        # Histogramme
+        histogram = macd_line.iloc[-1] - signal_line.iloc[-1]
+
+        # Signal d'achat/vente
+        signal = "BUY" if macd_line.iloc[-1] > signal_line.iloc[-1] else "SELL"
+
+        logger.info(f"📊 MACD calculé pour {pair} - Signal: {signal}, Histogramme: {histogram:.5f}")
+        return signal, histogram
+
     except Exception as e:
         logger.error(f"❌ Erreur calcul MACD: {str(e)}")
         return None, None
