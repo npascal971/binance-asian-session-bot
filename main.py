@@ -194,9 +194,9 @@ def analyze_pair(pair):
         logger.info(f"📈 RSI: {rsi:.2f}, MACD Signal: {macd_signal}")
         
         # Décision de placement de trade
-        if rsi < 30 and macd_signal == "BUY":
+        if rsi < 40 and macd_signal == "BUY":
             place_trade(pair, "buy", current_price, asian_range["low"], asian_range["high"])
-        elif rsi > 70 and macd_signal == "SELL":
+        elif rsi > 60 and macd_signal == "SELL":
             place_trade(pair, "sell", current_price, asian_range["high"], asian_range["low"])
     
     except Exception as e:
