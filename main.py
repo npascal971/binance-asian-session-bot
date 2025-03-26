@@ -1,18 +1,21 @@
-import logging
 import os
 import time
-import datetime
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime, timedelta, time as dtime
+from email.message import EmailMessage
+from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
-from functools import wraps, lru_cache
-from oandapyV20 import API
+import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
-import oandapyV20.endpoints.pricing as pricing
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.trades as trades
-from email.mime.text import MIMEText
-import smtplib
+import oandapyV20.endpoints.pricing as pricing
+from oandapyV20.endpoints import accounts
+import requests
+import pytz
+import logging
+
 
 # Configuration des logs
 logging.basicConfig(
