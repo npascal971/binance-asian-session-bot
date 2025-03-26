@@ -151,6 +151,8 @@ def get_candles(pair, start_time, end_time=None):
     now = datetime.utcnow()
     end_date = datetime.combine(now.date(), end_time) if end_time else now
     start_date = datetime.combine(now.date(), start_time)
+    end_date = min(end_date, now)  # Prevent future dates
+    
     params = {
         "granularity": "M15",
         "from": start_date.isoformat() + "Z",
@@ -246,26 +248,37 @@ def get_current_price(pair):
 
 
 def calculate_rsi(pair, period=14):
-    """Calcule le RSI pour une paire."""
     candles = get_candles(pair, LONDON_SESSION_START, NY_SESSION_END)
     closes = [float(c['mid']['c']) for c in candles]
+    
+    if len(closes) < period + 1:
+        logger.warning(f"⚠️ Données insuffisantes pour RSI ({len(closes)} points)")
+        return None
+    
     deltas = np.diff(closes)
     gains = np.where(deltas > 0, deltas, 0)
     losses = np.where(deltas < 0, -deltas, 0)
+    
     avg_gain = np.mean(gains[:period])
     avg_loss = np.mean(losses[:period]) or 1e-10
+    
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 
 def calculate_macd(pair):
-    """Calcule le MACD pour une paire."""
     candles = get_candles(pair, LONDON_SESSION_START, NY_SESSION_END)
     closes = [float(c['mid']['c']) for c in candles]
+    
+    if len(closes) < 26:
+        logger.warning(f"⚠️ Données insuffisantes pour MACD ({len(closes)} points)")
+        return "NEUTRAL"
+    
     ema12 = pd.Series(closes).ewm(span=12, adjust=False).mean()
     ema26 = pd.Series(closes).ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    
     return "BUY" if macd_line.iloc[-1] > signal_line.iloc[-1] else "SELL"
 
 def fetch_historical_asian_range(pair):
