@@ -1280,6 +1280,9 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
         logger.info("🧪 Mode simulation - Trade non envoyé")
         return "SIMULATION"
 
+MAX_RETRIES = 3
+RETRY_DELAY = 5
+MIN_CANDLES = 3
 def get_asian_range(pair):
     """
     Calcule et retourne le range asiatique sous forme de dictionnaire
@@ -1317,85 +1320,79 @@ def check_timeframe_validity(tf):
         raise ValueError(f"Timeframe invalide. Utiliser: {valid}")
 
 def analyze_asian_session():
-    """
-    Analyse complète de la session asiatique pour toutes les paires
-    Calcule et stocke les prix high/low pour chaque paire durant la session
-    """
-    global asian_range_calculated
+    """Version robuste avec gestion des erreurs et réessais automatiques"""
+    global asian_ranges, asian_range_calculated
     
-    if asian_range_calculated:
-        logger.debug("🔄 Session asiatique déjà analysée")
-        return
-        
     logger.info("🌏 DÉBUT ANALYSE SESSION ASIATIQUE")
-    
-    now = datetime.utcnow()
-    today = now.date()
-    
-    # Calcul des dates de début/fin exactes
-    start_dt = datetime.combine(today, ASIAN_SESSION_START)
-    end_dt = datetime.combine(today, ASIAN_SESSION_END)
-    
-    # Si on est encore dans la session asiatique
-    if now < end_dt:
-        end_dt = now  # On utilise l'heure actuelle comme fin
-        logger.info("⏳ Session asiatique en cours - Analyse partielle")
-    
-    logger.info(f"🔍 Plage analysée: {start_dt} à {end_dt} (UTC)")
+    pairs_to_analyze = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
+    success_count = 0
+    max_retries = 3
+    retry_delay = 5  # secondes
 
-    for pair in PAIRS:
-        try:
-            params = {
-                "granularity": "H1",  # Bougies horaires
-                "from": start_dt.isoformat() + "Z",
-                "to": end_dt.isoformat() + "Z",
-                "price": "M"  # Prix mid
-            }
-            
-            logger.debug(f"📡 Récupération données pour {pair}...")
-            candles = client.request(
-                instruments.InstrumentsCandles(
-                    instrument=pair,
-                    params=params
-                )
-            )['candles']
-            
-            # Filtrage des bougies complètes
-            valid_candles = [c for c in candles if c['complete']]
-            
-            if not valid_candles:
-                logger.warning(f"⚠️ Aucune donnée valide pour {pair}")
-                continue
+    for pair in pairs_to_analyze:
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                # 1. Configuration des paramètres temporels
+                now = datetime.utcnow()
+                start_time = datetime.combine(now.date(), ASIAN_SESSION_START)
+                end_time = min(datetime.combine(now.date(), ASIAN_SESSION_END), now)
+
+                # 2. Récupération des données avec timeout
+                params = {
+                    "granularity": "H1",
+                    "from": start_time.isoformat() + "Z",
+                    "to": end_time.isoformat() + "Z",
+                    "price": "M"
+                }
                 
-            # Extraction des prix
-            highs = [float(c['mid']['h']) for c in valid_candles]
-            lows = [float(c['mid']['l']) for c in valid_candles]
-            
-            if not highs or not lows:
-                logger.warning(f"⚠️ Données incomplètes pour {pair}")
-                continue
+                logger.debug(f"📡 Tentative {retry_count+1} pour {pair}...")
+                candles = client.request(
+                    instruments.InstrumentsCandles(
+                        instrument=pair,
+                        params=params
+                    ),
+                    timeout=10
+                )['candles']
+
+                # 3. Vérification des données reçues
+                if not candles or len(candles) < 3:  # Au moins 3 bougies
+                    raise ValueError("Données insuffisantes")
+
+                # 4. Extraction des prix
+                valid_candles = [c for c in candles if c['complete']]
+                highs = [float(c['mid']['h']) for c in valid_candles]
+                lows = [float(c['mid']['l']) for c in valid_candles]
+
+                if not highs or not lows:
+                    raise ValueError("Données de prix manquantes")
+
+                # 5. Enregistrement des résultats
+                asian_ranges[pair] = {
+                    'high': max(highs),
+                    'low': min(lows),
+                    'time': end_time,
+                    'candles': len(valid_candles)
+                }
                 
-            # Stockage des résultats
-            asian_ranges[pair] = {
-                'high': max(highs),
-                'low': min(lows),
-                'time': end_dt,
-                'candles': len(valid_candles)
-            }
-            
-            logger.info(
-                f"📊 {pair}: "
-                f"Low={asian_ranges[pair]['low']:.5f} | "
-                f"High={asian_ranges[pair]['high']:.5f} | "
-                f"Bougies={asian_ranges[pair]['candles']}"
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
-            continue
-    
-    asian_range_calculated = True
-    logger.info("✅ ANALYSE ASIATIQUE TERMINÉE")
+                logger.info(f"✅ {pair}: Range {asian_ranges[pair]['low']:.5f}-{asian_ranges[pair]['high']:.5f}")
+                success_count += 1
+                break
+
+            except Exception as e:
+                retry_count += 1
+                logger.warning(f"⚠️ Tentative {retry_count} échouée pour {pair}: {str(e)}")
+                if retry_count < max_retries:
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"❌ Échec après {max_retries} tentatives pour {pair}")
+
+    # Vérification du succès global
+    if success_count >= len(pairs_to_analyze) // 2:  # Au moins 50% de réussite
+        asian_range_calculated = True
+        logger.info(f"✅ ANALYSE TERMINÉE ({success_count}/{len(pairs_to_analyze)} paires valides)")
+    else:
+        logger.error("❌ ANALYSE INCOMPLÈTE - Données insuffisantes")
 
 def close_all_trades():
     """Ferme tous les trades ouverts"""
