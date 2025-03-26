@@ -170,35 +170,38 @@ def analyze_pair(pair):
     """Analyse une paire pour détecter des opportunités de trading."""
     try:
         logger.info(f"🔍 Début analyse approfondie pour {pair}")
-        
-        # Récupération du range asiatique
-        asian_range = asian_ranges.get(pair)
-        if not asian_range:
-            logger.warning(f"⚠️ Aucun range asiatique disponible pour {pair}")
+
+        # Récupération du range asiatique ou européen
+        if ASIAN_SESSION_START <= datetime.utcnow().time() < ASIAN_SESSION_END:
+            range_to_use = asian_ranges.get(pair)
+        elif LONDON_SESSION_START <= datetime.utcnow().time() <= NY_SESSION_END:
+            range_to_use = european_ranges.get(pair)
+        else:
+            logger.info(f"⚠️ Hors plage horaire définie pour {pair}")
             return
-        
-        # Récupération du prix actuel
-        current_price = get_current_price(pair)
-        
+
         # Vérification si le prix est dans la plage valide
-        if not is_price_in_valid_range(current_price, asian_range):
+        current_price = get_current_price(pair)
+        if not is_price_in_valid_range(current_price, range_to_use):
             logger.info(f"❌ Prix hors range valide pour {pair}")
             return
-        
+
         # Calcul des indicateurs techniques
         rsi = calculate_rsi(pair)
         macd_signal = calculate_macd(pair)
-        
+
         # Logs détaillés
-        logger.info(f"📊 Analyse {pair} - Prix: {current_price:.5f}, Range: {asian_range['low']:.5f} - {asian_range['high']:.5f}")
+        logger.info(f"📊 Analyse {pair} - Prix: {current_price:.5f}, Range: {range_to_use['low']:.5f} - {range_to_use['high']:.5f}")
         logger.info(f"📈 RSI: {rsi:.2f}, MACD Signal: {macd_signal}")
-        
+
         # Décision de placement de trade
-        if rsi < 40 and macd_signal == "BUY":
-            place_trade(pair, "buy", current_price, asian_range["low"], asian_range["high"])
-        elif rsi > 60 and macd_signal == "SELL":
-            place_trade(pair, "sell", current_price, asian_range["high"], asian_range["low"])
-    
+        if rsi < 40 and macd_signal == "BUY":  # RSI ajusté à 40
+            place_trade(pair, "buy", current_price, range_to_use["low"], range_to_use["high"])
+        elif rsi > 60 and macd_signal == "SELL":  # RSI ajusté à 60
+            place_trade(pair, "sell", current_price, range_to_use["high"], range_to_use["low"])
+        else:
+            logger.debug(f"❌ Conditions non remplies pour {pair} - RSI: {rsi}, MACD: {macd_signal}")
+
     except Exception as e:
         logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
 
