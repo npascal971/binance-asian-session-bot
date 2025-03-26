@@ -117,13 +117,13 @@ def analyze_asian_session():
 
 def fetch_historical_asian_range(pair):
     """Récupère le range asiatique historique pour une paire."""
-    now = datetime.utcnow()
-    start_time = datetime.combine(now.date(), ASIAN_SESSION_START)
-    end_time = datetime.combine(now.date(), ASIAN_SESSION_END)
+    now = datetime.datetime.utcnow()  # Utilisez datetime.datetime
+    start_time = datetime.datetime.combine(now.date(), ASIAN_SESSION_START)
+    end_time = datetime.datetime.combine(now.date(), ASIAN_SESSION_END)
     if now.time() < ASIAN_SESSION_END:
         # Si nous sommes encore dans la session asiatique, ajustez la date
-        start_time -= timedelta(days=1)
-        end_time -= timedelta(days=1)
+        start_time -= datetime.timedelta(days=1)
+        end_time -= datetime.timedelta(days=1)
     try:
         candles = get_candles(pair, start_time, end_time)
         if not candles:
