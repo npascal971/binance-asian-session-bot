@@ -91,6 +91,33 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     units = risk_amount / distance_pips
     return round(units, 2)
 
+def is_price_in_valid_range(current_price, asian_range, buffer=0.0002):
+    """
+    Vérifie si le prix actuel est dans la plage valide définie par le range asiatique.
+    
+    Args:
+        current_price (float): Le prix actuel de la paire.
+        asian_range (dict): Dictionnaire contenant les clés 'high' et 'low' pour le range asiatique.
+        buffer (float): Une marge de sécurité pour éviter les faux signaux (en pips ou en unités).
+    
+    Returns:
+        bool: True si le prix est dans la plage valide, False sinon.
+    """
+    if not asian_range or "high" not in asian_range or "low" not in asian_range:
+        logger.warning("⚠️ Range asiatique invalide ou manquant")
+        return False
+    
+    # Appliquer un buffer pour éviter les faux signaux près des bords
+    lower_bound = asian_range["low"] - buffer
+    upper_bound = asian_range["high"] + buffer
+    
+    # Vérifier si le prix actuel est dans la plage avec le buffer
+    if lower_bound <= current_price <= upper_bound:
+        logger.info(f"✅ Prix {current_price:.5f} dans la plage valide ({lower_bound:.5f} - {upper_bound:.5f})")
+        return True
+    else:
+        logger.info(f"❌ Prix {current_price:.5f} hors de la plage valide ({lower_bound:.5f} - {upper_bound:.5f})")
+        return False
 
 def get_instrument_details(pair):
     """Retourne les spécifications de l'instrument."""
@@ -154,7 +181,7 @@ def analyze_pair(pair):
     
     asian_range = asian_ranges.get(pair)
     if not asian_range:
-        logger.warning(f"⚠️ Aucun range asiatique disponible pour {pair}. Nouvelle tentative programmée.")
+        logger.warning(f"⚠️ Aucun range asiatique disponible pour {pair}")
         return
     
     current_price = get_current_price(pair)
