@@ -87,6 +87,22 @@ def calculate_session_range(pairs, session_start, session_end):
         logger.info(f"🌍 Range calculé pour {pair}: {min(lows):.5f} - {max(highs):.5f}")
     return ranges
 
+def get_candles(pair, granularity="M15", count=None, from_time=None, to_time=None):
+    """Récupère les bougies avec des options supplémentaires."""
+    params = {"granularity": granularity, "price": "M"}
+    if count:
+        params["count"] = count
+    if from_time and to_time:
+        params["from"] = from_time.isoformat() + "Z"
+        params["to"] = to_time.isoformat() + "Z"
+    try:
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        candles = client.request(r)['candles']
+        return candles
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération candles {pair}: {str(e)}")
+        return []
+
 def safe_execute(func, *args, error_message="Erreur inconnue"):
     """Exécute une fonction avec gestion des erreurs."""
     try:
