@@ -1201,7 +1201,7 @@ def calculate_atr(candles, period=14):
             tr_values.append(max(tr1, tr2, tr3))
             
         atr = []
-        for i in range(len(tr_values))):
+        for i in range(len(tr_values)):
             if i < period:
                 atr.append(sum(tr_values[:i+1])/(i+1))
             else:
