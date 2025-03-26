@@ -44,7 +44,7 @@ INSTRUMENT_SPECS = {
 ASIAN_SESSION_START = datetime.strptime("00:00", "%H:%M").time()
 ASIAN_SESSION_END = datetime.strptime("08:00", "%H:%M").time()
 LONDON_SESSION_START = datetime.strptime("08:00", "%H:%M").time()
-NY_SESSION_END = datetime.strptime("17:00", "%H:%M").time()
+NY_SESSION_END = datetime.strptime("22:00", "%H:%M").time()
 
 # Connexion à l'API OANDA
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment="practice")
