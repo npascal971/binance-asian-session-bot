@@ -114,6 +114,32 @@ def analyze_asian_session():
         except Exception as e:
             logger.error(f"❌ Erreur analyse asiatique {pair}: {str(e)}")
 
+def fetch_historical_asian_range(pair):
+    """Récupère le range asiatique historique pour une paire."""
+    now = datetime.utcnow()
+    start_time = datetime.combine(now.date(), ASIAN_SESSION_START)
+    end_time = datetime.combine(now.date(), ASIAN_SESSION_END)
+    if now.time() < ASIAN_SESSION_END:
+        # Si nous sommes encore dans la session asiatique, ajustez la date
+        start_time -= timedelta(days=1)
+        end_time -= timedelta(days=1)
+    try:
+        candles = get_candles(pair, start_time, end_time)
+        if not candles:
+            logger.warning(f"⚠️ Aucune donnée historique pour {pair}")
+            return None
+        highs = [float(c['mid']['h']) for c in candles]
+        lows = [float(c['mid']['l']) for c in candles]
+        if highs and lows:
+            return {
+                'high': max(highs),
+                'low': min(lows),
+                'time': end_time
+            }
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération range historique {pair}: {str(e)}")
+        return None
+
 def get_candles(pair, start_time, end_time=None):
     """Récupère les bougies pour une plage horaire spécifique."""
     now = datetime.utcnow()
@@ -256,4 +282,16 @@ def main_loop():
 
 if __name__ == "__main__":
     logger.info("✨ DÉMARRAGE DU BOT DE TRADING ✨")
+    
+    # Initialisation des ranges asiatiques
+    for pair in PAIRS:
+        if pair not in asian_ranges or not asian_ranges[pair]:
+            logger.info(f"🔍 Récupération du range asiatique historique pour {pair}")
+            historical_range = fetch_historical_asian_range(pair)
+            if historical_range:
+                asian_ranges[pair] = historical_range
+                logger.info(f"✅ Range asiatique historique calculé pour {pair}: {historical_range}")
+            else:
+                logger.warning(f"⚠️ Échec récupération range asiatique pour {pair}")
+    
     main_loop()
