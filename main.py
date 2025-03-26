@@ -166,8 +166,12 @@ def calculate_macd(pair):
         logger.error(f"❌ Erreur calcul MACD: {str(e)}")
         return None, None
 
+# Initialisation des variables globales
+asian_ranges = {}
+european_ranges = {}  # Initialisé vide pour une gestion dynamique
+
 def initialize_european_ranges():
-    """Initialise les plages européennes basées sur les données de la session."""
+    """Calcule les plages européennes basées sur les données de la session."""
     global european_ranges
     european_ranges = {}
     for pair in PAIRS:
@@ -179,6 +183,50 @@ def initialize_european_ranges():
         lows = [float(c['mid']['l']) for c in candles]
         european_ranges[pair] = {"high": max(highs), "low": min(lows)}
         logger.info(f"🌍 Range européen {pair}: {min(lows):.5f} - {max(highs):.5f}")
+
+def main_loop():
+    while True:
+        try:
+            now = datetime.utcnow()
+            current_time = now.time()
+            logger.info(f"⏳ Heure actuelle: {current_time}")
+
+            # Vérification des trades actifs
+            active_trades = check_active_trades()
+            logger.info(f"📊 Trades actifs: {len(active_trades)}")
+
+            # Limite globale de 1 trade maximum
+            if len(active_trades) >= 1:
+                logger.info("⚠️ Limite de 1 trade atteinte - Attente...")
+                time.sleep(60)
+                continue
+
+            # Détermination de la session active
+            for pair in PAIRS:
+                if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+                    range_to_use = asian_ranges.get(pair)
+                    logger.info(f"🌏 SESSION ASIATIQUE - Range utilisé pour {pair}: {range_to_use}")
+                elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+                    if not european_ranges:  # Initialisation si nécessaire
+                        initialize_european_ranges()
+                    range_to_use = european_ranges.get(pair)
+                    logger.info(f"🌍 SESSION EUROPÉENNE - Range utilisé pour {pair}: {range_to_use}")
+                else:
+                    logger.info("⚠️ Hors plage horaire définie")
+                    continue
+
+                # Si un range est disponible, procéder à l'analyse
+                if range_to_use:
+                    analyze_pair(pair, range_to_use)
+                else:
+                    logger.warning(f"⚠️ Aucun range disponible pour {pair} - Analyse ignorée")
+
+            # Pause avant le prochain cycle
+            logger.info("⏰ Pause avant le prochain cycle...")
+            time.sleep(60)
+
+        except Exception as e:
+            logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
 
 def analyze_pair(pair):
     """Analyse une paire pour détecter des opportunités de trading."""
