@@ -939,23 +939,17 @@ def identify_order_blocks(candles, min_ratio=2):
     return blocks
     
 def analyze_pair(pair):
-    """Version optimisée avec gestion robuste des erreurs, buffers dynamiques et journalisation améliorée"""
+    """Version optimisée intégrant range market, structures de retournement et confirmations techniques"""
     try:
-        # 1. Vérification initiale des données avec conversion sécurisée
-        htf_data = get_htf_data(pair)
-        if not htf_data or len(htf_data) < 10:
-            logger.warning(f"⚠️ Données insuffisantes pour {pair} (HTF)")
+        # 1. Analyse avancée (range, structure, indicateurs)
+        analysis = enhanced_analyze_pair(pair)
+        if not analysis:
             return
 
-        # Conversion explicite des prix en float
-        for candle in htf_data:
-            if 'mid' in candle:
-                candle['mid'] = {k: float(v) for k, v in candle['mid'].items()}
-
-        # 2. Analyse de tendance HTF
+        # 2. Vérification de la tendance HTF
         trend = check_htf_trend(pair)
-        if trend == 'NEUTRAL':
-            logger.debug(f"↔️ {pair} en range - Aucun trade")
+        if trend == 'NEUTRAL' and not analysis['range_info'].get('is_range'):
+            logger.debug(f"↔️ {pair} en range sans structure claire - Aucun trade")
             return
 
         direction = 'BUY' if trend == 'UP' else 'SELL'
@@ -972,7 +966,51 @@ def analyze_pair(pair):
             logger.error(f"❌ Erreur prix actuel {pair}: {str(e)}")
             return
 
-        # Calcul du buffer adaptatif
+        # 4. Stratégie selon le contexte de marché
+        if analysis['range_info'].get('is_range'):
+            # Stratégie pour range market
+            if current_price > analysis['range_info']['resistance'] * 0.995:
+                direction = 'BUY'  # Breakout potentiel
+                logger.info(f"🚀 {pair} approche résistance du range - Préparation breakout")
+            elif current_price < analysis['range_info']['support'] * 1.005:
+                direction = 'SELL'  # Rejection potentielle
+                logger.info(f"🚀 {pair} approche support du range - Préparation rebond")
+            else:
+                logger.debug(f"↔️ {pair} au milieu du range - Attente")
+                return
+        elif analysis['reversal_structure']:
+            # Stratégie pour retournement
+            reversal = analysis['reversal_structure']
+            if reversal['type'] in ['DOUBLE_TOP', 'HEAD_SHOULDERS']:
+                direction = 'SELL'
+                logger.info(f"🔄 Structure {reversal['type']} détectée - Biais baissier")
+            elif reversal['type'] in ['DOUBLE_BOTTOM', 'INVERSE_HEAD_SHOULDERS']:
+                direction = 'BUY'
+                logger.info(f"🔄 Structure {reversal['type']} détectée - Biais haussier")
+
+        # 5. Vérification des indicateurs techniques
+        tech_conf = analysis['technical_confirmations']
+        ema_signal = tech_conf.get('ema200', {}).get('signal')
+        rsi_signal = tech_conf.get('rsi', {}).get('signal')
+        macd_signal = tech_conf.get('macd', {}).get('signal_type')
+
+        # Filtrage strict par confluence
+        if direction == 'BUY' and not (
+            ema_signal == 'BULLISH' and 
+            rsi_signal in ['OVERSOLD', 'NEUTRAL'] and 
+            macd_signal == 'BULLISH'
+        ):
+            logger.warning(f"⚠️ {pair}: Confluence insuffisante pour achat")
+            return
+        elif direction == 'SELL' and not (
+            ema_signal == 'BEARISH' and 
+            rsi_signal in ['OVERBOUGHT', 'NEUTRAL'] and 
+            macd_signal == 'BEARISH'
+        ):
+            logger.warning(f"⚠️ {pair}: Confluence insuffisante pour vente")
+            return
+
+        # 6. Détection des zones techniques (FVG/OB) avec prix valide
         buffer = calculate_dynamic_buffer(pair)
         price_valid = is_price_in_valid_range(
             current_price=current_price,
@@ -982,21 +1020,17 @@ def analyze_pair(pair):
         )
         
         if not price_valid:
-            logger.debug(
-                f"🔍 {pair}: Prix {current_price:.5f} hors range ajusté "
-                f"({asian_range['low']:.5f}-{asian_range['high']:.5f}) "
-                f"Buffer: ±{buffer:.5f}"
-            )
+            logger.debug(f"🔍 {pair}: Prix hors range valide")
             return
 
-        # 4. Détection des zones techniques
+        htf_data = get_htf_data(pair)
         fvgs = identify_fvg(htf_data)
         obs = identify_order_blocks(htf_data)
 
-        # 5. Validation des zones avec gestion des erreurs
+        # 7. Validation des zones avec gestion des erreurs
         try:
             in_fvg, fvg_zone = is_price_in_fvg(current_price, fvgs)
-            near_ob, ob_zone = is_price_near_ob(current_price, obs, trend)
+            near_ob, ob_zone = is_price_near_ob(current_price, obs, direction)
             
             if not (in_fvg and near_ob):
                 logger.debug(f"🔍 {pair}: Aucune zone valide (FVG: {in_fvg}, OB: {near_ob})")
@@ -1004,38 +1038,48 @@ def analyze_pair(pair):
                 
             stop_loss = calculate_stop(fvg_zone, ob_zone, asian_range, direction)
             take_profit = calculate_tp(current_price, asian_range, direction, daily_zones.get(pair, {}))
+            
+            # Ajustement TP/SL pour les structures de retournement
+            if analysis['reversal_structure']:
+                take_profit = analysis['reversal_structure'].get('target', take_profit)
+                logger.info(f"🎯 Target ajusté selon structure: {take_profit:.5f}")
+
         except Exception as e:
             logger.error(f"❌ Erreur calcul niveaux {pair}: {str(e)}")
             return
 
-        # 6. Vérification de la confluence
-        confluence_score = check_confluence(pair, direction)
-        if confluence_score < MIN_CONFLUENCE_SCORE:
-            logger.warning(f"⚠️ {pair}: Confluence faible ({confluence_score}/{MIN_CONFLUENCE_SCORE})")
+        # 8. Vérification ratio risque/récompense
+        rr_ratio = abs(take_profit-current_price)/abs(current_price-stop_loss)
+        if rr_ratio < RISK_REWARD_RATIO:
+            logger.warning(f"⚠️ Ratio R/R trop faible ({rr_ratio:.1f} < {RISK_REWARD_RATIO})")
             return
 
-        # 7. Filtre macroéconomique
+        # 9. Filtre macroéconomique
         if not macro_filter(pair, direction):
             logger.warning(f"⚠️ {pair}: Contexte macro défavorable")
             return
 
-        # 8. Journalisation détaillée
+        # 10. Journalisation détaillée
         logger.info(f"""
         🎯 SIGNAL CONFIRMÉ {pair} 🎯
         Direction: {'ACHAT' if direction == 'BUY' else 'VENTE'}
+        Contexte: {'Range' if analysis['range_info'].get('is_range') else 'Tendance' if trend != 'NEUTRAL' else 'Neutre'}
+        Structure: {analysis['reversal_structure']['type'] if analysis['reversal_structure'] else 'Aucune'}
         Prix actuel: {current_price:.5f}
         Tendance HTF: {trend}
         Range Asiatique: {asian_range['low']:.5f}-{asian_range['high']:.5f}
-        Buffer appliqué: ±{buffer:.5f}
         Stop Loss: {stop_loss:.5f} (Risque: {abs(current_price-stop_loss):.1f}pips)
-        Take Profit: {take_profit:.5f} (Ratio R/R: {abs(take_profit-current_price)/abs(current_price-stop_loss):.1f})
-        Confluence: {confluence_score}/3
+        Take Profit: {take_profit:.5f} (Ratio R/R: {rr_ratio:.1f})
+        Indicateurs:
+        - EMA200: {ema_signal} ({tech_conf.get('ema200', {}).get('value', 0):.5f})
+        - RSI: {rsi_signal} ({tech_conf.get('rsi', {}).get('value', 0):.1f})
+        - MACD: {macd_signal} (Hist: {tech_conf.get('macd', {}).get('histogram', 0):.5f})
         Zones:
         - FVG: {fvg_zone['type']} {fvg_zone.get('levels', [])}
         - OB: {'Haussier' if near_ob == 'BUY' else 'Baissier'} {ob_zone.get('levels', [])}
         """)
 
-        # 9. Exécution du trade
+        # 11. Exécution du trade
         place_trade(
             pair=pair,
             direction=direction.lower(),
@@ -1100,6 +1144,300 @@ def inflation_adjustment(pair):
         
     # Exemple: Augmente le TP si inflation haute
     return 1.1 if cpi > 3.0 else 0.9
+
+# Ajouter ces nouvelles fonctions dans votre code
+
+def detect_range_market(pair, lookback_period=20, threshold_pct=0.005):
+    """
+    Détecte si le marché est en range basé sur l'ATR et le pourcentage de range
+    Args:
+        pair: str - Paire de trading
+        lookback_period: int - Période d'analyse (en bougies)
+        threshold_pct: float - Seuil pour considérer un range (0.5% par défaut)
+    Returns:
+        dict - {'is_range': bool, 'support': float, 'resistance': float}
+    """
+    try:
+        candles = get_htf_data(pair, "H4")  # Utilise le timeframe H4 pour la détection
+        if len(candles) < lookback_period:
+            return {'is_range': False}
+        
+        highs = [float(c['mid']['h']) for c in candles[-lookback_period:]]
+        lows = [float(c['mid']['l']) for c in candles[-lookback_period:]]
+        closes = [float(c['mid']['c']) for c in candles[-lookback_period:]]
+        
+        # Calcul de l'ATR pour évaluer la volatilité
+        atr = calculate_atr(candles, period=14)
+        current_atr = atr[-1] if atr else 0
+        
+        # Calcul du range en pourcentage
+        range_size = (max(highs) - min(lows)) / min(lows)
+        is_range = range_size < threshold_pct and current_atr < (threshold_pct * min(lows))
+        
+        return {
+            'is_range': is_range,
+            'support': min(lows),
+            'resistance': max(highs),
+            'pivot': (max(highs) + min(lows)) / 2,
+            'range_percent': range_size * 100
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur détection range {pair}: {str(e)}")
+        return {'is_range': False}
+
+def calculate_atr(candles, period=14):
+    """Calcul de l'Average True Range"""
+    try:
+        tr_values = []
+        for i in range(1, len(candles)):
+            prev_close = float(candles[i-1]['mid']['c'])
+            high = float(candles[i]['mid']['h'])
+            low = float(candles[i]['mid']['l'])
+            
+            tr1 = high - low
+            tr2 = abs(high - prev_close)
+            tr3 = abs(low - prev_close)
+            tr_values.append(max(tr1, tr2, tr3))
+            
+        atr = []
+        for i in range(len(tr_values))):
+            if i < period:
+                atr.append(sum(tr_values[:i+1])/(i+1))
+            else:
+                atr.append((atr[-1] * (period-1) + tr_values[i])/period)
+                
+        return atr
+    except Exception as e:
+        logger.error(f"❌ Erreur calcul ATR: {str(e)}")
+        return []
+
+def detect_reversal_structure(pair, timeframe='H1'):
+    """
+    Détecte les structures de retournement (double top/bottom, tête-épaules, etc.)
+    Args:
+        pair: str - Paire de trading
+        timeframe: str - Timeframe pour l'analyse
+    Returns:
+        dict - Structure détectée ou None
+    """
+    try:
+        candles = get_htf_data(pair, timeframe)
+        if len(candles) < 10:
+            return None
+            
+        closes = [float(c['mid']['c']) for c in candles]
+        highs = [float(c['mid']['h']) for c in candles]
+        lows = [float(c['mid']['l']) for c in candles]
+        
+        # Détection double top/bottom
+        pattern = detect_double_top_bottom(highs, lows)
+        if pattern:
+            return pattern
+            
+        # Détection tête-épaules
+        pattern = detect_head_shoulders(highs, lows)
+        if pattern:
+            return pattern
+            
+        return None
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur détection structure {pair}: {str(e)}")
+        return None
+
+def detect_double_top_bottom(highs, lows):
+    """Détection des doubles tops/bottoms"""
+    if len(highs) < 5:
+        return None
+        
+    # Double Top
+    if (highs[-3] > highs[-4] and 
+        highs[-3] > highs[-2] and 
+        abs(highs[-1] - highs[-3]) < (highs[-3] * 0.002) and  # Marge de 0.2%
+        lows[-2] < lows[-3]):
+        return {
+            'type': 'DOUBLE_TOP',
+            'confirmation_level': highs[-2],
+            'target': lows[-3] - (highs[-3] - lows[-3])
+        }
+        
+    # Double Bottom
+    elif (lows[-3] < lows[-4] and 
+          lows[-3] < lows[-2] and 
+          abs(lows[-1] - lows[-3]) < (lows[-3] * 0.002) and 
+          highs[-2] > highs[-3]):
+        return {
+            'type': 'DOUBLE_BOTTOM',
+            'confirmation_level': lows[-2],
+            'target': highs[-3] + (highs[-3] - lows[-3])
+        }
+        
+    return None
+
+def detect_head_shoulders(highs, lows):
+    """Détection des patterns tête-épaules"""
+    if len(highs) < 7:
+        return None
+        
+    # Tête-épaules
+    if (highs[-4] > highs[-5] and 
+        highs[-4] > highs[-3] and 
+        highs[-4] > highs[-6] and 
+        highs[-6] > highs[-7] and 
+        highs[-2] < highs[-4] and 
+        abs(highs[-2] - highs[-6]) < (highs[-6] * 0.003)):
+        return {
+            'type': 'HEAD_SHOULDERS',
+            'neckline': min(lows[-5], lows[-3]),
+            'target': min(lows[-5], lows[-3]) - (highs[-4] - min(lows[-5], lows[-3]))
+        }
+        
+    # Tête-épaules inversé
+    elif (lows[-4] < lows[-5] and 
+          lows[-4] < lows[-3] and 
+          lows[-4] < lows[-6] and 
+          lows[-6] < lows[-7] and 
+          lows[-2] > lows[-4] and 
+          abs(lows[-2] - lows[-6]) < (lows[-6] * 0.003)):
+        return {
+            'type': 'INVERSE_HEAD_SHOULDERS',
+            'neckline': max(highs[-5], highs[-3]),
+            'target': max(highs[-5], highs[-3]) + (max(highs[-5], highs[-3]) - lows[-4])
+        }
+        
+    return None
+
+def get_technical_confirmations(pair):
+    """
+    Récupère les confirmations techniques (EMA200, RSI, MACD)
+    Returns:
+        dict - Résultats des indicateurs
+    """
+    try:
+        candles = get_htf_data(pair, "H1")
+        if len(candles) < 200:
+            return {}
+            
+        closes = [float(c['mid']['c']) for c in candles]
+        
+        # EMA200
+        ema200 = calculate_ema(closes, 200)[-1]
+        
+        # RSI
+        rsi = calculate_rsi(closes, 14)[-1]
+        
+        # MACD
+        macd_line, signal_line = calculate_macd(closes)
+        
+        current_price = closes[-1]
+        ema_signal = 'BULLISH' if current_price > ema200 else 'BEARISH'
+        rsi_signal = 'OVERSOLD' if rsi < 30 else 'OVERBOUGHT' if rsi > 70 else 'NEUTRAL'
+        macd_signal = 'BULLISH' if macd_line[-1] > signal_line[-1] else 'BEARISH'
+        
+        return {
+            'ema200': {
+                'value': ema200,
+                'signal': ema_signal,
+                'distance_pct': abs(current_price - ema200) / ema200 * 100
+            },
+            'rsi': {
+                'value': rsi,
+                'signal': rsi_signal
+            },
+            'macd': {
+                'line': macd_line[-1],
+                'signal': signal_line[-1],
+                'histogram': macd_line[-1] - signal_line[-1],
+                'signal_type': macd_signal
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur confirmations techniques {pair}: {str(e)}")
+        return {}
+
+def calculate_ema(prices, period):
+    """Calcul de l'EMA"""
+    return pd.Series(prices).ewm(span=period, adjust=False).mean().tolist()
+
+def calculate_macd(prices, fast=12, slow=26, signal=9):
+    """Calcul du MACD"""
+    ema_fast = pd.Series(prices).ewm(span=fast, adjust=False).mean()
+    ema_slow = pd.Series(prices).ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line.tolist(), signal_line.tolist()
+
+def enhanced_analyze_pair(pair):
+    """
+    Version améliorée de l'analyse avec:
+    - Détection de range
+    - Structures de retournement
+    - Confirmations techniques
+    """
+    try:
+        # 1. Vérification du contexte de marché
+        range_info = detect_range_market(pair)
+        reversal_structure = detect_reversal_structure(pair)
+        tech_conf = get_technical_confirmations(pair)
+        
+        logger.info(f"""
+        📊 ANALYSE AMÉLIORÉE {pair}
+        • Range Market: {'OUI' if range_info.get('is_range') else 'NON'} 
+          (Support: {range_info.get('support', 0):.5f}, Resistance: {range_info.get('resistance', 0):.5f})
+        • Structure: {reversal_structure['type'] if reversal_structure else 'Aucune'}
+        • EMA200: {tech_conf.get('ema200', {}).get('signal', 'N/A')} ({tech_conf.get('ema200', {}).get('value', 0):.5f})
+        • RSI: {tech_conf.get('rsi', {}).get('signal', 'N/A')} ({tech_conf.get('rsi', {}).get('value', 0):.1f})
+        • MACD: {tech_conf.get('macd', {}).get('signal_type', 'N/A')} 
+          (Hist: {tech_conf.get('macd', {}).get('histogram', 0):.5f})
+        """)
+        
+        # 2. Stratégie pour range market
+        if range_info.get('is_range'):
+            current_price = get_current_price(pair)
+            if current_price > range_info['resistance'] * 0.99:
+                logger.info(f"🔔 {pair} proche résistance du range")
+                # Stratégie de breakout ou faux breakout
+                
+            elif current_price < range_info['support'] * 1.01:
+                logger.info(f"🔔 {pair} proche support du range")
+                # Stratégie de rebond ou cassure
+                
+        # 3. Stratégie pour structure de retournement
+        if reversal_structure:
+            logger.info(f"🔔 Structure {reversal_structure['type']} détectée sur {pair}")
+            # Implémenter la logique de trading basée sur la structure
+            
+        # 4. Filtrage par indicateurs
+        if (tech_conf.get('ema200', {}).get('signal') == 'BULLISH' and 
+            tech_conf.get('rsi', {}).get('signal') == 'OVERSOLD' and 
+            tech_conf.get('macd', {}).get('signal_type') == 'BULLISH'):
+            logger.info("🎯 Configuration haussière idéale détectée")
+            
+        elif (tech_conf.get('ema200', {}).get('signal') == 'BEARISH' and 
+              tech_conf.get('rsi', {}).get('signal') == 'OVERBOUGHT' and 
+              tech_conf.get('macd', {}).get('signal_type') == 'BEARISH'):
+            logger.info("🎯 Configuration baissière idéale détectée")
+            
+        # 5. Analyse des prix par rapport aux indicateurs
+        current_price = get_current_price(pair)
+        ema200 = tech_conf.get('ema200', {}).get('value', current_price)
+        
+        if current_price > ema200:
+            logger.info(f"📈 Prix au-dessus EMA200 ({ema200:.5f}) - Biais haussier")
+        else:
+            logger.info(f"📉 Prix sous EMA200 ({ema200:.5f}) - Biais baissier")
+            
+        return {
+            'range_info': range_info,
+            'reversal_structure': reversal_structure,
+            'technical_confirmations': tech_conf
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur analyse avancée {pair}: {str(e)}")
+        return {}
 
 def get_htf_data(pair, timeframe='H4'):
     """
