@@ -95,7 +95,35 @@ def safe_execute(func, *args, error_message="Erreur inconnue"):
         logger.error(f"{error_message}: {str(e)}")
         return None
 
+def is_price_in_valid_range(current_price, range_to_use, buffer=0.0002):
+    """
+    Vérifie si le prix actuel est dans la plage valide définie par le range asiatique.
+    
+    Args:
+        current_price (float): Le prix actuel de la paire.
+        range_to_use (dict): Dictionnaire contenant les clés 'high' et 'low' pour le range asiatique.
+        buffer (float): Une marge de sécurité pour éviter les faux signaux (en pips ou en unités).
+    
+    Returns:
+        bool: True si le prix est dans la plage valide, False sinon.
+    """
+    try:
+        if not range_to_use or "high" not in range_to_use or "low" not in range_to_use:
+            logger.warning("⚠️ Range invalide ou manquant")
+            return False
 
+        lower_bound = range_to_use["low"] - buffer
+        upper_bound = range_to_use["high"] + buffer
+
+        if lower_bound <= current_price <= upper_bound:
+            logger.info(f"✅ Prix {current_price:.5f} dans la plage valide ({lower_bound:.5f} - {upper_bound:.5f})")
+            return True
+        else:
+            logger.info(f"❌ Prix {current_price:.5f} hors de la plage valide ({lower_bound:.5f} - {upper_bound:.5f})")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Erreur validation du range: {str(e)}")
+        return False
 
 def calculate_ema(pair, period=200):
     """
