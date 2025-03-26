@@ -939,7 +939,7 @@ def identify_order_blocks(candles, min_ratio=2):
     return blocks
     
 def analyze_pair(pair):
-    """Version optimisée avec gestion robuste des erreurs et conversion des types"""
+    """Version optimisée avec gestion robuste des erreurs, buffers dynamiques et journalisation améliorée"""
     try:
         # 1. Vérification initiale des données avec conversion sécurisée
         htf_data = get_htf_data(pair)
@@ -960,17 +960,33 @@ def analyze_pair(pair):
 
         direction = 'BUY' if trend == 'UP' else 'SELL'
 
-        # 3. Contexte de prix et range asiatique
-        asian_range = get_asian_range(pair)
+        # 3. Contexte de prix et range asiatique avec buffer dynamique
+        asian_range = asian_ranges.get(pair)
+        if not asian_range:
+            logger.warning(f"⚠️ Aucun range asiatique trouvé pour {pair}")
+            return
+
         try:
             current_price = float(get_current_price(pair))
         except (TypeError, ValueError) as e:
             logger.error(f"❌ Erreur prix actuel {pair}: {str(e)}")
             return
 
-        if not is_price_in_valid_range(current_price, asian_range, trend):
-            logger.debug(f"🔍 {pair}: Prix {current_price:.5f} hors range valide "
-                        f"({asian_range['low']:.5f}-{asian_range['high']:.5f})")
+        # Calcul du buffer adaptatif
+        buffer = calculate_dynamic_buffer(pair)
+        price_valid = is_price_in_valid_range(
+            current_price=current_price,
+            asian_range=asian_range,
+            trend=trend,
+            buffer_multiplier=1.5
+        )
+        
+        if not price_valid:
+            logger.debug(
+                f"🔍 {pair}: Prix {current_price:.5f} hors range ajusté "
+                f"({asian_range['low']:.5f}-{asian_range['high']:.5f}) "
+                f"Buffer: ±{buffer:.5f}"
+            )
             return
 
         # 4. Détection des zones techniques
@@ -1010,6 +1026,7 @@ def analyze_pair(pair):
         Prix actuel: {current_price:.5f}
         Tendance HTF: {trend}
         Range Asiatique: {asian_range['low']:.5f}-{asian_range['high']:.5f}
+        Buffer appliqué: ±{buffer:.5f}
         Stop Loss: {stop_loss:.5f} (Risque: {abs(current_price-stop_loss):.1f}pips)
         Take Profit: {take_profit:.5f} (Ratio R/R: {abs(take_profit-current_price)/abs(current_price-stop_loss):.1f})
         Confluence: {confluence_score}/3
@@ -1134,19 +1151,40 @@ def get_htf_data(pair, timeframe='H4'):
         logger.error(f"❌ Erreur récupération HTF {pair} ({timeframe}): {str(e)}")
         return None
 
-def is_price_in_valid_range(price, asian_range, trend):
-    """Vérifie si le prix est dans une configuration favorable par rapport au range asiatique"""
-    buffer = 0.0003  # 3 pips de marge
+def is_price_in_valid_range(current_price, asian_range, trend, buffer_multiplier=1.0):
+    """
+    Version améliorée avec :
+    - Buffer dynamique
+    - Seuils adaptatifs
+    - Gestion précise des bords
+    """
+    # Calcul du buffer en fonction de la volatilité
+    range_size = asian_range['high'] - asian_range['low']
+    buffer = range_size * 0.05 * buffer_multiplier  # 5% de la taille du range
     
-    # Configuration haussière
-    if trend == 'UP' and price > (asian_range['high'] - buffer):
-        return True
-        
-    # Configuration baissière
-    if trend == 'DOWN' and price < (asian_range['low'] + buffer):
-        return True
-        
-    return False
+    # Seuils avec buffer
+    upper_threshold = asian_range['high'] - buffer if trend == 'UP' else asian_range['high'] + buffer
+    lower_threshold = asian_range['low'] + buffer if trend == 'DOWN' else asian_range['low'] - buffer
+    
+    # Validation précise
+    if trend == 'UP':
+        return lower_threshold <= current_price <= asian_range['high']
+    elif trend == 'DOWN':
+        return asian_range['low'] <= current_price <= upper_threshold
+    else:
+        return False
+
+def calculate_dynamic_buffer(pair):
+    """Calcule un buffer adapté à la paire"""
+    buffers = {
+        'EUR_USD': 0.0003,  # 3 pips
+        'GBP_USD': 0.0003,
+        'USD_JPY': 0.03,    # 3 pips JPY
+        'XAU_USD': 0.5,     # 50 cents
+        'BTC_USD': 10.0,
+        'ETH_USD': 5.0
+    }
+    return buffers.get(pair, 0.0005)  # Valeur par défaut
 
 def calculate_stop(fvg_zone, ob_zone, asian_range, direction):
     if direction == 'BUY':
