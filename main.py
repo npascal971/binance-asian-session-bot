@@ -10,6 +10,7 @@ import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.trades as trades
+import oandapyV20.endpoints.pricing as pricing
 import requests
 import pytz
 
