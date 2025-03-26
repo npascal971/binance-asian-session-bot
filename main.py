@@ -2,6 +2,7 @@ import os
 import logging
 from datetime import datetime, timedelta
 import pytz
+import time
 import pandas as pd
 import numpy as np
 from functools import lru_cache, wraps
@@ -170,6 +171,37 @@ def analyze_session(session_type, pairs):
         logger.info(f"✅ Session {session_type} analysée avec succès")
     else:
         logger.warning(f"⚠️ Échec analyse session {session_type}")
+
+def get_current_price(pair):
+    """
+    Récupère le prix actuel d'une paire de devises via l'API OANDA.
+
+    Args:
+        pair (str): La paire de devises (ex: "EUR_USD").
+
+    Returns:
+        float: Le prix actuel de la paire si récupéré avec succès, sinon None.
+    """
+    try:
+        # Préparation de la requête pour récupérer le prix
+        params = {"instruments": pair}
+        r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params=params)
+
+        # Exécution de la requête
+        response = client.request(r)
+
+        # Extraction du prix bid (prix d'achat)
+        if "prices" in response and len(response["prices"]) > 0:
+            price = float(response["prices"][0]["bids"][0]["price"])
+            logger.info(f"✅ Prix actuel récupéré pour {pair}: {price:.5f}")
+            return price
+        else:
+            logger.warning(f"⚠️ Aucun prix disponible pour {pair}")
+            return None
+
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération prix pour {pair}: {str(e)}")
+        return None
 
 def check_active_trades():
     """
