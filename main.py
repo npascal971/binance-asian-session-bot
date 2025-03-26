@@ -588,66 +588,36 @@ def check_confluence(pair, direction):
     return score
 
 def calculate_rsi(prices, period=14):
-    """
-    Calcul du Relative Strength Index (RSI) avec gestion des erreurs
-    Args:
-        prices: list - Liste des prix (doit être > period+1)
-        period: int - Période du RSI (14 par défaut)
-    Returns:
-        float - Valeur du RSI ou None si calcul impossible
-    """
+    """Version corrigée du calcul RSI"""
     try:
-        # Vérifications initiales
-        if not prices:
-            logger.warning("⚠️ Liste de prix vide")
-            return None
-            
         if len(prices) < period + 1:
-            logger.warning(f"⚠️ Données insuffisantes pour RSI{period} (nécessite {period+1} prix, reçu {len(prices)})")
             return None
             
-        if any(not isinstance(p, (int, float)) for p in prices):
-            logger.warning("⚠️ Données de prix non numériques")
-            return None
-            
-        # Conversion en numpy array pour le calcul
-        prices = np.array(prices, dtype=np.float64)
-        if np.isnan(prices).any():
-            logger.warning("⚠️ Valeurs NaN dans les prix")
-            return None
-            
-        # Calcul des deltas
-        deltas = np.diff(prices)
-        
-        # Séparation des gains et pertes
-        gains = deltas[deltas >= 0]
-        losses = -deltas[deltas < 0]
-        
-        # Moyennes mobiles exponentielles
-        avg_gain = np.mean(gains[:period]) if len(gains) > 0 else 0
-        avg_loss = np.mean(losses[:period]) if len(losses) > 0 else 0
-        
-        for i in range(period, len(deltas)):
-            delta = deltas[i]
-            if delta > 0:
-                avg_gain = (avg_gain * (period - 1) + delta) / period
-                avg_loss = (avg_loss * (period - 1)) / period
-            else:
-                avg_loss = (avg_loss * (period - 1) - delta) / period
-                avg_gain = (avg_gain * (period - 1)) / period
+        # Conversion et nettoyage des prix
+        closes = []
+        for p in prices:
+            try:
+                closes.append(float(p))
+            except:
+                continue
                 
-        # Calcul final du RSI
-        rs = avg_gain / avg_loss if avg_loss != 0 else float('inf')
-        rsi = 100 - (100 / (1 + rs))
+        if len(closes) < period + 1:
+            return None
+            
+        deltas = np.diff(closes)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
         
-        # Correction des valeurs extrêmes
-        rsi = max(0, min(100, rsi))
+        avg_gain = np.mean(gains[:period])
+        avg_loss = np.mean(losses[:period]) or 1e-10  # Évite division par 0
         
-        return rsi
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
         
     except Exception as e:
-        logger.error(f"❌ Erreur calcul RSI{period}: {str(e)}")
+        logger.error(f"Erreur RSI: {str(e)}")
         return None
+
 
 
 def check_active_trades():
@@ -1357,66 +1327,59 @@ def get_technical_confirmations(pair):
         return {}
 
 def calculate_ema(prices, period):
-    """
-    Calcul de l'Exponential Moving Average (EMA) avec vérifications
-    Args:
-        prices: list - Liste des prix
-        period: int - Période de l'EMA
-    Returns:
-        list - Liste des valeurs EMA ou None en cas d'erreur
-    """
+    """Version robuste du calcul EMA"""
     try:
         if not prices or len(prices) < period:
-            logger.warning(f"⚠️ Données insuffisantes pour EMA{period} (nécessite {period} prix, reçu {len(prices)})")
+            logger.warning(f"Données insuffisantes pour EMA{period} (min {period} prix requis)")
+            return None
+        
+        # Conversion sécurisée en float
+        float_prices = []
+        for p in prices:
+            try:
+                float_prices.append(float(p))
+            except (TypeError, ValueError):
+                continue
+                
+        if len(float_prices) < period:
             return None
             
-        if any(not isinstance(p, (int, float)) for p in prices):
-            logger.warning("⚠️ Données de prix non numériques")
-            return None
-            
-        series = pd.Series(prices)
-        if series.isnull().any():
-            logger.warning("⚠️ Valeurs nulles dans les prix")
-            return None
-            
-        return series.ewm(span=period, adjust=False).mean().tolist()
+        return pd.Series(float_prices).ewm(span=period, adjust=False).mean().iloc[-1]
         
     except Exception as e:
-        logger.error(f"❌ Erreur calcul EMA{period}: {str(e)}")
+        logger.error(f"Erreur EMA {period}: {str(e)}")
         return None
 
 
 def calculate_macd(prices, fast=12, slow=26, signal=9):
-    """
-    Calcul du MACD avec gestion robuste des erreurs
-    Returns:
-        tuple: (macd_line, signal_line) ou (None, None) en cas d'erreur
-    """
+    """Version optimisée du MACD"""
     try:
-        if not prices:
-            logger.warning("⚠️ Liste de prix vide")
-            return None, None
-            
         if len(prices) < slow + signal:
-            logger.warning(f"⚠️ Données insuffisantes pour MACD (nécessite {slow+signal} prix, reçu {len(prices)})")
             return None, None
             
-        series = pd.Series(prices)
-        if series.isnull().any():
-            logger.warning("⚠️ Valeurs nulles dans les prix")
+        # Conversion sécurisée
+        clean_prices = []
+        for p in prices:
+            try:
+                clean_prices.append(float(p))
+            except:
+                continue
+                
+        if len(clean_prices) < slow + signal:
             return None, None
             
+        series = pd.Series(clean_prices)
         ema_fast = series.ewm(span=fast, adjust=False).mean()
         ema_slow = series.ewm(span=slow, adjust=False).mean()
         macd_line = ema_fast - ema_slow
         signal_line = macd_line.ewm(span=signal, adjust=False).mean()
         
-        return macd_line.tolist(), signal_line.tolist()
+        return macd_line.iloc[-1], signal_line.iloc[-1]
         
     except Exception as e:
-        logger.error(f"❌ Erreur calcul MACD: {str(e)}")
+        logger.error(f"Erreur MACD: {str(e)}")
         return None, None
-
+        
 def enhanced_analyze_pair(pair):
     """
     Version améliorée de l'analyse avec:
