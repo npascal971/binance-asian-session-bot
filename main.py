@@ -1136,7 +1136,7 @@ def get_clean_candle_data(candles):
             
             # Conversion sécurisée en float
             closes.append(float(close))
-            volumes.append(float(volume)))
+            volumes.append(float(volume))
             
         except (TypeError, ValueError, AttributeError) as e:
             logger.debug(f"Bougie ignorée - erreur conversion: {str(e)}")
