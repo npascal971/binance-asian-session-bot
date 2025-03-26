@@ -453,12 +453,14 @@ def close_trade(pair):
         logger.error(f"❌ Erreur fermeture trade {pair}: {str(e)}")
 
 def main_loop():
+    """Boucle principale du bot."""
     while True:
         try:
             now = datetime.utcnow()
             current_time = now.time()
+            
             logger.info(f"⏳ Heure actuelle: {current_time}")
-
+            
             # Vérification des trades actifs
             active_trades = check_active_trades()
             logger.info(f"📊 Trades actifs: {len(active_trades)}")
@@ -466,34 +468,54 @@ def main_loop():
             # Surveillance des TP/SL pour chaque trade actif
             for pair in active_trades:
                 check_tp_sl_for_pair(pair)
-
+            
             # Limite globale de 1 trade maximum
             if len(active_trades) >= 1:
                 logger.info("⚠️ Limite de 1 trade atteinte - Attente...")
                 time.sleep(60)
                 continue
-
-            # Détermination de la session active
-            for pair in PAIRS:
-                if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
-                    range_to_use = asian_ranges.get(pair)
-                    logger.info(f"🌏 SESSION ASIATIQUE - Range utilisé pour {pair}: {range_to_use}")
-                elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-                    range_to_use = european_ranges.get(pair)
-                    logger.info(f"🏙️ SESSION LONDRES/NY - Range utilisé pour {pair}: {range_to_use}")
-                else:
-                    logger.info("⚠️ Hors plage horaire définie")
-                    continue
-
-                # Si un range est disponible, procéder à l'analyse
-                if range_to_use:
-                    analyze_pair(pair, range_to_use)
-                else:
-                    logger.warning(f"⚠️ Aucun range disponible pour {pair} - Analyse ignorée")
-
-            # Pause avant le prochain cycle
+            
+            # Session asiatique
+            if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
+                logger.info("🌏 SESSION ASIATIQUE EN COURS")
+                analyze_asian_session()
+            elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
+                logger.info("🏙️ SESSION LONDRES/NY EN COURS")
+                for pair in PAIRS:
+                    if pair not in active_trades:
+                        analyze_pair(pair)
+            else:
+                logger.info("🌆 HORS SESSION - Attente...")
+            
+            # Vérification des stops et take-profits
+            check_tp_sl()
+            
             logger.info("⏰ Pause avant le prochain cycle...")
             time.sleep(60)
-
+        
         except Exception as e:
             logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
+            time.sleep(300)
+
+if __name__ == "__main__":
+    try:
+        logger.info("✨ DÉMARRAGE DU BOT DE TRADING ✨")
+        if SIMULATION_MODE:
+            logger.info("🧪 MODE SIMULATION ACTIVÉ")
+        else:
+            logger.info("🚀 MODE TRADING RÉEL ACTIVÉ")
+        
+        # Initialisation des données asiatiques
+        for pair in PAIRS:
+            if pair not in asian_ranges:
+                logger.info(f"🌏 Récupération des données asiatiques historiques pour {pair}...")
+                historical_range = fetch_historical_asian_range(pair)
+                if historical_range:
+                    asian_ranges[pair] = historical_range
+        
+        # Boucle principale
+        main_loop()
+
+    except Exception as e:
+        logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
+        time.sleep(300)
