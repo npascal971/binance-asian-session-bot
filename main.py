@@ -457,7 +457,7 @@ def check_economic_calendar(pair):
         "time_from": datetime.utcnow().strftime("%Y%m%dT%H%M"),
         "time_to": (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%dT%H%M")
     }
-    
+    logger.debug(f"Events for {pair}: {events}")
     try:
         response = requests.get(ECONOMIC_CALENDAR_API, params=params, timeout=10)
         response.raise_for_status()
@@ -957,8 +957,8 @@ def analyze_pair(pair):
         # 1. Récupération et validation des données
         try:
             candles = get_htf_data(pair, "H4")
-            if not candles or len(candles) < 200:  # Minimum 200 bougies pour EMA200 fiable
-                logger.warning(f"Données insuffisantes pour {pair} (reçu: {len(candles) if candles else 0}/200 bougies)")
+            if not candles or len(candles) < 100:  # Minimum 200 bougies pour EMA200 fiable
+                logger.warning(f"Données insuffisantes pour {pair} (reçu: {len(candles) if candles else 0}/100 bougies)")
                 return
         except Exception as e:
             logger.error(f"ERREUR récupération données {pair}: {str(e)}")
@@ -1573,7 +1573,7 @@ def get_htf_data(pair, timeframe='H4'):
     # Configuration des paramètres
     params = {
         "granularity": timeframe,
-        "count": 100,
+        "count": 200,
         "price": "M"
     }
 
