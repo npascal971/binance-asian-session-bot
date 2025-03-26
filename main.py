@@ -1041,8 +1041,8 @@ def analyze_pair(pair):
         EMA200: {ema200:.5f} ({'↑' if current_price > ema200 else '↓'})
         RSI(14): {rsi:.1f} ({'↑' if rsi < 70 else '↓'})
         MACD: {'↑' if macd_hist > 0 else '↓'} (Hist: {macd_hist:.5f})
-        Volume: {sum(float(c['volume']) for c in htf_data[-5:]}/5 bougies
-        """)
+        Volume: {sum(float(c['volume']) for c in htf_data[-5:])}/5 bougies
+    """)
 
     except Exception as e:
         logger.error(f"❌ ERREUR CRITIQUE {pair}: {str(e)}", exc_info=True)
