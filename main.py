@@ -710,6 +710,94 @@ def update_daily_zones():
     logger.info("📊 Zones quotidiennes mises à jour")
     daily_data_updated = True
 
+def get_candles_safely(pair, granularity, count=None, from_time=None, to_time=None):
+    """Version corrigée de la récupération des candles"""
+    params = {
+        "granularity": granularity,
+        "price": "M"
+    }
+    
+    if count:
+        params["count"] = count
+    if from_time and to_time:
+        params["from"] = from_time.isoformat() + "Z"
+        params["to"] = to_time.isoformat() + "Z"
+    
+    try:
+        # Solution sans timeout dans API.request()
+        start_time = time.time()
+        candles = client.request(
+            instruments.InstrumentsCandles(
+                instrument=pair,
+                params=params
+            )
+        )['candles']
+        
+        # Vérification manuelle du timeout
+        if time.time() - start_time > 10:  # 10 secondes max
+            logger.warning(f"⚠️ Requête {pair} a pris trop de temps")
+            return None
+            
+        return candles
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération candles {pair}: {str(e)}")
+        return None
+        
+def analyze_asian_session_v2():
+    """Version robuste de l'analyse asiatique"""
+    global asian_ranges, asian_range_calculated
+    
+    logger.info("🌏 NOUVELLE ANALYSE ASIATIQUE EN COURS")
+    pairs = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
+    success_count = 0
+    
+    now = datetime.utcnow()
+    start_time = datetime.combine(now.date(), ASIAN_SESSION_START)
+    end_time = min(datetime.combine(now.date(), ASIAN_SESSION_END), now)
+
+    for pair in pairs:
+        try:
+            # Récupération des données sécurisée
+            candles = get_candles_safely(
+                pair=pair,
+                granularity="H1",
+                from_time=start_time,
+                to_time=end_time
+            )
+            
+            if not candles or len(candles) < 3:
+                logger.warning(f"⚠️ Données insuffisantes pour {pair}")
+                continue
+                
+            # Traitement des données
+            valid_candles = [c for c in candles if c['complete']]
+            highs = [float(c['mid']['h']) for c in valid_candles]
+            lows = [float(c['mid']['l']) for c in valid_candles]
+            
+            if not highs or not lows:
+                continue
+                
+            # Enregistrement des résultats
+            asian_ranges[pair] = {
+                'high': max(highs),
+                'low': min(lows),
+                'time': end_time,
+                'candles': len(valid_candles)
+            }
+            success_count += 1
+            logger.info(f"✅ {pair} range: {asian_ranges[pair]['low']:.5f}-{asian_ranges[pair]['high']:.5f}")
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
+            continue
+    
+    # Validation finale
+    if success_count >= len(pairs) // 2:  # Au moins 50% de réussite
+        asian_range_calculated = True
+        logger.info(f"✅ ANALYSE ASIATIQUE COMPLÈTE ({success_count}/{len(pairs)} paires)")
+    else:
+        logger.error("❌ ANALYSE ASIATIQUE INCOMPLÈTE")
+
 
 def get_candles(pair, start_time, end_time=None):
     """
@@ -1548,7 +1636,7 @@ while True:
             logger.info(f"🌏 DÉBUT SESSION ASIATIQUE ({current_time})")
             
             if not asian_range_calculated:
-                analyze_asian_session()  # Utilise la nouvelle fonction robuste
+                analyze_asian_session_v2()  # Utilise la nouvelle fonction robuste
             else:
                 # Vérification périodique du range
                 current_price = get_current_price("EUR_USD")  # Paire de référence
@@ -1577,7 +1665,7 @@ while True:
             # Vérification des ranges asiatiques (au cas où manqués)
             if not asian_range_calculated:
                 logger.warning("⚠️ Aucun range asiatique détecté - Calcul rétroactif")
-                analyze_asian_session()
+                analyze_asian_session_v2()
             
             # Vérification des événements macro
             if check_high_impact_events():
