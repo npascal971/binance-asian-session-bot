@@ -52,51 +52,19 @@ NY_SESSION_END = datetime.strptime("23:00", "%H:%M").time()
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment="practice")
 
 # Fonctions utilitaires
-def get_candles(pair, granularity="M15", count=None, from_time=None, to_time=None):
-    """
-    Récupère les bougies avec des options supplémentaires.
+def get_candles(pair, start_time, end_time=None):
+    """Récupère les bougies pour une plage horaire spécifique."""
+    now = datetime.utcnow()
+    end_date = datetime.combine(now.date(), end_time) if end_time else now
+    start_date = datetime.combine(now.date(), start_time)
+    end_date = min(end_date, now)  # Prevent future dates
     
-    Args:
-        pair (str): La paire de devises (ex: "USD_JPY").
-        granularity (str): Granularité des bougies (ex: "M15").
-        count (int): Nombre de bougies à récupérer (optionnel).
-        from_time (datetime): Heure de début (optionnel).
-        to_time (datetime): Heure de fin (optionnel).
-    
-    Returns:
-        list: Liste des bougies récupérées.
-    """
-    # Limites maximales pour count en fonction de la granularité
-    MAX_COUNT = {
-        "S5": 5000,   # 5 secondes
-        "M1": 5000,   # 1 minute
-        "M5": 5000,   # 5 minutes
-        "M15": 5000,  # 15 minutes
-        "H1": 2000,   # 1 heure
-        "H4": 2000,   # 4 heures
-        "D": 1000,    # Quotidien
-        "W": 500,     # Hebdomadaire
-        "M": 100      # Mensuel
-    }
-
     params = {
-        "granularity": granularity,
+        "granularity": "M15",
+        "from": start_date.isoformat() + "Z",
+        "to": end_date.isoformat() + "Z",
         "price": "M"
     }
-
-    # Validation et ajout de count
-    if count:
-        max_count = MAX_COUNT.get(granularity, 5000)  # Valeur par défaut si granularité inconnue
-        if count > max_count:
-            logger.warning(f"⚠️ Count ajusté pour {pair} ({count} -> {max_count})")
-            count = max_count
-        params["count"] = count
-
-    # Ajout des paramètres de plage horaire
-    if from_time and to_time:
-        params["from"] = from_time.isoformat() + "Z"
-        params["to"] = to_time.isoformat() + "Z"
-
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         candles = client.request(r)['candles']
@@ -104,6 +72,8 @@ def get_candles(pair, granularity="M15", count=None, from_time=None, to_time=Non
     except Exception as e:
         logger.error(f"❌ Erreur récupération candles {pair}: {str(e)}")
         return []
+
+
 
 def calculate_session_range(pairs, session_start, session_end):
     """Calcule les plages de prix pour une session donnée."""
@@ -175,46 +145,24 @@ def is_price_in_valid_range(current_price, range_to_use, buffer=0.0002):
 
 
 
-def calculate_rsi(closes, period=14):
-    """
-    Calcule l'indice de force relative (RSI) à partir des prix de clôture.
+def calculate_rsi(pair, period=14):
+    candles = get_candles(pair, LONDON_SESSION_START, NY_SESSION_END)
+    closes = [float(c['mid']['c']) for c in candles]
     
-    Args:
-        closes (list): Liste des prix de clôture (float).
-        period (int): Période utilisée pour le calcul du RSI (par défaut 14).
-    
-    Returns:
-        float: Valeur du RSI si calculée avec succès, sinon None.
-    """
-    try:
-        # Vérification que nous avons suffisamment de données
-        if len(closes) < period + 1:
-            logger.warning(f"⚠️ Données insuffisantes pour RSI ({len(closes)} points)")
-            return None
-
-        # Calcul des variations quotidiennes
-        deltas = np.diff(closes)
-        gains = np.where(deltas > 0, deltas, 0)  # Gains (positifs)
-        losses = np.where(deltas < 0, -deltas, 0)  # Pertes (positifs)
-
-        # Moyenne des gains et pertes initiaux
-        avg_gain = np.mean(gains[:period])
-        avg_loss = np.mean(losses[:period])
-
-        # Éviter une division par zéro
-        if avg_loss == 0:
-            return 100
-
-        # Calcul du RS (Relative Strength)
-        rs = avg_gain / avg_loss
-
-        # Calcul du RSI
-        rsi = 100 - (100 / (1 + rs))
-        return round(rsi, 2)
-
-    except Exception as e:
-        logger.error(f"❌ Erreur lors du calcul du RSI: {str(e)}")
+    if len(closes) < period + 1:
+        logger.warning(f"⚠️ Données insuffisantes pour RSI ({len(closes)} points)")
         return None
+    
+    deltas = np.diff(closes)
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+    
+    avg_gain = np.mean(gains[:period])
+    avg_loss = np.mean(losses[:period]) or 1e-10
+    
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
 
 
 
