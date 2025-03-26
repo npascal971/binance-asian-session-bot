@@ -96,10 +96,11 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
         logger.warning(f"⚠️ Distance trop petite ({distance_pips:.1f}p) pour {pair}")
         return 0
     
+    # Calcul des unités
     units = risk_amount / distance_pips
     units = round(units, 2)
     
-    # Validation finale
+    # Validation finale des unités minimales
     specs = INSTRUMENT_SPECS.get(pair, {"min_units": 1000})
     if units < specs["min_units"]:
         logger.warning(f"⚠️ Forçage des unités au minimum {specs['min_units']}")
@@ -120,6 +121,15 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     • Risque: ${units * distance_pips:.2f}
     """)
     return units
+
+INSTRUMENT_SPECS = {
+    "EUR_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
+    "GBP_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
+    "USD_JPY": {"pip": 0.01, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
+    "XAU_USD": {"pip": 0.01, "min_units": 1, "precision": 2, "margin_rate": 0.02},
+    "BTC_USD": {"pip": 1, "min_units": 0.001, "precision": 6, "margin_rate": 0.05},
+    "ETH_USD": {"pip": 0.1, "min_units": 0.001, "precision": 6, "margin_rate": 0.05},
+}
 def is_price_in_valid_range(current_price, asian_range, buffer=0.0002):
     """
     Vérifie si le prix actuel est dans la plage valide définie par le range asiatique.
