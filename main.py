@@ -52,27 +52,58 @@ NY_SESSION_END = datetime.strptime("23:00", "%H:%M").time()
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment="practice")
 
 # Fonctions utilitaires
-def get_candles(pair, start_time, end_time=None, granularity="M15"):
-    """Récupère les bougies pour une plage horaire spécifique."""
-    now = datetime.utcnow()
-    start_date = datetime.combine(now.date(), start_time)
-    end_date = datetime.combine(now.date(), end_time) if end_time else now
-    end_date = min(end_date, now)
+def get_candles(pair, granularity="M15", count=None, from_time=None, to_time=None):
+    """
+    Récupère les bougies avec des options supplémentaires.
+    
+    Args:
+        pair (str): La paire de devises (ex: "GBP_USD").
+        granularity (str): Granularité des bougies (ex: "M15").
+        count (int): Nombre de bougies à récupérer (optionnel).
+        from_time (datetime): Heure de début (optionnel).
+        to_time (datetime): Heure de fin (optionnel).
+    
+    Returns:
+        list: Liste des bougies récupérées.
+    """
+    # Limites maximales pour count en fonction de la granularité
+    MAX_COUNT = {
+        "S5": 5000,   # 5 secondes
+        "M1": 5000,   # 1 minute
+        "M5": 5000,   # 5 minutes
+        "M15": 5000,  # 15 minutes
+        "H1": 2000,   # 1 heure
+        "H4": 2000,   # 4 heures
+        "D": 1000,    # Quotidien
+        "W": 500,     # Hebdomadaire
+        "M": 100      # Mensuel
+    }
 
     params = {
         "granularity": granularity,
-        "from": start_date.isoformat() + "Z",
-        "to": end_date.isoformat() + "Z",
-        "price": "M",
+        "price": "M"
     }
+
+    # Validation et ajout de count
+    if count:
+        max_count = MAX_COUNT.get(granularity, 5000)  # Valeur par défaut si granularité inconnue
+        if count > max_count:
+            logger.warning(f"⚠️ Count ajusté pour {pair} ({count} -> {max_count})")
+            count = max_count
+        params["count"] = count
+
+    # Ajout des paramètres de plage horaire
+    if from_time and to_time:
+        params["from"] = from_time.isoformat() + "Z"
+        params["to"] = to_time.isoformat() + "Z"
+
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        candles = client.request(r)["candles"]
-        return [c for c in candles if c["complete"]]
+        candles = client.request(r)['candles']
+        return candles
     except Exception as e:
         logger.error(f"❌ Erreur récupération candles {pair}: {str(e)}")
         return []
-
 def calculate_session_range(pairs, session_start, session_end):
     """Calcule les plages de prix pour une session donnée."""
     ranges = {}
