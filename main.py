@@ -184,49 +184,7 @@ def initialize_european_ranges():
         european_ranges[pair] = {"high": max(highs), "low": min(lows)}
         logger.info(f"🌍 Range européen {pair}: {min(lows):.5f} - {max(highs):.5f}")
 
-def main_loop():
-    while True:
-        try:
-            now = datetime.utcnow()
-            current_time = now.time()
-            logger.info(f"⏳ Heure actuelle: {current_time}")
 
-            # Vérification des trades actifs
-            active_trades = check_active_trades()
-            logger.info(f"📊 Trades actifs: {len(active_trades)}")
-
-            # Limite globale de 1 trade maximum
-            if len(active_trades) >= 1:
-                logger.info("⚠️ Limite de 1 trade atteinte - Attente...")
-                time.sleep(60)
-                continue
-
-            # Détermination de la session active
-            for pair in PAIRS:
-                if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
-                    range_to_use = asian_ranges.get(pair)
-                    logger.info(f"🌏 SESSION ASIATIQUE - Range utilisé pour {pair}: {range_to_use}")
-                elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-                    if not european_ranges:  # Initialisation si nécessaire
-                        initialize_european_ranges()
-                    range_to_use = european_ranges.get(pair)
-                    logger.info(f"🌍 SESSION EUROPÉENNE - Range utilisé pour {pair}: {range_to_use}")
-                else:
-                    logger.info("⚠️ Hors plage horaire définie")
-                    continue
-
-                # Si un range est disponible, procéder à l'analyse
-                if range_to_use:
-                    analyze_pair(pair, range_to_use)
-                else:
-                    logger.warning(f"⚠️ Aucun range disponible pour {pair} - Analyse ignorée")
-
-            # Pause avant le prochain cycle
-            logger.info("⏰ Pause avant le prochain cycle...")
-            time.sleep(60)
-
-        except Exception as e:
-            logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
 
 def analyze_pair(pair, range_to_use):
     """Analyse une paire pour détecter des opportunités de trading."""
@@ -255,46 +213,7 @@ def analyze_pair(pair, range_to_use):
 
     except Exception as e:
         logger.error(f"❌ Erreur analyse {pair}: {str(e)}")
-def main_loop():
-    """Boucle principale du bot."""
-    while True:
-        try:
-            now = datetime.utcnow()
-            current_time = now.time()
-            logger.info(f"⏳ Heure actuelle: {current_time}")
 
-            # Vérification des trades actifs
-            active_trades = check_active_trades()
-            logger.info(f"📊 Trades actifs: {len(active_trades)}")
-
-            # Surveillance des TP/SL pour chaque trade actif
-            for pair in active_trades:
-                check_tp_sl_for_pair(pair)  # Vérifie spécifiquement ce trade
-
-            # Limite globale de 1 trade maximum
-            if len(active_trades) >= 1:
-                logger.info("⚠️ Limite de 1 trade atteinte - Attente...")
-                time.sleep(60)
-                continue
-
-            # Détermination de la session active
-            if ASIAN_SESSION_START <= current_time < ASIAN_SESSION_END:
-                logger.info("🌏 SESSION ASIATIQUE EN COURS")
-                analyze_asian_session()
-            elif LONDON_SESSION_START <= current_time <= NY_SESSION_END:
-                logger.info("🏙️ SESSION LONDRES/NY EN COURS")
-                for pair in PAIRS:
-                    if pair not in active_trades:  # Éviter les doublons sur la même paire
-                        analyze_pair(pair)
-            else:
-                logger.info("🌆 Hors session - Attente...")
-
-            # Pause avant le prochain cycle
-            logger.info("⏰ Pause avant le prochain cycle...")
-            time.sleep(60)
-
-        except Exception as e:
-            logger.error(f"💥 ERREUR GRAVE: {str(e)}", exc_info=True)
 
 def check_tp_sl_for_pair(pair):
     """Vérifie si le TP ou SL est atteint pour une paire spécifique."""
