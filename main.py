@@ -448,6 +448,7 @@ def get_economic_events(country):
 def check_economic_calendar(pair):
     """Récupère le calendrier économique via Alpha Vantage"""
     base_currency = pair[:3]
+    events = []  # Initialize events list
     
     params = {
         "function": "ECONOMIC_CALENDAR",
@@ -457,21 +458,29 @@ def check_economic_calendar(pair):
         "time_from": datetime.utcnow().strftime("%Y%m%dT%H%M"),
         "time_to": (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%dT%H%M")
     }
-    logger.debug(f"Events for {pair}: {events}")
+    
     try:
         response = requests.get(ECONOMIC_CALENDAR_API, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         
-        return [(
+        if 'economicCalendar' not in data:
+            logger.warning(f"No economic calendar data for {base_currency}")
+            return events
+            
+        events = [(
             event['event'],
             datetime.strptime(event['time'], '%Y-%m-%dT%H:%M:%S'),
             event['impact'].upper()
-        ) for event in data.get('economicCalendar', [])]
+        ) for event in data['economicCalendar']]
+        
+        logger.debug(f"📅 Events for {base_currency}: {len(events)} found")
+        return events
         
     except Exception as e:
-        logger.warning(f"⚠️ Erreur calendrier Alpha Vantage: {str(e)}")
-        return []
+        logger.error(f"⚠️ Economic calendar error for {base_currency}: {str(e)}")
+        return events  # Return empty list on error
+        
 def get_historical_prices(instrument, periods):
     """
     Récupère les prix historiques selon l'instrument
@@ -1672,16 +1681,29 @@ def log_session_status():
 def check_high_impact_events():
     """Vérifie les événements macro à haut impact"""
     events = []
+    
     for pair in PAIRS:
         currency = pair[:3]
-        events += check_economic_calendar(currency)
+        try:
+            currency_events = check_economic_calendar(currency)
+            if currency_events:  # Only extend if we got events
+                events.extend(currency_events)
+        except Exception as e:
+            logger.error(f"Error checking events for {currency}: {str(e)}")
+            continue
     
-    # Filtre les événements à haut impact dans les 2h
+    # Filter high impact events within next 2 hours
+    now = datetime.utcnow()
     critical_events = [
         e for e in events 
-        if e["impact"] == "HIGH" 
-        and e["time"] - datetime.utcnow() < timedelta(hours=2)
+        if e[2] == "HIGH" 
+        and (e[1] - now) < timedelta(hours=2)
     ]
+    
+    if critical_events:
+        logger.warning(f"⚠️ Critical events detected: {len(critical_events)}")
+        for event in critical_events:
+            logger.warning(f"• {event[0]} at {event[1]} ({event[2]} impact)")
     
     return len(critical_events) > 0
 
