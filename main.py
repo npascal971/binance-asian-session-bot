@@ -588,36 +588,30 @@ def check_confluence(pair, direction):
     return score
 
 def calculate_rsi(prices, period=14):
-    """Version corrigée du calcul RSI"""
+    """RSI corrigé avec numpy"""
     try:
         if len(prices) < period + 1:
             return None
             
-        # Conversion et nettoyage des prix
-        closes = []
-        for p in prices:
-            try:
-                closes.append(float(p))
-            except:
-                continue
-                
-        if len(closes) < period + 1:
+        # Conversion en array numpy
+        np_prices = np.array(prices, dtype=np.float64)
+        if np.isnan(np_prices).any():
             return None
             
-        deltas = np.diff(closes)
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
+        deltas = np.diff(np_prices)
+        gains = deltas.clip(min=0)
+        losses = -deltas.clip(max=0)
         
+        # Moyennes mobiles
         avg_gain = np.mean(gains[:period])
         avg_loss = np.mean(losses[:period]) or 1e-10  # Évite division par 0
         
         rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
+        return float(100 - (100 / (1 + rs)))
         
     except Exception as e:
-        logger.error(f"Erreur RSI: {str(e)}")
+        logger.error(f"Erreur calcul RSI: {str(e)}")
         return None
-
 
 
 def check_active_trades():
@@ -963,72 +957,95 @@ def identify_order_blocks(candles, min_ratio=2):
     return blocks
     
 def analyze_pair(pair):
-    """Version optimisée avec gestion des erreurs des indicateurs et logs améliorés"""
+    """Version finale intégrant toutes les analyses avec gestion robuste des erreurs"""
     try:
-        # 1. Vérification initiale des données
-        htf_data = get_htf_data(pair, "H4")  # Timeframe explicite
-        if not htf_data or len(htf_data) < 50:  # Minimum 50 bougies
-            logger.warning(f"⚠️ Données insuffisantes pour {pair} (reçu: {len(htf_data) if htf_data else 0} bougies)")
+        # 1. Récupération et validation des données
+        candles = get_htf_data(pair, "H4")
+        if not candles or len(candles) < 100:
+            logger.warning(f"Données insuffisantes pour {pair} (reçu: {len(candles) if candles else 0} bougies)")
             return
 
-        # 2. Calcul robuste des indicateurs avec vérification
-        try:
-            closes = [float(c['mid']['c']) for c in htf_data[-200:]]  # 200 dernières bouches
-            ema200 = calculate_ema(closes, 200)[-1] if len(closes) >= 200 else None
-            rsi = calculate_rsi(closes, 14)[-1] if len(closes) >= 14 else None
-            macd_line, signal_line = calculate_macd(closes)
-            macd_hist = macd_line[-1] - signal_line[-1] if macd_line and signal_line else None
-        except Exception as e:
-            logger.error(f"❌ Erreur calcul indicateurs {pair}: {str(e)}")
+        # 2. Nettoyage des prix
+        closes = []
+        volumes = []
+        for c in candles:
+            try:
+                closes.append(float(c['mid']['c']))
+                volumes.append(float(c.get('volume', 0)))
+            except (KeyError, TypeError, ValueError) as e:
+                logger.debug(f"Erreur traitement bougie: {str(e)}")
+                continue
+
+        if len(closes) < 100:
+            logger.warning(f"Données prix insuffisantes pour {pair} (reçu: {len(closes)} valeurs valides)")
             return
 
-        # 3. Vérification complète des données
-        if None in [ema200, rsi, macd_hist]:
-            logger.warning(f"⚠️ Données techniques incomplètes pour {pair} (EMA200: {ema200}, RSI: {rsi}, MACD: {macd_hist})")
+        # 3. Calcul des indicateurs techniques
+        current_price = closes[-1]
+        ema200 = calculate_ema(closes, 200)
+        rsi = calculate_rsi(closes[-15:])  # Besoin seulement des 15 derniers pour RSI14
+        macd_line, signal_line = calculate_macd(closes)
+        
+        if None in [ema200, rsi, macd_line, signal_line]:
+            logger.warning(f"Calcul indicateur échoué pour {pair}")
             return
+            
+        macd_hist = macd_line - signal_line
 
-        # 4. Détection de tendance améliorée
-        current_price = get_current_price(pair)
+        # 4. Analyse de tendance
         trend = 'UP' if current_price > ema200 else 'DOWN' if current_price < ema200 else 'NEUTRAL'
         
-        # 5. Filtres de confluence stricts
+        # 5. Vérification de la confluence technique
         if trend == 'UP' and not (rsi < 70 and macd_hist > 0):
-            logger.warning(f"⚠️ {pair}: Confluence haussière insuffisante (RSI: {rsi:.1f}, MACD: {'↑' if macd_hist > 0 else '↓'})")
+            logger.warning(f"Confluence haussière insuffisante (RSI: {rsi:.1f}, MACD: {'↑' if macd_hist > 0 else '↓'})")
             return
         elif trend == 'DOWN' and not (rsi > 30 and macd_hist < 0):
-            logger.warning(f"⚠️ {pair}: Confluence baissière insuffisante (RSI: {rsi:.1f}, MACD: {'↑' if macd_hist > 0 else '↓'})")
+            logger.warning(f"Confluence baissière insuffisante (RSI: {rsi:.1f}, MACD: {'↑' if macd_hist > 0 else '↓'})")
             return
 
-        # 6. Stratégie spécifique selon le timeframe
-        if len(closes) >= 100:  # Analyse valide seulement avec suffisamment de données
-            # [Insérer ici la logique de trading existante...]
-            pass
+        # 6. Analyse avancée (range, structures)
+        analysis = enhanced_analyze_pair(pair)
+        if not analysis:
+            return
 
-        # 7. Journalisation structurée
-        logger.info(f"""
-        📈 ANALYSE COMPLETE {pair}
-        Prix: {current_price:.5f} | Trend: {trend}
-        EMA200: {ema200:.5f} ({'↑' if current_price > ema200 else '↓'})
-        RSI(14): {rsi:.1f} ({'↑' if rsi < 70 else '↓'})
-        MACD: {'↑' if macd_hist > 0 else '↓'} (Hist: {macd_hist:.5f})
-        Volume: {sum(float(c['volume']) for c in htf_data[-5:])}/5 bougies
-    """)
+        # 7. Contexte de prix et range asiatique
+        asian_range = asian_ranges.get(pair)
+        if not asian_range:
+            logger.warning(f"Aucun range asiatique trouvé pour {pair}")
+            return
 
-    except Exception as e:
-        logger.error(f"❌ ERREUR CRITIQUE {pair}: {str(e)}", exc_info=True)
+        # 8. Détection des zones techniques (FVG/OB)
+        fvgs = identify_fvg(candles)
+        obs = identify_order_blocks(candles)
+        
+        in_fvg, fvg_zone = is_price_in_fvg(current_price, fvgs)
+        near_ob, ob_zone = is_price_near_ob(current_price, obs, trend)
+        
+        if not (in_fvg and near_ob):
+            logger.debug(f"Aucune zone valide (FVG: {in_fvg}, OB: {near_ob})")
+            return
 
-        # 8. Vérification ratio risque/récompense
+        # 9. Calcul des niveaux de trading
+        direction = 'BUY' if trend == 'UP' else 'SELL'
+        stop_loss = calculate_stop(fvg_zone, ob_zone, asian_range, direction)
+        take_profit = calculate_tp(current_price, asian_range, direction, daily_zones.get(pair, {}))
+        
+        # Ajustement pour les structures de retournement
+        if analysis['reversal_structure']:
+            take_profit = analysis['reversal_structure'].get('target', take_profit)
+
+        # 10. Vérification ratio risque/récompense
         rr_ratio = abs(take_profit-current_price)/abs(current_price-stop_loss)
         if rr_ratio < RISK_REWARD_RATIO:
-            logger.warning(f"⚠️ Ratio R/R trop faible ({rr_ratio:.1f} < {RISK_REWARD_RATIO})")
+            logger.warning(f"Ratio R/R trop faible ({rr_ratio:.1f} < {RISK_REWARD_RATIO})")
             return
 
-        # 9. Filtre macroéconomique
+        # 11. Filtre macroéconomique
         if not macro_filter(pair, direction):
-            logger.warning(f"⚠️ {pair}: Contexte macro défavorable")
+            logger.warning(f"Contexte macro défavorable pour {pair}")
             return
 
-        # 10. Journalisation détaillée
+        # 12. Journalisation détaillée
         logger.info(f"""
         🎯 SIGNAL CONFIRMÉ {pair} 🎯
         Direction: {'ACHAT' if direction == 'BUY' else 'VENTE'}
@@ -1040,15 +1057,16 @@ def analyze_pair(pair):
         Stop Loss: {stop_loss:.5f} (Risque: {abs(current_price-stop_loss):.1f}pips)
         Take Profit: {take_profit:.5f} (Ratio R/R: {rr_ratio:.1f})
         Indicateurs:
-        - EMA200: {ema_signal} ({tech_conf.get('ema200', {}).get('value', 0):.5f})
-        - RSI: {rsi_signal} ({tech_conf.get('rsi', {}).get('value', 0):.1f})
-        - MACD: {macd_signal} (Hist: {tech_conf.get('macd', {}).get('histogram', 0):.5f})
+        - EMA200: {ema200:.5f} ({'↑' if current_price > ema200 else '↓'})
+        - RSI(14): {rsi:.1f} ({'↑' if rsi < 70 else '↓'})
+        - MACD: {'↑' if macd_hist > 0 else '↓'} (Hist: {macd_hist:.5f})
+        Volume: {sum(volumes[-5:]):.0f}/5 bougies
         Zones:
         - FVG: {fvg_zone['type']} {fvg_zone.get('levels', [])}
         - OB: {'Haussier' if near_ob == 'BUY' else 'Baissier'} {ob_zone.get('levels', [])}
         """)
 
-        # 11. Exécution du trade
+        # 13. Exécution du trade
         place_trade(
             pair=pair,
             direction=direction.lower(),
@@ -1058,7 +1076,7 @@ def analyze_pair(pair):
         )
 
     except Exception as e:
-        logger.error(f"❌ ERREUR CRITIQUE {pair}: {str(e)}", exc_info=True)
+        logger.error(f"ERREUR CRITIQUE {pair}: {str(e)}", exc_info=True)
 
 def get_buffer_size(pair):
     """Retourne le buffer adapté à chaque instrument"""
@@ -1326,58 +1344,60 @@ def get_technical_confirmations(pair):
         logger.error(f"❌ Erreur confirmations techniques {pair}: {str(e)}")
         return {}
 
+def get_clean_prices(candles):
+    """Extrait et nettoie les prix de clôture"""
+    prices = []
+    for candle in candles:
+        try:
+            if 'mid' in candle and 'c' in candle['mid']:
+                prices.append(float(candle['mid']['c']))
+        except (KeyError, TypeError, ValueError) as e:
+            logger.debug(f"Erreur traitement bougie: {str(e)}")
+            continue
+    return prices
+
 def calculate_ema(prices, period):
-    """Version robuste du calcul EMA"""
+    """EMA robuste avec gestion d'erreurs complète"""
     try:
         if not prices or len(prices) < period:
-            logger.warning(f"Données insuffisantes pour EMA{period} (min {period} prix requis)")
-            return None
-        
-        # Conversion sécurisée en float
-        float_prices = []
-        for p in prices:
-            try:
-                float_prices.append(float(p))
-            except (TypeError, ValueError):
-                continue
-                
-        if len(float_prices) < period:
             return None
             
-        return pd.Series(float_prices).ewm(span=period, adjust=False).mean().iloc[-1]
+        # Conversion explicite en Series pandas
+        price_series = pd.Series(prices, dtype='float64')
+        if price_series.isnull().any():
+            logger.warning("Valeurs nulles dans les prix")
+            return None
+            
+        # Calcul EMA et retourne la dernière valeur
+        return float(price_series.ewm(span=period, adjust=False).mean().iloc[-1])
         
     except Exception as e:
-        logger.error(f"Erreur EMA {period}: {str(e)}")
+        logger.error(f"Erreur calcul EMA{period}: {str(e)}")
         return None
 
-
 def calculate_macd(prices, fast=12, slow=26, signal=9):
-    """Version optimisée du MACD"""
+    """MACD sécurisé"""
     try:
-        if len(prices) < slow + signal:
+        min_length = slow + signal
+        if len(prices) < min_length:
             return None, None
             
-        # Conversion sécurisée
-        clean_prices = []
-        for p in prices:
-            try:
-                clean_prices.append(float(p))
-            except:
-                continue
-                
-        if len(clean_prices) < slow + signal:
+        # Nettoyage des prix
+        clean_prices = [float(p) for p in prices if isinstance(p, (int, float))]
+        if len(clean_prices) < min_length:
             return None, None
             
+        # Calcul avec pandas
         series = pd.Series(clean_prices)
         ema_fast = series.ewm(span=fast, adjust=False).mean()
         ema_slow = series.ewm(span=slow, adjust=False).mean()
         macd_line = ema_fast - ema_slow
         signal_line = macd_line.ewm(span=signal, adjust=False).mean()
         
-        return macd_line.iloc[-1], signal_line.iloc[-1]
+        return float(macd_line.iloc[-1]), float(signal_line.iloc[-1])
         
     except Exception as e:
-        logger.error(f"Erreur MACD: {str(e)}")
+        logger.error(f"Erreur calcul MACD: {str(e)}")
         return None, None
         
 def enhanced_analyze_pair(pair):
