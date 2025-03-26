@@ -8,6 +8,7 @@ import numpy as np
 from functools import lru_cache, wraps
 import oandapyV20
 from oandapyV20.endpoints import instruments, accounts, trades, orders
+from oandapyV20.endpoints import pricing
 
 # Configuration des logs
 logging.basicConfig(
