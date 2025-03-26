@@ -242,6 +242,21 @@ def analyze_pair(pair):
     elif rsi > 70 and macd_signal == "SELL":
         place_trade(pair, "sell", current_price, asian_range["high"], asian_range["low"])
 
+def get_account_balance():
+    """
+    Récupère le solde du compte depuis l'API OANDA.
+    Returns:
+        float: Le solde actuel du compte.
+    """
+    try:
+        r = accounts.AccountSummary(OANDA_ACCOUNT_ID)
+        response = client.request(r)
+        balance = float(response["account"]["balance"])
+        logger.info(f"💼 Solde du compte récupéré: ${balance:.2f}")
+        return balance
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération solde du compte: {str(e)}")
+        return 0  # Retourne 0 en cas d'erreur pour éviter des plantages
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     """Place un trade avec trailing SL/TP."""
