@@ -332,7 +332,7 @@ def close_trade(pair):
     except Exception as e:
         logger.error(f"❌ Erreur fermeture trade {pair}: {str(e)}")
 
-iif __name__ == "__main__":
+if __name__ == "__main__":
     try:
         logger.info("✨ DÉMARRAGE DU BOT DE TRADING ✨")
         if SIMULATION_MODE:
