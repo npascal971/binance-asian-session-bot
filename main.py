@@ -101,25 +101,18 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     units = round(units, 2)
     
     # Validation finale des unités minimales
-    specs = INSTRUMENT_SPECS.get(pair, {"min_units": 1000})
+    specs = get_instrument_details(pair)
+    if "min_units" not in specs:
+        specs["min_units"] = 1000  # Valeur par défaut
     if units < specs["min_units"]:
         logger.warning(f"⚠️ Forçage des unités au minimum {specs['min_units']}")
         units = specs["min_units"]
     
-    # Vérification du solde
-    margin_required = units * entry_price * get_instrument_details(pair)["margin_rate"]
+    # Vérification du solde avec margin_rate
+    margin_rate = specs.get("margin_rate", 0.02)  # Valeur par défaut si absente
+    margin_required = units * entry_price * margin_rate
     if margin_required > account_balance:
         logger.error(f"❌ Solde insuffisant pour {pair} (Requis: ${margin_required:.2f}, Disponible: ${account_balance:.2f})")
-        return 0
-    
-    # Journalisation supplémentaire en cas d'erreur
-    if units <= 0:
-        logger.warning(f"⚠️ Aucune unité calculée pour {pair} - Vérifiez:")
-        logger.warning(f"• Solde du compte: ${account_balance:.2f}")
-        logger.warning(f"• Prix d'entrée: {entry_price:.5f}")
-        logger.warning(f"• Stop-loss: {stop_loss:.5f}")
-        logger.warning(f"• Distance en pips: {distance_pips:.1f}")
-        logger.warning(f"• Montant de risque: ${risk_amount:.2f}")
         return 0
     
     logger.info(f"""
@@ -168,17 +161,17 @@ def is_price_in_valid_range(current_price, asian_range, buffer=0.0002):
         return False
 
 def get_instrument_details(pair):
-    """Retourne les spécifications de l'instrument."""
+    """Retourne les spécifications de l'instrument avec des valeurs par défaut."""
     specs = {
-        "EUR_USD": {"pip": 0.0001, "pip_location": -4},
-        "GBP_USD": {"pip": 0.0001, "pip_location": -4},
-        "USD_JPY": {"pip": 0.01, "pip_location": -2},
-        "XAU_USD": {"pip": 0.01, "pip_location": -2},
-        "BTC_USD": {"pip": 1, "pip_location": 0},
-        "ETH_USD": {"pip": 0.1, "pip_location": -1},
+        "EUR_USD": {"pip": 0.0001, "pip_location": -4, "margin_rate": 0.02},
+        "GBP_USD": {"pip": 0.0001, "pip_location": -4, "margin_rate": 0.02},
+        "USD_JPY": {"pip": 0.01, "pip_location": -2, "margin_rate": 0.02},
+        "XAU_USD": {"pip": 0.01, "pip_location": -2, "margin_rate": 0.02},
+        "BTC_USD": {"pip": 1, "pip_location": 0, "margin_rate": 0.05},
+        "ETH_USD": {"pip": 0.1, "pip_location": -1, "margin_rate": 0.05},
     }
-    return specs.get(pair, {"pip": 0.0001, "pip_location": -4})
-
+    # Valeurs par défaut en cas de paire non définie
+    return specs.get(pair, {"pip": 0.0001, "pip_location": -4, "margin_rate": 0.02})
 
 def analyze_asian_session():
     """Analyse la session asiatique pour calculer le range."""
