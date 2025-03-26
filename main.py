@@ -11,6 +11,7 @@ import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.trades as trades
 import oandapyV20.endpoints.pricing as pricing
+from oandapyV20.endpoints import accounts
 import requests
 import pytz
 
@@ -89,14 +90,16 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     pip_value = 10 ** pip_location
     distance_pips = abs(entry_price - stop_loss) / pip_value
     
-    if distance_pips == 0:
-        logger.error(f"❌ Distance en pips invalide pour {pair}")
+    # Vérification de la distance minimale
+    MIN_DISTANCE = 5  # Minimum de 5 pips
+    if distance_pips < MIN_DISTANCE:
+        logger.warning(f"⚠️ Distance trop petite ({distance_pips:.1f}p) pour {pair}")
         return 0
     
     units = risk_amount / distance_pips
     units = round(units, 2)
     
-    # Vérification finale
+    # Validation finale
     specs = INSTRUMENT_SPECS.get(pair, {"min_units": 1000})
     if units < specs["min_units"]:
         logger.warning(f"⚠️ Forçage des unités au minimum {specs['min_units']}")
@@ -117,7 +120,6 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     • Risque: ${units * distance_pips:.2f}
     """)
     return units
-
 def is_price_in_valid_range(current_price, asian_range, buffer=0.0002):
     """
     Vérifie si le prix actuel est dans la plage valide définie par le range asiatique.
@@ -259,32 +261,50 @@ def get_account_balance():
         return 0  # Retourne 0 en cas d'erreur pour éviter des plantages
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
-    """Place un trade avec trailing SL/TP."""
+    """Place un trade avec vérifications supplémentaires."""
     account_balance = get_account_balance()
+    if account_balance <= 0:
+        logger.error("🚨 Solde insuffisant (< $0)")
+        return None
+
     units = calculate_position_size(pair, account_balance, entry_price, stop_loss)
     if units <= 0:
         logger.warning(f"❌ Impossible de placer le trade {pair} - Taille de position invalide")
-        return
-    
-    trade_info = {
-        "pair": pair,
-        "direction": direction,
-        "entry": entry_price,
-        "stop": stop_loss,
-        "tp": take_profit,
-        "units": units,
-    }
-    
-    active_trades[pair] = trade_info
+        return None
+
+    # Journalisation avant exécution
     logger.info(f"""
-    🚀 NOUVEAU TRADE {direction.upper()} {pair}
-    • Entry: {entry_price:.5f}
-    • SL: {stop_loss:.5f}
+    🚀 NOUVEAU TRADE {'ACHAT' if direction == 'buy' else 'VENTE'} 🚀
+    • Paire: {pair}
+    • Direction: {direction.upper()}
+    • Entrée: {entry_price:.5f}
+    • Stop: {stop_loss:.5f}
     • TP: {take_profit:.5f}
     • Unités: {units}
     • Risque: ${units * abs(entry_price - stop_loss):.2f}
     """)
 
+    # Mode simulation ou réel
+    if SIMULATION_MODE:
+        logger.info("🧪 Mode simulation - Trade non envoyé")
+        return "SIMULATION"
+
+    try:
+        order_data = {
+            "order": {
+                "instrument": pair,
+                "units": str(units) if direction == "buy" else str(-units),
+                "type": "MARKET",
+                "positionFill": "DEFAULT",
+            }
+        }
+        r = orders.OrderCreate(OANDA_ACCOUNT_ID, data=order_data)
+        response = client.request(r)
+        logger.info(f"✅ Trade placé: {response}")
+        return response
+    except Exception as e:
+        logger.error(f"❌ Erreur placement trade {pair}: {str(e)}")
+        return None
 def detect_breakout(pair, current_price, asian_range):
     """
     Détecte un breakout au-dessus ou en dessous du range asiatique.
