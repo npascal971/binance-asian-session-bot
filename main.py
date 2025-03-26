@@ -88,8 +88,35 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), MAX_RISK_USD)
     pip_value = 10 ** pip_location
     distance_pips = abs(entry_price - stop_loss) / pip_value
+    
+    if distance_pips == 0:
+        logger.error(f"❌ Distance en pips invalide pour {pair}")
+        return 0
+    
     units = risk_amount / distance_pips
-    return round(units, 2)
+    units = round(units, 2)
+    
+    # Vérification finale
+    specs = INSTRUMENT_SPECS.get(pair, {"min_units": 1000})
+    if units < specs["min_units"]:
+        logger.warning(f"⚠️ Forçage des unités au minimum {specs['min_units']}")
+        units = specs["min_units"]
+    
+    # Vérification du solde
+    margin_required = units * entry_price * get_instrument_details(pair)["margin_rate"]
+    if margin_required > account_balance:
+        logger.error(f"❌ Solde insuffisant pour {pair} (Requis: ${margin_required:.2f}, Disponible: ${account_balance:.2f})")
+        return 0
+    
+    logger.info(f"""
+    📊 Position Validée {pair}:
+    • Entrée: {entry_price:.5f}
+    • Stop: {stop_loss:.5f}
+    • Distance: {distance_pips:.1f} pips
+    • Unités: {units}
+    • Risque: ${units * distance_pips:.2f}
+    """)
+    return units
 
 def is_price_in_valid_range(current_price, asian_range, buffer=0.0002):
     """
@@ -187,18 +214,34 @@ def analyze_pair(pair):
         return
     
     current_price = get_current_price(pair)
+    
+    # Vérification de breakout
+    breakout_direction = detect_breakout(pair, current_price, asian_range)
+    if breakout_direction:
+        logger.info(f"🔥 Breakout détecté pour {pair} - Direction: {breakout_direction}")
+        if breakout_direction == "UP":
+            place_trade(pair, "buy", current_price, current_price, current_price + 0.002)
+        elif breakout_direction == "DOWN":
+            place_trade(pair, "sell", current_price, current_price, current_price - 0.002)
+        return
+    
+    # Analyse standard si pas de breakout
     if not is_price_in_valid_range(current_price, asian_range):
         logger.info(f"❌ Prix hors range valide pour {pair}")
         return
     
     rsi = calculate_rsi(pair)
     macd_signal = calculate_macd(pair)
-    logger.info(f"📊 Analyse {pair} - RSI: {rsi:.2f}, MACD: {macd_signal}")
+    
+    if rsi is None or macd_signal is None:
+        logger.warning(f"⚠️ Données insuffisantes pour {pair}")
+        return
     
     if rsi < 30 and macd_signal == "BUY":
         place_trade(pair, "buy", current_price, asian_range["low"], asian_range["high"])
     elif rsi > 70 and macd_signal == "SELL":
         place_trade(pair, "sell", current_price, asian_range["high"], asian_range["low"])
+
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     """Place un trade avec trailing SL/TP."""
@@ -207,6 +250,7 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     if units <= 0:
         logger.warning(f"❌ Impossible de placer le trade {pair} - Taille de position invalide")
         return
+    
     trade_info = {
         "pair": pair,
         "direction": direction,
@@ -215,9 +259,37 @@ def place_trade(pair, direction, entry_price, stop_loss, take_profit):
         "tp": take_profit,
         "units": units,
     }
+    
     active_trades[pair] = trade_info
-    logger.info(f"🚀 NOUVEAU TRADE {direction.upper()} {pair} - Entry: {entry_price:.5f}, SL: {stop_loss:.5f}, TP: {take_profit:.5f}")
+    logger.info(f"""
+    🚀 NOUVEAU TRADE {direction.upper()} {pair}
+    • Entry: {entry_price:.5f}
+    • SL: {stop_loss:.5f}
+    • TP: {take_profit:.5f}
+    • Unités: {units}
+    • Risque: ${units * abs(entry_price - stop_loss):.2f}
+    """)
 
+def detect_breakout(pair, current_price, asian_range):
+    """
+    Détecte un breakout au-dessus ou en dessous du range asiatique.
+    Retourne 'UP' pour un breakout haussier, 'DOWN' pour baissier, ou None sinon.
+    """
+    if not asian_range:
+        logger.warning(f"⚠️ Aucun range asiatique disponible pour {pair}")
+        return None
+    
+    buffer = 0.0002  # Marge pour confirmer le breakout
+    upper_bound = asian_range["high"] + buffer
+    lower_bound = asian_range["low"] - buffer
+    
+    if current_price > upper_bound:
+        logger.info(f"🚀 Breakout HAUT détecté pour {pair} (Prix: {current_price:.5f} > {upper_bound:.5f})")
+        return "UP"
+    elif current_price < lower_bound:
+        logger.info(f"📉 Breakout BAS détecté pour {pair} (Prix: {current_price:.5f} < {lower_bound:.5f})")
+        return "DOWN"
+    return None
 
 def check_tp_sl():
     """Vérifie si TP/SL est atteint pour les trades actifs."""
