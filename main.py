@@ -112,6 +112,16 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
         logger.error(f"❌ Solde insuffisant pour {pair} (Requis: ${margin_required:.2f}, Disponible: ${account_balance:.2f})")
         return 0
     
+    # Journalisation supplémentaire en cas d'erreur
+    if units <= 0:
+        logger.warning(f"⚠️ Aucune unité calculée pour {pair} - Vérifiez:")
+        logger.warning(f"• Solde du compte: ${account_balance:.2f}")
+        logger.warning(f"• Prix d'entrée: {entry_price:.5f}")
+        logger.warning(f"• Stop-loss: {stop_loss:.5f}")
+        logger.warning(f"• Distance en pips: {distance_pips:.1f}")
+        logger.warning(f"• Montant de risque: ${risk_amount:.2f}")
+        return 0
+    
     logger.info(f"""
     📊 Position Validée {pair}:
     • Entrée: {entry_price:.5f}
@@ -121,7 +131,6 @@ def calculate_position_size(pair, account_balance, entry_price, stop_loss):
     • Risque: ${units * distance_pips:.2f}
     """)
     return units
-
 INSTRUMENT_SPECS = {
     "EUR_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
     "GBP_USD": {"pip": 0.0001, "min_units": 1000, "precision": 0, "margin_rate": 0.02},
@@ -232,9 +241,9 @@ def analyze_pair(pair):
     if breakout_direction:
         logger.info(f"🔥 Breakout détecté pour {pair} - Direction: {breakout_direction}")
         if breakout_direction == "UP":
-            place_trade(pair, "buy", current_price, current_price, current_price + 0.002)
+            place_trade(pair, "buy", current_price, current_price - 0.002, current_price + 0.005)
         elif breakout_direction == "DOWN":
-            place_trade(pair, "sell", current_price, current_price, current_price - 0.002)
+            place_trade(pair, "sell", current_price, current_price + 0.002, current_price - 0.005)
         return
     
     # Analyse standard si pas de breakout
@@ -253,7 +262,7 @@ def analyze_pair(pair):
         place_trade(pair, "buy", current_price, asian_range["low"], asian_range["high"])
     elif rsi > 70 and macd_signal == "SELL":
         place_trade(pair, "sell", current_price, asian_range["high"], asian_range["low"])
-
+        
 def get_account_balance():
     """
     Récupère le solde du compte depuis l'API OANDA.
