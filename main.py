@@ -2,6 +2,7 @@ import os
 import time
 import logging
 from datetime import time as dtime
+from datetime import datetime, time as dtime
 from email.message import EmailMessage
 from dotenv import load_dotenv
 import numpy as np
