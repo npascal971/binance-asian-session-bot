@@ -151,22 +151,25 @@ def analyze_pair(pair):
     if check_high_impact_events():
         logger.warning("⚠️ Événement macro majeur - Pause de 5 min")
         return
+    
     asian_range = asian_ranges.get(pair)
     if not asian_range:
-        logger.warning(f"⚠️ Aucun range asiatique disponible pour {pair}")
+        logger.warning(f"⚠️ Aucun range asiatique disponible pour {pair}. Nouvelle tentative programmée.")
         return
+    
     current_price = get_current_price(pair)
     if not is_price_in_valid_range(current_price, asian_range):
         logger.info(f"❌ Prix hors range valide pour {pair}")
         return
+    
     rsi = calculate_rsi(pair)
     macd_signal = calculate_macd(pair)
     logger.info(f"📊 Analyse {pair} - RSI: {rsi:.2f}, MACD: {macd_signal}")
+    
     if rsi < 30 and macd_signal == "BUY":
         place_trade(pair, "buy", current_price, asian_range["low"], asian_range["high"])
     elif rsi > 70 and macd_signal == "SELL":
         place_trade(pair, "sell", current_price, asian_range["high"], asian_range["low"])
-
 
 def place_trade(pair, direction, entry_price, stop_loss, take_profit):
     """Place un trade avec trailing SL/TP."""
@@ -238,6 +241,30 @@ def calculate_macd(pair):
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     return "BUY" if macd_line.iloc[-1] > signal_line.iloc[-1] else "SELL"
 
+def fetch_historical_asian_range(pair):
+    """Récupère le range asiatique historique pour une paire."""
+    now = datetime.utcnow()
+    today = now.date()
+    start_time = datetime.combine(today, ASIAN_SESSION_START)
+    end_time = datetime.combine(today, ASIAN_SESSION_END)
+    
+    # Si la session asiatique est aujourd'hui mais déjà terminée
+    if now > end_time:
+        try:
+            candles = get_candles(pair, ASIAN_SESSION_START, ASIAN_SESSION_END)
+            if not candles:
+                logger.warning(f"⚠️ Aucune donnée historique pour {pair}")
+                return None
+            highs = [float(c['mid']['h']) for c in candles if 'mid' in c]
+            lows = [float(c['mid']['l']) for c in candles if 'mid' in c]
+            if not highs or not lows:
+                logger.warning(f"⚠️ Données insuffisantes pour {pair}")
+                return None
+            return {"high": max(highs), "low": min(lows)}
+        except Exception as e:
+            logger.error(f"❌ Erreur récupération range asiatique historique {pair}: {str(e)}")
+            return None
+    return None
 
 def main_loop():
     """Boucle principale du bot."""
@@ -257,4 +284,16 @@ def main_loop():
 
 if __name__ == "__main__":
     logger.info("✨ DÉMARRAGE DU BOT DE TRADING ✨")
+    
+    # Initialisation des données asiatiques
+    for pair in PAIRS:
+        if pair not in asian_ranges:
+            logger.info(f"🔍 Récupération des données asiatiques historiques pour {pair}...")
+            historical_range = fetch_historical_asian_range(pair)
+            if historical_range:
+                asian_ranges[pair] = historical_range
+                logger.info(f"📊 Range asiatique historique {pair}: {historical_range['low']:.5f} - {historical_range['high']:.5f}")
+            else:
+                logger.warning(f"⚠️ Échec récupération range asiatique pour {pair}")
+    
     main_loop()
