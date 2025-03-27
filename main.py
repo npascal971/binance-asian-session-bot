@@ -37,7 +37,7 @@ CRYPTO_PAIRS = ["BTC_USD", "ETH_USD"]
 
 # Configuration logs
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
