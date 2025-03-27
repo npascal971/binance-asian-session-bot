@@ -474,13 +474,14 @@ if __name__ == "__main__":
                 check_active_trades()
                 update_closed_trades()
                 time.sleep(5)
-        else:while True:
-    now = datetime.utcnow().time()
-    if SESSION_START <= now <= SESSION_END:
-        logger.info("⏱ Session active - Analyse des paires...")
+        else:
+            while True:
+        now = datetime.utcnow().time()
+        if SESSION_START <= now <= SESSION_END:
+            logger.info("⏱ Session active - Analyse des paires...")
         
-        # Vérifier les trades ouverts
-        check_active_trades()
+            # Vérifier les trades ouverts
+            check_active_trades()
 
         # Mettre à jour le SL pour chaque paire active
         for pair in active_trades:
