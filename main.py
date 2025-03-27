@@ -493,10 +493,10 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
 
     # Décision finale
     if bullish_signals >= bearish_signals and any([signals["breakout"], signals["price_action"], signals["zone"]]):
-        logger.info(f"✅ Signal ACHAT confirmé pour {pair} - Raisons: {', '.join(reasons)}")
+        logger.info(f"✅ Signal ACHAT confirmé pour {pair}")
         return "buy"
     elif bearish_signals > bullish_signals and any([signals["breakout"], signals["price_action"], signals["zone"]]):
-        logger.info(f"✅ Signal VENTE confirmé pour {pair} - Raisons: {', '.join(reasons)}")
+        logger.info(f"✅ Signal VENTE confirmé pour {pair}")
         return "sell"
     
     logger.info(f"❌ Signaux contradictoires pour {pair} - Raisons: {', '.join(reasons)}")
@@ -791,23 +791,26 @@ def analyze_pair(pair):
         logger.debug(f"Prices - Entry:{entry_price}, SL:{stop_price}, Distance:{abs(entry_price-stop_price)}")
         # 9. Vérifier les conditions de trading
         key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]
-        if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected, closes[-1], key_zones, atr, candles):
-            logger.info(f"🚀 Trade potentiel détecté sur {pair}")
+        signal = should_open_trade(pair, latest_rsi, latest_macd, latest_signal, 
+                                 breakout_detected, closes[-1], key_zones, atr, candles)
+        
+        if signal:  # 'buy' ou 'sell'
             entry_price = closes[-1]
-            if breakout_up:
+            if signal == "buy":
                 stop_price = entry_price - ATR_MULTIPLIER_SL * atr
-                direction = "buy"
-            else:
+            else:  # sell
                 stop_price = entry_price + ATR_MULTIPLIER_SL * atr
-                direction = "sell"
+            
+            # Déplacer le logging ICI après avoir défini les prix
+            logger.debug(f"Prices - Entry:{entry_price}, SL:{stop_price}, Distance:{abs(entry_price-stop_price)}")
+            
             account_balance = get_account_balance()
-            place_trade(pair, direction, entry_price, stop_price, atr, account_balance)
+            place_trade(pair, signal, entry_price, stop_price, atr, account_balance)
         else:
             logger.info("📉 Pas de conditions suffisantes pour ouvrir un trade.")
             
     except Exception as e:
         logger.error(f"Erreur lors de l'analyse de {pair}: {str(e)}", exc_info=True)
-
 
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du bot de trading OANDA...")
