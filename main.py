@@ -291,54 +291,56 @@ def detect_ltf_patterns(candles):
 
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
     """Calcule la taille de position selon le risque et le type d'instrument"""
-    # Validation des paramètres
-    account_balance = validate_numeric(account_balance, "account_balance")
-    entry_price = validate_numeric(entry_price, "entry_price")
-    stop_loss_price = validate_numeric(stop_loss_price, "stop_loss_price")
+    try:
+        # Validation des paramètres
+        account_balance = validate_numeric(account_balance, "account_balance")
+        entry_price = validate_numeric(entry_price, "entry_price")
+        stop_loss_price = validate_numeric(stop_loss_price, "stop_loss_price")
 
-    if None in [account_balance, entry_price, stop_loss_price]:
-        logger.error(f"❌ Paramètres manquants ou invalides - Solde:{account_balance}, Entrée:{entry_price}, SL:{stop_loss_price}")
+        if None in [account_balance, entry_price, stop_loss_price]:
+            logger.error(f"❌ Paramètres manquants - Solde:{account_balance}, Entrée:{entry_price}, SL:{stop_loss_price}")
+            return 0
+
+        # Calcul du montant de risque
+        risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
+        risk_per_unit = abs(entry_price - stop_loss_price)
+
+        logger.debug(f"Position size params - Risk:{risk_amount:.2f} {pair} "
+                    f"Entry:{entry_price:.5f} SL:{stop_loss_price:.5f} "
+                    f"Dist:{risk_per_unit:.5f}")
+
+        if risk_per_unit <= 0:
+            logger.error(f"❌ Distance SL nulle - Entry:{entry_price}, SL:{stop_loss_price}")
+            return 0
+
+        # Conversion spéciale selon le type de paire
+        if pair in CRYPTO_PAIRS:
+            units = risk_amount / risk_per_unit
+            units = round(units, 6)  # 6 décimales pour cryptos
+        elif pair in ["XAU_USD", "XAG_USD"]:
+            units = risk_amount / risk_per_unit
+            units = round(units, 2)  # 2 décimales pour métaux
+        elif "_JPY" in pair:  # Cas spécial pour paires JPY
+            units = (risk_amount / risk_per_unit) / 100  # 1 pip = 0.01 JPY
+            units = round(units)  # Unités entières
+        else:  # Forex standard
+            units = (risk_amount / risk_per_unit) / 10000  # 1 pip = 0.0001
+            units = round(units)  # Unités entières
+
+        # Validation finale
+        if units <= 0:
+            logger.error(f"❌ Unités invalides - Units:{units}, RiskAmount:{risk_amount}, RiskPerUnit:{risk_per_unit}")
+            return 0
+
+        logger.info(f"✅ Calcul réussi - {pair}: "
+                  f"{units} unités (Risk:{risk_amount:.2f}, "
+                  f"SL Dist:{risk_per_unit:.5f})")
+        return units
+
+    except Exception as e:
+        logger.error(f"❌ Erreur calcul position: {str(e)}")
         return 0
-
-    # Calcul du montant de risque
-    risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
-    risk_per_unit = abs(entry_price - stop_loss_price)
-
-    logger.debug(f"Calcul taille position - RiskAmount:{risk_amount}, RiskPerUnit:{risk_per_unit}")
-
-    if risk_per_unit <= 0:
-        logger.error(f"❌ Distance SL nulle ou négative - Entry:{entry_price}, SL:{stop_loss_price}")
-        return 0
-
-    # Conversion spéciale pour les paires crypto et XAU/XAG
-    if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
-        units = risk_amount / risk_per_unit
-    else:
-        # Pour les paires forex standard
-        units = (risk_amount / risk_per_unit) / 10000  # Conversion en lots standard
-
-    # Arrondir selon les conventions OANDA
-    if pair in CRYPTO_PAIRS:
-        units = round(units, 6)  # 6 décimales pour les cryptos
-    elif pair in ["XAU_USD", "XAG_USD"]:
-        units = round(units, 2)  # 2 décimales pour l'or et l'argent
-    else:
-        units = round(units)  # Unités entières pour forex
-
-    # Vérification finale
-    if units <= 0:
-        logger.error(f"❌ Unités invalides - Units:{units}, RiskAmount:{risk_amount}, RiskPerUnit:{risk_per_unit}")
-        return 0
-
-    logger.info(
-        f"✅ Calcul des unités - "
-        f"Pair:{pair}, "
-        f"Risk%:{RISK_PERCENTAGE}, "
-        f"RiskAmount:{risk_amount:.2f}, "
-        f"DistanceSL:{risk_per_unit:.5f}, "
-        f"Units:{units}"
-    )
-    return units
+    
 def process_pin_bar(pin_bar_data):
     """Traite les données d'une Pin Bar."""
     try:
