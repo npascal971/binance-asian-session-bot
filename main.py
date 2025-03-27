@@ -85,12 +85,12 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
         logger.error("Distance SL nulle - trade annulé")
         return 0
     
-    # Conversion spéciale pour les paires crypto et XAU
+    # Calcul des unités
     if pair in CRYPTO_PAIRS or pair == "XAU_USD":
         units = risk_amount / risk_per_unit
     else:
-        # Pour les paires forex standard
-        units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
+        # Conversion en lots standard pour les paires forex
+        units = risk_amount / (risk_per_unit * 10000)
     
     # Arrondir selon les conventions OANDA
     if pair in CRYPTO_PAIRS:
