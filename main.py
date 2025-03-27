@@ -134,6 +134,20 @@ def get_asian_session_range(pair):
         logger.error(f"Erreur lors de la récupération du range asiatique pour {pair}: {e}")
         return None, None
 
+def update_closed_trades():
+    """Met à jour la liste des trades actifs en supprimant ceux qui sont fermés"""
+    try:
+        r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
+        response = client.request(r)
+        current_trades = {t['instrument'] for t in response['trades']}
+        closed_trades = active_trades - current_trades
+        if closed_trades:
+            logger.info(f"🔄 Trades fermés détectés: {closed_trades}")
+            active_trades.clear()
+            active_trades.update(current_trades)
+    except Exception as e:
+        logger.error(f"Erreur lors de la mise à jour des trades fermés: {e}")
+
 def analyze_htf(pair):
     """Analyse les timeframes élevés pour identifier des zones clés (FVG, OB, etc.)"""
     htf_params = {"granularity": "H4", "count": 50, "price": "M"}
@@ -424,19 +438,22 @@ if __name__ == "__main__":
         now = datetime.utcnow().time()
         if SESSION_START <= now <= SESSION_END:
             logger.info("⏱ Session active - Analyse des paires...")
-            
-            # Vérifier les trades ouverts avant analyse
+        
+            # Vérifier les trades ouverts et fermés
             check_active_trades()
-            
+            update_closed_trades()
+        
+            # Analyser chaque paire
             for pair in PAIRS:
                 try:
                     analyze_pair(pair)
                 except Exception as e:
                     logger.error(f"Erreur critique avec {pair}: {e}")
-            
+        
             # Attente avec vérification plus fréquente des trades
             for _ in range(12):  # 12 x 5 secondes = 1 minute
                 check_active_trades()
+                update_closed_trades()
                 time.sleep(5)
         else:
             logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
