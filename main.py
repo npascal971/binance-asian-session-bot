@@ -34,6 +34,7 @@ RETEST_ZONE_RANGE = RETEST_TOLERANCE_PIPS * 0.0001
 RISK_AMOUNT_CAP = 100
 CRYPTO_PAIRS = ["BTC_USD", "ETH_USD"]
 
+
 # Configuration logs
 logging.basicConfig(
     level=logging.INFO,
@@ -45,7 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-SIMULATION_MODE = True  # Mettre à True pour tester sans exécuter de vrais trades
+SIMULATION_MODE = False  # Mettre à True pour tester sans exécuter de vrais trades
 
 trade_history = []
 active_trades = set()
@@ -291,18 +292,27 @@ def update_stop_loss(order_id, new_stop_loss):
     except Exception as e:
         logger.error(f"更新止损时发生错误: {e}")
 
-def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected):
+def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
     signal_detected = False
     reason = []
 
-    if rsi > 60:
+    # Vérifier si le prix est proche d'une zone clé
+    for zone in key_zones:
+        if abs(price - zone[0]) <= RETEST_ZONE_RANGE or abs(price - zone[1]) <= RETEST_ZONE_RANGE:
+            signal_detected = True
+            reason.append("Prix proche d'une zone clé")
+            break
+
+    # Conditions basées sur RSI
+    if rsi > 65:
         signal_detected = True
-        reason.append("RSI > 70 : signal de VENTE")
+        reason.append("RSI > 65 : signal de VENTE")
     elif rsi < 35:
         signal_detected = True
-        reason.append("RSI < 30 : signal d'ACHAT")
+        reason.append("RSI < 35 : signal d'ACHAT")
 
+    # Conditions basées sur MACD
     if macd > macd_signal:
         signal_detected = True
         reason.append("MACD croise au-dessus du signal : signal d'ACHAT")
@@ -310,15 +320,16 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected):
         signal_detected = True
         reason.append("MACD croise en dessous du signal : signal de VENTE")
 
+    # Détection de breakout
     if breakout_detected:
         signal_detected = True
         reason.append("Breakout détecté sur le range asiatique")
 
+    # Logs des raisons du signal
     if signal_detected:
         logger.info(f"💡 Signal détecté pour {pair} → Raisons: {', '.join(reason)}")
     else:
         logger.info(f"🔍 Aucun signal détecté pour {pair}")
-
     return signal_detected
 
 def detect_reversal_patterns(candles):
