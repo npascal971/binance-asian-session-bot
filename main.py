@@ -76,6 +76,81 @@ def get_account_balance():
         logger.error(f"Erreur lors de la récupération du solde: {e}")
         return 0
 
+def get_asian_session_range(pair):
+    """Récupère le high et le low de la session asiatique"""
+    asian_start = dtime(23, 0)  # Début de la session asiatique (UTC)
+    asian_end = dtime(7, 0)     # Fin de la session asiatique (UTC)
+    params = {
+        "granularity": "M5",
+        "from": datetime.utcnow().replace(hour=asian_start.hour, minute=0, second=0, microsecond=0) - timedelta(days=1),
+        "to": datetime.utcnow().replace(hour=asian_end.hour, minute=0, second=0, microsecond=0),
+        "price": "M"
+    }
+    r = instruments.InstrumentsCandles(instrument=pair, params=params)
+    client.request(r)
+    candles = r.response['candles']
+    highs = [float(c['mid']['h']) for c in candles if c['complete']]
+    lows = [float(c['mid']['l']) for c in candles if c['complete']]
+    asian_high = max(highs)
+    asian_low = min(lows)
+    logger.info(f"Range asiatique pour {pair}: High={asian_high}, Low={asian_low}")
+    return asian_high, asian_low
+
+def analyze_htf(pair):
+    """Analyse les timeframes élevés pour identifier des zones clés (FVG, OB, etc.)"""
+    htf_params = {"granularity": "H4", "count": 50, "price": "M"}
+    r = instruments.InstrumentsCandles(instrument=pair, params=htf_params)
+    client.request(r)
+    candles = r.response['candles']
+    closes = [float(c['mid']['c']) for c in candles if c['complete']]
+    highs = [float(c['mid']['h']) for c in candles if c['complete']]
+    lows = [float(c['mid']['l']) for c in candles if c['complete']]
+
+    # Calcul des FVG (Fair Value Gaps)
+    fvg_zones = []
+    for i in range(1, len(candles) - 1):
+        if highs[i] < lows[i - 1] and closes[i + 1] > highs[i]:
+            fvg_zones.append((highs[i], lows[i - 1]))
+        elif lows[i] > highs[i - 1] and closes[i + 1] < lows[i]:
+            fvg_zones.append((lows[i], highs[i - 1]))
+
+    # Identification des Order Blocks (OB)
+    ob_zones = []
+    for i in range(len(candles) - 1):
+        if closes[i] > closes[i + 1]:  # Bearish candle
+            ob_zones.append((lows[i + 1], highs[i]))
+        elif closes[i] < closes[i + 1]:  # Bullish candle
+            ob_zones.append((lows[i], highs[i + 1]))
+
+    logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
+    return fvg_zones, ob_zones
+
+def detect_ltf_patterns(candles):
+    """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
+    patterns_detected = []
+
+    # Pin bar detection
+    for i in range(1, len(candles)):
+        body = abs(float(candles[i]['mid']['c']) - float(candles[i]['mid']['o']))
+        wick_top = float(candles[i]['mid']['h']) - max(float(candles[i]['mid']['c']), float(candles[i]['mid']['o']))
+        wick_bottom = min(float(candles[i]['mid']['c']), float(candles[i]['mid']['o'])) - float(candles[i]['mid']['l'])
+        if wick_top > 2 * body or wick_bottom > 2 * body:
+            patterns_detected.append(("Pin Bar", i))
+
+    # Engulfing pattern detection
+    for i in range(1, len(candles)):
+        prev_body = abs(float(candles[i - 1]['mid']['c']) - float(candles[i - 1]['mid']['o']))
+        current_body = abs(float(candles[i]['mid']['c']) - float(candles[i]['mid']['o']))
+        if current_body > prev_body:
+            if (float(candles[i]['mid']['c']) > float(candles[i]['mid']['o']) and
+                float(candles[i]['mid']['c']) > float(candles[i - 1]['mid']['h'])):
+                patterns_detected.append(("Bullish Engulfing", i))
+            elif (float(candles[i]['mid']['c']) < float(candles[i]['mid']['o']) and
+                  float(candles[i]['mid']['o']) < float(candles[i - 1]['mid']['l'])):
+                patterns_detected.append(("Bearish Engulfing", i))
+
+    return patterns_detected
+
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
     """Calcule la taille de position selon le risque et le type d'instrument"""
     risk_amount = account_balance * (RISK_PERCENTAGE / 100)  # Suppression de RISK_AMOUNT_CAP
@@ -216,32 +291,31 @@ def analyze_pair(pair):
     """Analyse une paire de trading et exécute les trades si conditions remplies"""
     logger.info(f"🔍 Analyse de la paire {pair}...")
     try:
+        # Récupérer le range asiatique
+        asian_high, asian_low = get_asian_session_range(pair)
+
+        # Analyser les timeframes élevés (HTF)
+        fvg_zones, ob_zones = analyze_htf(pair)
+
+        # Récupérer les données M5 pour l'analyse LTF
         params = {"granularity": "M5", "count": 50, "price": "M"}
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         client.request(r)
         candles = r.response['candles']
-
         closes = [float(c['mid']['c']) for c in candles if c['complete']]
         highs = [float(c['mid']['h']) for c in candles if c['complete']]
         lows = [float(c['mid']['l']) for c in candles if c['complete']]
 
-        if len(closes) < 26:
-            logger.warning("Pas assez de données pour le calcul technique.")
-            return
-
+        # Calcul des indicateurs techniques
         close_series = pd.Series(closes)
         high_series = pd.Series(highs)
         low_series = pd.Series(lows)
-
-        # Calcul RSI
         delta = close_series.diff().dropna()
         gain = delta.where(delta > 0, 0).rolling(window=14).mean()
         loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         latest_rsi = rsi.iloc[-1]
-
-        # Calcul MACD
         ema12 = close_series.ewm(span=12, adjust=False).mean()
         ema26 = close_series.ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
@@ -249,36 +323,37 @@ def analyze_pair(pair):
         latest_macd = macd_line.iloc[-1]
         latest_signal = signal_line.iloc[-1]
 
-        # Détection breakout
+        # Détection de breakout
         breakout_up = closes[-1] > max(closes[-11:-1])
         breakout_down = closes[-1] < min(closes[-11:-1])
         breakout_detected = breakout_up or breakout_down
 
-        logger.info(f"📊 Indicateurs {pair}:\n"
-                   f"RSI: {latest_rsi:.2f}\n"
-                   f"MACD: {latest_macd:.4f}\n"
-                   f"Signal MACD: {latest_signal:.4f}\n"
-                   f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
+        # Détecter des patterns LTF
+        ltf_patterns = detect_ltf_patterns(candles)
 
+        # Log des informations
+        logger.info(f"📊 Indicateurs {pair}: RSI={latest_rsi:.2f}, MACD={latest_macd:.4f}, Signal MACD={latest_signal:.4f}")
+        logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
+        logger.info(f"Patterns LTF détectés: {ltf_patterns}")
+
+        # Vérifier les conditions pour ouvrir un trade
         if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected):
             logger.info(f"🚀 Trade potentiel détecté sur {pair}")
             entry_price = closes[-1]
             atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
-            
             if breakout_up:
                 stop_price = entry_price - ATR_MULTIPLIER_SL * atr
                 direction = "buy"
             else:
                 stop_price = entry_price + ATR_MULTIPLIER_SL * atr
                 direction = "sell"
-            
             account_balance = get_account_balance()
             place_trade(pair, direction, entry_price, stop_price, atr, account_balance)
         else:
             logger.info("📉 Pas de conditions suffisantes pour ouvrir un trade.")
-
     except Exception as e:
         logger.error(f"Erreur lors de l'analyse de {pair}: {str(e)}", exc_info=True)
+
 
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du bot de trading OANDA...")
