@@ -476,7 +476,7 @@ if __name__ == "__main__":
                 time.sleep(5)
         else:
             while True:
-        now = datetime.utcnow().time()
+            now = datetime.utcnow().time()
         if SESSION_START <= now <= SESSION_END:
             logger.info("⏱ Session active - Analyse des paires...")
         
