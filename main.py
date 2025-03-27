@@ -346,7 +346,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         "risk_multiplier": 0.3,
         "min_atr": 0.5,
         "trailing_distance": 30
-    }
+    }}
     
     settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
     
