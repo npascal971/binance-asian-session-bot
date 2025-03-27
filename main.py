@@ -444,20 +444,28 @@ def analyze_pair(pair):
     """Analyse une paire de trading et exécute les trades si conditions remplies"""
     logger.info(f"🔍 Analyse de la paire {pair}...")
     try:
-        # Récupérer les données M5 pour l'analyse LTF
         params = {"granularity": "M5", "count": 50, "price": "M"}
-        try:
-            r = instruments.InstrumentsCandles(instrument=pair, params=params)
-            response = client.request(r)
-            candles = response['candles']
-        except Exception as e:
-            logger.error(f"Erreur lors de la récupération des données pour {pair}: {e}")
-            return
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        client.request(r)
+        candles = r.response['candles']
 
         # Vérifier si les données sont valides
         if not candles or not all(c['complete'] for c in candles):
             logger.warning(f"Données incomplètes ou invalides pour {pair}.")
             return
+
+        closes = [float(c['mid']['c']) for c in candles if c['complete']]
+        highs = [float(c['mid']['h']) for c in candles if c['complete']]
+        lows = [float(c['mid']['l']) for c in candles if c['complete']]
+
+        # Vérifier s'il y a suffisamment de données
+        if len(closes) < 26:
+            logger.warning("Pas assez de données pour le calcul technique.")
+            return
+
+        # Continuer avec l'analyse...
+    except Exception as e:
+        logger.error(f"Erreur lors de l'analyse de {pair}: {e}")
 
         # Extraire les prix
         closes = [float(c['mid']['c']) for c in candles if c['complete']]
