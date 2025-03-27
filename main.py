@@ -454,34 +454,29 @@ if __name__ == "__main__":
         exit(1)
     
     while True:
-        now = datetime.utcnow().time()
-        if SESSION_START <= now <= SESSION_END:
-            logger.info("⏱ Session active - Analyse des paires...")
+    now = datetime.utcnow().time()
+    if SESSION_START <= now <= SESSION_END:
+        logger.info("⏱ Session active - Analyse des paires...")
         
-            # Vérifier les trades ouverts et fermés
+        # Vérifier les trades ouverts et fermés
+        check_active_trades()
+        update_closed_trades()
+        
+        # Analyser chaque paire
+        for pair in PAIRS:
+            try:
+                analyze_pair(pair)
+            except Exception as e:
+                logger.error(f"Erreur critique avec {pair}: {e}")
+        
+        # Attente avec vérification plus fréquente des trades
+        for _ in range(12):  # 12 x 5 secondes = 1 minute
             check_active_trades()
             update_closed_trades()
-        
-            # Analyser chaque paire
-            for pair in PAIRS:
-                try:
-                    analyze_pair(pair)
-                except Exception as e:
-                    logger.error(f"Erreur critique avec {pair}: {e}")
-        
-            # Attente avec vérification plus fréquente des trades
-            for _ in range(12):  # 12 x 5 secondes = 1 minute
-                check_active_trades()
-                update_closed_trades()
-                time.sleep(5)
-        else:
-            while True:
-            now = datetime.utcnow().time()
-        if SESSION_START <= now <= SESSION_END:
-            logger.info("⏱ Session active - Analyse des paires...")
-        
-            # Vérifier les trades ouverts
-            check_active_trades()
+            time.sleep(5)
+    else:
+        logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
+        time.sleep(300)  # Attente plus longue hors session
 
         # Mettre à jour le SL pour chaque paire active
         for pair in active_trades:
@@ -520,8 +515,3 @@ if __name__ == "__main__":
         for _ in range(12):  # 12 x 5 secondes = 1 minute
             check_active_trades()
             time.sleep(5)
-    else:
-        logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
-        time.sleep(300)  # Attente plus longue hors session
-            logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
-            time.sleep(300)  # Attente plus longue hors session
