@@ -22,7 +22,7 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 client = oandapyV20.API(access_token=OANDA_API_KEY)
 
 # Paramètres de trading
-PAIRS = ["XAU_USD", "EUR_USD", "GBP_JPY","JPY_USD","XAG_USD"]
+PAIRS = ["XAU_USD", "EUR_USD", "GBP_JPY","USD_JPY","XAG_USD"]
 RISK_PERCENTAGE = 1
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
@@ -437,6 +437,7 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
         return None
     
     try:
+        # Calcul de la taille de position
         units = calculate_position_size(account_balance, entry_price, stop_price, pair)
         if units == 0:
             logger.error("❌ Calcul des unités invalide - trade annulé")
@@ -450,6 +451,15 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
             take_profit_price = round(entry_price + ATR_MULTIPLIER_TP * atr, 5)  # 5 décimales pour forex
             stop_loss_price = round(stop_price, 5)  # 5 décimales pour forex
         
+        # Validation de la distance minimale pour le Trailing Stop Loss
+        MIN_TRAILING_STOP_LOSS_DISTANCE = 0.5  # Valeur minimale pour XAU_USD (à ajuster selon l'instrument)
+        trailing_stop_loss_distance = TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
+
+        if trailing_stop_loss_distance < MIN_TRAILING_STOP_LOSS_DISTANCE:
+            logger.warning(f"Distance Trailing Stop Loss ({trailing_stop_loss_distance}) inférieure à la valeur minimale autorisée ({MIN_TRAILING_STOP_LOSS_DISTANCE}). Ajustement automatique.")
+            trailing_stop_loss_distance = MIN_TRAILING_STOP_LOSS_DISTANCE
+
+        # Logs pour le débogage
         logger.info(f"\n💖 NOUVEAU TRADE DÉTECTÉ 💖\n"
                     f"Paire: {pair}\n"
                     f"Direction: {direction.upper()}\n"
@@ -459,6 +469,7 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                     f"Unités: {units}\n"
                     f"Solde compte: {account_balance}")
         
+        # Préparation des données de l'ordre
         trade_info = {
             "timestamp": datetime.utcnow().isoformat(),
             "pair": pair,
@@ -483,15 +494,17 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                         "price": "{0:.5f}".format(take_profit_price) if pair not in ["XAU_USD", "XAG_USD"] else "{0:.2f}".format(take_profit_price)
                     },
                     "trailingStopLossOnFill": {
-                        "distance": "{0:.5f}".format(TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001)
+                        "distance": "{0:.5f}".format(trailing_stop_loss_distance)
                     }
                 }
             }
             logger.debug(f"Données de l'ordre envoyé à OANDA: {order_data}")
             
+            # Envoi de la requête pour créer l'ordre
             r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
             response = client.request(r)
             
+            # Vérification de la réponse
             if 'orderCreateTransaction' in response:
                 trade_id = response['orderCreateTransaction']['id']
                 logger.info(f"✔️ Trade exécuté avec succès. ID: {trade_id}")
@@ -503,6 +516,7 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                 logger.error(f"❌ Erreur dans la réponse OANDA: {response}")
                 return None
         else:
+            # Mode simulation
             trade_info['trade_id'] = "SIMULATED_TRADE_ID"
             trade_history.append(trade_info)
             active_trades.add(pair)
@@ -511,7 +525,6 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
     except Exception as e:
         logger.error(f"❌ Erreur critique lors de la création de l'ordre: {str(e)}", exc_info=True)
         return None
-
 def update_trailing_stop(pair, current_price, direction, current_sl):
     """Met à jour le Stop Loss dynamiquement avec un trailing stop"""
     try:
