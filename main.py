@@ -211,12 +211,11 @@ def update_closed_trades():
 
 def analyze_htf(pair):
     """Analyse les timeframes élevés pour identifier des zones clés (FVG, OB, etc.)"""
-    htf_params = {"granularity": "H4", "count": 50, "price": "M"}
+    htf_params = {"granularity": "H4", "count": 50, "price": "M", "smooth": True}
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=htf_params)
         client.request(r)
-        candles = r.response['candles']
-        
+        candles = [c for c in r.response['candles'] if c['complete']]  # Filtrage
         # Vérification des données
         if not candles or not all(c['complete'] for c in candles):
             logger.warning(f"Données incomplètes ou invalides pour {pair}.")
