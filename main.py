@@ -699,7 +699,7 @@ def validate_numeric(value, name):
         return None
 
 
-def update_trailing_stop(pair, current_price, direction, current_sl):
+def update_trailing_stop(pair, current_price, direction, current_sl, entry_price):
     """Version plus conservative du trailing stop"""
     try:
         # Augmenter la distance d'activation
@@ -859,18 +859,25 @@ while True:
                 # Récupérer les détails de la position
                 r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
                 response = client.request(r)
-                trade_id = response['position']['tradeIDs'][0]
-                current_sl = float(response['position']['long']['stopLossOrder']['price'])
-                direction = "buy" if float(response['position']['long']['units']) > 0 else "sell"
+        
+                # Déterminer la direction et les prix
+                if float(response['position']['long']['units']) > 0:
+                    direction = "buy"
+                    current_sl = float(response['position']['long']['stopLossOrder']['price'])
+                    entry_price = float(response['position']['long']['averagePrice'])
+                else:
+                    direction = "sell"
+                    current_sl = float(response['position']['short']['stopLossOrder']['price'])
+                    entry_price = float(response['position']['short']['averagePrice'])
 
                 # Mettre à jour le trailing stop
-                new_sl = update_trailing_stop(pair, current_price, direction, current_sl)
+                new_sl = update_trailing_stop(pair, current_price, direction, current_sl, entry_price)
                 if new_sl != current_sl:
                     update_stop_loss(trade_id, new_sl)
                     logger.info(f"Trailing stop mis à jour pour {pair} : Nouveau SL={new_sl}")
-            except Exception as e:
-                logger.error(f"Erreur lors de la mise à jour du trailing stop pour {pair}: {e}")
-
+            
+                except Exception as e:
+                    logger.error(f"Erreur lors de la mise à jour du trailing stop pour {pair}: {e}")
                 # Calculer un nouveau SL si nécessaire
                 if direction == "buy" and current_price > current_sl + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
                     new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
