@@ -27,8 +27,8 @@ RISK_PERCENTAGE = 1
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 3.0
-SESSION_START = dtime(1, 0) #7
-SESSION_END = dtime(22, 0)
+SESSION_START = dtime(7, 0) #7
+SESSION_END = dtime(23, 0)
 RETEST_TOLERANCE_PIPS = 10
 RETEST_ZONE_RANGE = RETEST_TOLERANCE_PIPS * 0.0001
 RISK_AMOUNT_CAP = 100
@@ -93,8 +93,8 @@ def get_asian_session_range(pair):
         asian_end_date = (now - timedelta(days=-1)).date()
     else:
         # Sinon, la session asiatique correspond à aujourd'hui  *********** faire l'inverse juste en dessous ligne 96 pour 97 et 97 pour 96
-        asian_start_date = now.date()  
-        asian_end_date = (now + timedelta(days=0)).date()
+        asian_start_date = (now + timedelta(days=-1)).date()
+        asian_end_date = now.date()
 
     # Créer les objets datetime complets pour le début et la fin
     asian_start = datetime.combine(asian_start_date, asian_start_time).isoformat() + "Z"
