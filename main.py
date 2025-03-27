@@ -84,6 +84,9 @@ def get_account_balance():
     except Exception as e:
         logger.error(f"Erreur lors de la récupération du solde: {e}")
         return 0
+        balance = float(r.response["account"]["balance"])
+        logger.debug(f"Solde du compte récupéré: {balance}")
+        return balance
 
 def get_asian_session_range(pair):
     """Récupère le high et le low de la session asiatique"""
@@ -294,15 +297,17 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
     stop_loss_price = validate_numeric(stop_loss_price, "stop_loss_price")
 
     if None in [account_balance, entry_price, stop_loss_price]:
-        logger.error("❌ Paramètres manquants ou invalides pour le calcul des unités.")
+        logger.error(f"❌ Paramètres manquants ou invalides - Solde:{account_balance}, Entrée:{entry_price}, SL:{stop_loss_price}")
         return 0
 
     # Calcul du montant de risque
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
     risk_per_unit = abs(entry_price - stop_loss_price)
 
-    if risk_per_unit == 0:
-        logger.error("❌ Distance SL nulle - trade annulé.")
+    logger.debug(f"Calcul taille position - RiskAmount:{risk_amount}, RiskPerUnit:{risk_per_unit}")
+
+    if risk_per_unit <= 0:
+        logger.error(f"❌ Distance SL nulle ou négative - Entry:{entry_price}, SL:{stop_loss_price}")
         return 0
 
     # Conversion spéciale pour les paires crypto et XAU/XAG
@@ -310,7 +315,7 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
         units = risk_amount / risk_per_unit
     else:
         # Pour les paires forex standard
-        units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
+        units = (risk_amount / risk_per_unit) / 10000  # Conversion en lots standard
 
     # Arrondir selon les conventions OANDA
     if pair in CRYPTO_PAIRS:
@@ -320,19 +325,20 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
     else:
         units = round(units)  # Unités entières pour forex
 
-    # Vérification finale : les unités doivent être strictement positives
+    # Vérification finale
     if units <= 0:
-        logger.error("❌ Unités calculées invalides ou nulles.")
+        logger.error(f"❌ Unités invalides - Units:{units}, RiskAmount:{risk_amount}, RiskPerUnit:{risk_per_unit}")
         return 0
 
     logger.info(
-        f"✅ Calcul des unités réussi : "
-        f"Montant risqué={risk_amount:.2f}, "
-        f"Distance SL={risk_per_unit:.5f}, "
-        f"Unités calculées={units}"
+        f"✅ Calcul des unités - "
+        f"Pair:{pair}, "
+        f"Risk%:{RISK_PERCENTAGE}, "
+        f"RiskAmount:{risk_amount:.2f}, "
+        f"DistanceSL:{risk_per_unit:.5f}, "
+        f"Units:{units}"
     )
     return units
-
 def process_pin_bar(pin_bar_data):
     """Traite les données d'une Pin Bar."""
     try:
@@ -769,7 +775,7 @@ def analyze_pair(pair):
         
         # ATR
         atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
-        
+        logger.debug(f"ATR calculé pour {pair}: {atr} (14 périodes)")
         # 6. Détection de breakout
         breakout_up = any(float(c['mid']['h']) > asian_high for c in candles[-5:] if c['complete'])
         breakout_down = closes[-1] < min(closes[-11:-1])
@@ -782,7 +788,7 @@ def analyze_pair(pair):
         # 8. Log des indicateurs
         logger.info(f"📊 Indicateurs {pair}: RSI={latest_rsi:.2f}, MACD={latest_macd:.4f}, Signal MACD={latest_signal:.4f}")
         logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
-        
+        logger.debug(f"Prices - Entry:{entry_price}, SL:{stop_price}, Distance:{abs(entry_price-stop_price)}")
         # 9. Vérifier les conditions de trading
         key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]
         if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected, closes[-1], key_zones, atr, candles):
