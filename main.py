@@ -542,8 +542,7 @@ if __name__ == "__main__":
     logger.info("🚀 DÉMARRAGE DU BOT DE TRADING 🚀")
     
     # Initialize session ranges if they don't exist
-    global asian_ranges, european_ranges
-    asian_ranges = {}
+    asian_ranges = {}  # ✅ No `global` needed
     european_ranges = {}
     
     # Analyze Asian session first
