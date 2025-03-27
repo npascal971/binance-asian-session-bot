@@ -151,6 +151,50 @@ def get_asian_session_range(pair):
         logger.error(f"Erreur lors de la récupération du range asiatique pour {pair}: {e}")
         return None, None
 
+def detect_pin_bars(candles):
+    """Détecte des pin bars dans une série de bougies"""
+    pin_bars = []
+    for i in range(len(candles)):
+        open_price = float(candles[i]['mid']['o'])
+        close_price = float(candles[i]['mid']['c'])
+        high_price = float(candles[i]['mid']['h'])
+        low_price = float(candles[i]['mid']['l'])
+
+        # Calcul du corps et des ombres
+        body = abs(close_price - open_price)
+        upper_wick = high_price - max(open_price, close_price)
+        lower_wick = min(open_price, close_price) - low_price
+
+        # Critères pour un pin bar
+        if upper_wick > 2 * body or lower_wick > 2 * body:
+            pin_type = "Bullish" if lower_wick > upper_wick else "Bearish"
+            pin_bars.append((i, pin_type))
+    
+    return pin_bars
+
+def detect_engulfing_patterns(candles):
+    """Détecte des engulfing patterns dans une série de bougies"""
+    engulfing_patterns = []
+    for i in range(1, len(candles)):
+        prev_open = float(candles[i - 1]['mid']['o'])
+        prev_close = float(candles[i - 1]['mid']['c'])
+        current_open = float(candles[i]['mid']['o'])
+        current_close = float(candles[i]['mid']['c'])
+
+        # Bullish engulfing
+        if current_close > current_open and prev_close < prev_open and \
+           current_open <= prev_close and current_close >= prev_open:
+            engulfing_patterns.append(("Bullish Engulfing", i))
+
+        # Bearish engulfing
+        elif current_close < current_open and prev_close > prev_open and \
+             current_open >= prev_close and current_close <= prev_open:
+            engulfing_patterns.append(("Bearish Engulfing", i))
+    
+    return engulfing_patterns
+
+
+
 def update_closed_trades():
     """Met à jour la liste des trades actifs en supprimant ceux qui sont fermés"""
     try:
@@ -285,17 +329,10 @@ def update_stop_loss(order_id, new_stop_loss):
     except Exception as e:
         logger.error(f"更新止损时发生错误: {e}")
 
-def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones, atr):
+def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones, atr, candles):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
     signal_detected = False
     reason = []
-
-    # Filtre de volatilité : vérifiez que l'ATR est dans une plage acceptable
-    MIN_ATR_THRESHOLD = 0.3  # Exemple : seuil minimum d'ATR
-    MAX_ATR_THRESHOLD = 4.0  # Exemple : seuil maximum d'ATR
-    if atr < MIN_ATR_THRESHOLD or atr > MAX_ATR_THRESHOLD:
-        logger.info(f"Volatilité trop faible ou trop élevée pour {pair} (ATR={atr:.2f}). Aucun trade ouvert.")
-        return False
 
     # Vérifier si le prix est proche d'une zone clé
     for zone in key_zones:
@@ -324,6 +361,17 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     if breakout_detected:
         signal_detected = True
         reason.append("Breakout détecté sur le range asiatique")
+
+    # Détecter des patterns (pin bars, engulfing)
+    pin_bars = detect_pin_bars(candles)
+    engulfing_patterns = detect_engulfing_patterns(candles)
+
+    if pin_bars:
+        signal_detected = True
+        reason.append(f"Pin Bar détecté: {pin_bars}")
+    if engulfing_patterns:
+        signal_detected = True
+        reason.append(f"Engulfing Pattern détecté: {engulfing_patterns}")
 
     # Logs des raisons du signal
     if signal_detected:
@@ -475,13 +523,15 @@ def analyze_pair(pair):
         logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
         
         # Récupérer les données M5 pour l'analyse LTF
+       # Récupérer les données M5 pour l'analyse LTF
         params = {"granularity": "M5", "count": 50, "price": "M"}
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         client.request(r)
         candles = r.response['candles']
-        closes = [float(c['mid']['c']) for c in candles if c['complete']]
-        highs = [float(c['mid']['h']) for c in candles if c['complete']]
-        lows = [float(c['mid']['l']) for c in candles if c['complete']]
+
+        # Passer les bougies à should_open_trade
+        if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected, closes[-1], key_zones, atr, candles):
+            logger.info(f"🚀 Trade potentiel détecté sur {pair}")
         
         # Calcul des indicateurs techniques
         close_series = pd.Series(closes)
