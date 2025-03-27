@@ -107,6 +107,9 @@ def get_asian_session_range(pair):
         # Sinon, utiliser la fin normale de la session asiatique
         asian_end = datetime.combine(asian_end_date, asian_end_time).isoformat() + "Z"
 
+    # Logs des timestamps calculés
+    logger.debug(f"Timestamps calculés pour {pair}: from={asian_start}, to={asian_end}")
+
     # Paramètres de la requête API
     params = {
         "granularity": "M5",
@@ -115,23 +118,36 @@ def get_asian_session_range(pair):
         "price": "M"
     }
 
+    # Logs des paramètres de la requête API
+    logger.debug(f"Requête API pour {pair}: URL=https://api-fxpractice.oanda.com/v3/instruments/{pair}/candles, Params={params}")
+
     # Effectuer la requête API
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        client.request(r)
+        response = client.request(r)
+
+        # Logs de la réponse API reçue
+        logger.debug(f"Réponse API reçue pour {pair}: {response}")
 
         # Extraire les données des bougies
-        candles = r.response['candles']
+        candles = response['candles']
         highs = [float(c['mid']['h']) for c in candles if c['complete']]
         lows = [float(c['mid']['l']) for c in candles if c['complete']]
+
+        # Vérifier si des données valides ont été reçues
+        if not highs or not lows:
+            logger.warning(f"Aucune donnée valide disponible pour le range asiatique de {pair}.")
+            return None, None
 
         # Calculer le high et le low de la session asiatique
         asian_high = max(highs)
         asian_low = min(lows)
 
+        # Logs du range asiatique calculé
         logger.info(f"Range asiatique pour {pair}: High={asian_high}, Low={asian_low}")
         return asian_high, asian_low
     except Exception as e:
+        # Logs en cas d'erreur lors de la récupération des données
         logger.error(f"Erreur lors de la récupération du range asiatique pour {pair}: {e}")
         return None, None
 
