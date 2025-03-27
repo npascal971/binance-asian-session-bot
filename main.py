@@ -875,9 +875,8 @@ while True:
                 if new_sl != current_sl:
                     update_stop_loss(trade_id, new_sl)
                     logger.info(f"Trailing stop mis à jour pour {pair} : Nouveau SL={new_sl}")
-            
-                except Exception as e:
-                    logger.error(f"Erreur lors de la mise à jour du trailing stop pour {pair}: {e}")
+            except Exception as e:
+                logger.error(f"Erreur lors de la mise à jour du trailing stop pour {pair}: {e}")
                 # Calculer un nouveau SL si nécessaire
                 if direction == "buy" and current_price > current_sl + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
                     new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
