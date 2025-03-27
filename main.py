@@ -241,6 +241,25 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
     else:
         return round(units)  # Unités entières pour forex
 
+def update_stop_loss(order_id, new_stop_loss):
+    """Met à jour le Stop Loss d'une position existante"""
+    try:
+        data = {
+            "order": {
+                "stopLoss": {
+                    "price": "{0:.5f}".format(new_stop_loss)
+                }
+            }
+        }
+        r = orders.OrderReplace(accountID=OANDA_ACCOUNT_ID, orderSpecifier=order_id, data=data)
+        response = client.request(r)
+        if 'orderCancelTransaction' in response:
+            logger.info(f"止损更新成功。新止损: {new_stop_loss}")
+        else:
+            logger.error(f"更新止损失败: {response}")
+    except Exception as e:
+        logger.error(f"更新止损时发生错误: {e}")
+
 def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
     signal_detected = False
@@ -455,6 +474,53 @@ if __name__ == "__main__":
                 check_active_trades()
                 update_closed_trades()
                 time.sleep(5)
-        else:
+        else:while True:
+    now = datetime.utcnow().time()
+    if SESSION_START <= now <= SESSION_END:
+        logger.info("⏱ Session active - Analyse des paires...")
+        
+        # Vérifier les trades ouverts
+        check_active_trades()
+
+        # Mettre à jour le SL pour chaque paire active
+        for pair in active_trades:
+            try:
+                # Récupérer le prix actuel
+                params = {"granularity": "M5", "count": 1, "price": "M"}
+                r = instruments.InstrumentsCandles(instrument=pair, params=params)
+                client.request(r)
+                current_price = float(r.response['candles'][0]['mid']['c'])
+
+                # Récupérer les détails de la position
+                r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
+                response = client.request(r)
+                trade_id = response['position']['tradeIDs'][0]
+                current_sl = float(response['position']['long']['stopLossOrder']['price'])
+                direction = response['position']['long']['units'] > 0 and "buy" or "sell"
+
+                # Calculer un nouveau SL si nécessaire
+                if direction == "buy" and current_price > current_sl + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
+                    new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
+                    update_stop_loss(trade_id, new_sl)
+                elif direction == "sell" and current_price < current_sl - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
+                    new_sl = current_price + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
+                    update_stop_loss(trade_id, new_sl)
+            except Exception as e:
+                logger.error(f"Erreur lors de la mise à jour du SL pour {pair}: {e}")
+
+        # Analyser chaque paire
+        for pair in PAIRS:
+            try:
+                analyze_pair(pair)
+            except Exception as e:
+                logger.error(f"Erreur critique avec {pair}: {e}")
+        
+        # Attente avec vérification plus fréquente des trades
+        for _ in range(12):  # 12 x 5 secondes = 1 minute
+            check_active_trades()
+            time.sleep(5)
+    else:
+        logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
+        time.sleep(300)  # Attente plus longue hors session
             logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
             time.sleep(300)  # Attente plus longue hors session
