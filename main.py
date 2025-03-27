@@ -22,7 +22,11 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 client = oandapyV20.API(access_token=OANDA_API_KEY)
 
 # Paramètres de trading
-PAIRS = ["XAU_USD", "EUR_USD", "GBP_JPY","USD_JPY","XAG_USD"]
+PAIRS = [
+    "XAU_USD", "XAG_USD",  # Métaux précieux
+    "EUR_USD", "GBP_USD", "USD_CHF", "AUD_USD", "NZD_USD",  # Majors
+    "GBP_JPY", "USD_JPY", "EUR_JPY", "AUD_JPY", "CAD_JPY"  # Crosses et JPY  
+]
 RISK_PERCENTAGE = 1
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
@@ -377,7 +381,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         signals["rsi"] = True
         reasons.append(f"RSI {rsi:.1f} < {settings['rsi_oversold']} (suracheté)")
 
-    # MACD - Confirmation requise
+    # MACD -  requise
     macd_crossover = (macd > macd_signal and macd_signal > 0) or (macd < macd_signal and macd_signal < 0)
     if macd_crossover:
         signals["macd"] = True
@@ -408,7 +412,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         reasons.append("Engulfing Pattern fort")
 
     # 5. Logique de décision
-    CONFIRMATION_REQUIRED = {
+    _REQUIRED = {
         "XAU_USD": 3,
         "XAG_USD": 2,
         "GBP_JPY": 2,
