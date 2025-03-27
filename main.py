@@ -262,30 +262,35 @@ def detect_ltf_patterns(candles):
     return patterns_detected
 
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
-    """Calcule la taille de position selon le risque et le type d'instrument"""
+    """
+    Calcule la taille de position selon le risque et le type d'instrument.
+    Correction incluse pour XAG_USD.
+    """
+    # Calcul du montant de risque
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
     risk_per_unit = abs(entry_price - stop_loss_price)
-    
+
+    # Vérification de la validité du Stop Loss
     if risk_per_unit == 0:
         logger.error("Distance SL nulle - trade annulé")
         return 0
-    
-    # Conversion spéciale pour les paires crypto et XAU
-    if pair in CRYPTO_PAIRS:
+
+    # Conversion spéciale pour les paires crypto, XAU_USD (or) et XAG_USD (argent)
+    if pair in CRYPTO_PAIRS:  # Paires crypto
         units = risk_amount / risk_per_unit
-    elif pair == "XAU_USD":
-        # Pour l'or, 1 unité = 1 once, donc ajuster en divisant par 10000
+    elif pair == "XAU_USD" or pair == "XAG_USD":  # Or et argent
+        # Pour l'or et l'argent, 1 unité = 1 once, donc ajuster en divisant par 10000
         units = risk_amount / (risk_per_unit * 10000)
-    else:
-        # Pour les paires forex standard
-        risk_per_unit_usd = (risk_per_unit * 10000) / entry_price  # Convertir en USD
-        units = risk_amount / risk_per_unit_usd  # Calcul en lots standard
-    
+    else:  # Paires forex standard
+        # Pour les paires forex, convertir en USD (en supposant que 1 pip = 0.0001)
+        risk_per_unit_usd = (risk_per_unit * 10000) / entry_price
+        units = risk_amount / risk_per_unit_usd
+
     # Arrondir selon les conventions OANDA
     if pair in CRYPTO_PAIRS:
         return round(units, 6)  # 6 décimales pour les cryptos
-    elif pair == "XAU_USD":
-        return round(units, 2)  # 2 décimales pour l'or
+    elif pair == "XAU_USD" or pair == "XAG_USD":
+        return round(units, 2)  # 2 décimales pour l'or et l'argent
     else:
         return round(units)  # Unités entières pour forex
 
