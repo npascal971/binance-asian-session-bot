@@ -137,31 +137,41 @@ def get_asian_session_range(pair):
 def analyze_htf(pair):
     """Analyse les timeframes élevés pour identifier des zones clés (FVG, OB, etc.)"""
     htf_params = {"granularity": "H4", "count": 50, "price": "M"}
-    r = instruments.InstrumentsCandles(instrument=pair, params=htf_params)
-    client.request(r)
-    candles = r.response['candles']
-    closes = [float(c['mid']['c']) for c in candles if c['complete']]
-    highs = [float(c['mid']['h']) for c in candles if c['complete']]
-    lows = [float(c['mid']['l']) for c in candles if c['complete']]
+    try:
+        r = instruments.InstrumentsCandles(instrument=pair, params=htf_params)
+        client.request(r)
+        candles = r.response['candles']
+        closes = [float(c['mid']['c']) for c in candles if c['complete']]
+        highs = [float(c['mid']['h']) for c in candles if c['complete']]
+        lows = [float(c['mid']['l']) for c in candles if c['complete']]
 
-    # Calcul des FVG (Fair Value Gaps)
-    fvg_zones = []
-    for i in range(1, len(candles) - 1):
-        if highs[i] < lows[i - 1] and closes[i + 1] > highs[i]:
-            fvg_zones.append((highs[i], lows[i - 1]))
-        elif lows[i] > highs[i - 1] and closes[i + 1] < lows[i]:
-            fvg_zones.append((lows[i], highs[i - 1]))
+        # Vérification des données
+        if len(closes) < 2:
+            logger.warning(f"Pas assez de données HTF pour {pair}.")
+            return [], []
 
-    # Identification des Order Blocks (OB)
-    ob_zones = []
-    for i in range(len(candles) - 1):
-        if closes[i] > closes[i + 1]:  # Bearish candle
-            ob_zones.append((lows[i + 1], highs[i]))
-        elif closes[i] < closes[i + 1]:  # Bullish candle
-            ob_zones.append((lows[i], highs[i + 1]))
+        # Calcul des FVG (Fair Value Gaps)
+        fvg_zones = []
+        for i in range(1, len(candles) - 1):
+            if highs[i] < lows[i - 1] and closes[i + 1] > highs[i]:
+                fvg_zones.append((highs[i], lows[i - 1]))
+            elif lows[i] > highs[i - 1] and closes[i + 1] < lows[i]:
+                fvg_zones.append((lows[i], highs[i - 1]))
 
-    logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
-    return fvg_zones, ob_zones
+        # Identification des Order Blocks (OB)
+        ob_zones = []
+        for i in range(len(candles) - 1):
+            if closes[i] > closes[i + 1]:  # Bearish candle
+                ob_zones.append((lows[i + 1], highs[i]))
+            elif closes[i] < closes[i + 1]:  # Bullish candle
+                ob_zones.append((lows[i], highs[i + 1]))
+
+        logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
+        return fvg_zones, ob_zones
+
+    except Exception as e:
+        logger.error(f"Erreur lors de l'analyse HTF pour {pair}: {e}")
+        return [], []
 
 def detect_ltf_patterns(candles):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
