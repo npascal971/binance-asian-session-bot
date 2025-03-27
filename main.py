@@ -79,14 +79,10 @@ def get_account_balance():
 
 def get_asian_session_range(pair):
     """Récupère le high et le low de la session asiatique"""
-    # Définir les heures de début et de fin de la session asiatique
     asian_start_time = dtime(23, 0)  # 23:00 UTC
     asian_end_time = dtime(7, 0)     # 07:00 UTC
 
-    # Obtenir la date et l'heure actuelles en UTC
     now = datetime.utcnow()
-
-    # Calculer la date de début et de fin de la session asiatique
     if now.time() < asian_end_time:
         # Si nous sommes avant 07:00 UTC, la session asiatique correspond à la veille
         asian_start_date = (now - timedelta(days=1)).date()
@@ -96,18 +92,9 @@ def get_asian_session_range(pair):
         asian_start_date = now.date()
         asian_end_date = (now + timedelta(days=1)).date()
 
-    # Créer les objets datetime complets pour le début et la fin
     asian_start = datetime.combine(asian_start_date, asian_start_time).isoformat() + "Z"
-    
-    # Limiter asian_end à l'heure actuelle si nécessaire
-    if now.time() < asian_end_time:
-        # Si nous sommes dans la session asiatique actuelle, limiter asian_end à now
-        asian_end = now.isoformat() + "Z"
-    else:
-        # Sinon, utiliser la fin normale de la session asiatique
-        asian_end = datetime.combine(asian_end_date, asian_end_time).isoformat() + "Z"
+    asian_end = datetime.combine(asian_end_date, asian_end_time).isoformat() + "Z"
 
-    # Paramètres de la requête API
     params = {
         "granularity": "M5",
         "from": asian_start,
@@ -115,17 +102,17 @@ def get_asian_session_range(pair):
         "price": "M"
     }
 
-    # Effectuer la requête API
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         client.request(r)
-
-        # Extraire les données des bougies
         candles = r.response['candles']
         highs = [float(c['mid']['h']) for c in candles if c['complete']]
         lows = [float(c['mid']['l']) for c in candles if c['complete']]
 
-        # Calculer le high et le low de la session asiatique
+        if not highs or not lows:
+            logger.warning(f"Aucune donnée disponible pour le range asiatique de {pair}.")
+            return None, None
+
         asian_high = max(highs)
         asian_low = min(lows)
 
