@@ -90,7 +90,7 @@ def get_asian_session_range(pair):
     if now.time() < asian_end_time:
         # Si nous sommes avant 07:00 UTC, la session asiatique correspond à la veille
         asian_start_date = now.date()
-        asian_end_date = (now - timedelta(days=0)).date()
+        asian_end_date = (now - timedelta(days=-1)).date()
     else:
         # Sinon, la session asiatique correspond à aujourd'hui  *********** faire l'inverse juste en dessous ligne 96 pour 97 et 97 pour 96
         asian_start_date = now.date()  
