@@ -46,7 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-SIMULATION_MODE = False  # Mettre à True pour tester sans exécuter de vrais trades
+SIMULATION_MODE = True  # Mettre à True pour tester sans exécuter de vrais trades
 
 trade_history = []
 active_trades = set()
@@ -79,10 +79,14 @@ def get_account_balance():
 
 def get_asian_session_range(pair):
     """Récupère le high et le low de la session asiatique"""
+    # Définir les heures de début et de fin de la session asiatique
     asian_start_time = dtime(23, 0)  # 23:00 UTC
     asian_end_time = dtime(7, 0)     # 07:00 UTC
 
+    # Obtenir la date et l'heure actuelles en UTC
     now = datetime.utcnow()
+
+    # Calculer la date de début et de fin de la session asiatique
     if now.time() < asian_end_time:
         # Si nous sommes avant 07:00 UTC, la session asiatique correspond à la veille
         asian_start_date = (now - timedelta(days=1)).date()
@@ -92,14 +96,18 @@ def get_asian_session_range(pair):
         asian_start_date = now.date()
         asian_end_date = (now + timedelta(days=1)).date()
 
+    # Créer les objets datetime complets pour le début et la fin
     asian_start = datetime.combine(asian_start_date, asian_start_time).isoformat() + "Z"
-    asian_end = datetime.combine(asian_end_date, asian_end_time).isoformat() + "Z"
-
-    # Validation des timestamps
-    if datetime.fromisoformat(asian_start[:-1]) > now or datetime.fromisoformat(asian_end[:-1]) > now:
-        logger.error(f"Timestamp invalide : 'from' ou 'to' est dans le futur.")
-        return None, None
     
+    # Limiter asian_end à l'heure actuelle si nécessaire
+    if now.time() < asian_end_time:
+        # Si nous sommes dans la session asiatique actuelle, limiter asian_end à now
+        asian_end = now.isoformat() + "Z"
+    else:
+        # Sinon, utiliser la fin normale de la session asiatique
+        asian_end = datetime.combine(asian_end_date, asian_end_time).isoformat() + "Z"
+
+    # Paramètres de la requête API
     params = {
         "granularity": "M5",
         "from": asian_start,
@@ -107,17 +115,17 @@ def get_asian_session_range(pair):
         "price": "M"
     }
 
+    # Effectuer la requête API
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         client.request(r)
+
+        # Extraire les données des bougies
         candles = r.response['candles']
         highs = [float(c['mid']['h']) for c in candles if c['complete']]
         lows = [float(c['mid']['l']) for c in candles if c['complete']]
 
-        if not highs or not lows:
-            logger.warning(f"Aucune donnée disponible pour le range asiatique de {pair}.")
-            return None, None
-
+        # Calculer le high et le low de la session asiatique
         asian_high = max(highs)
         asian_low = min(lows)
 
@@ -126,14 +134,6 @@ def get_asian_session_range(pair):
     except Exception as e:
         logger.error(f"Erreur lors de la récupération du range asiatique pour {pair}: {e}")
         return None, None
-
-def validate_timestamp(timestamp):
-    """Vérifie qu'un timestamp est valide et pas dans le futur"""
-    now = datetime.utcnow()
-    if timestamp > now:
-        logger.error(f"Timestamp invalide : {timestamp} est dans le futur.")
-        return False
-    return True
 
 def update_closed_trades():
     """Met à jour la liste des trades actifs en supprimant ceux qui sont fermés"""
@@ -444,53 +444,38 @@ def analyze_pair(pair):
     """Analyse une paire de trading et exécute les trades si conditions remplies"""
     logger.info(f"🔍 Analyse de la paire {pair}...")
     try:
+        # Récupérer le range asiatique
+        asian_high, asian_low = get_asian_session_range(pair)
+        if asian_high is None or asian_low is None:
+            logger.warning(f"Impossible de récupérer le range asiatique pour {pair}.")
+            return
+
+        # Log du range asiatique
+        logger.info(f"Range asiatique pour {pair}: High={asian_high}, Low={asian_low}")
+
+        # Analyser les timeframes élevés (HTF) pour détecter les zones clés (FVG, OB)
+        fvg_zones, ob_zones = analyze_htf(pair)
+        logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
+
+        # Récupérer les données M5 pour l'analyse LTF
         params = {"granularity": "M5", "count": 50, "price": "M"}
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         client.request(r)
         candles = r.response['candles']
-
-        # Vérifier si les données sont valides
-        if not candles or not all(c['complete'] for c in candles):
-            logger.warning(f"Données incomplètes ou invalides pour {pair}.")
-            return
-
         closes = [float(c['mid']['c']) for c in candles if c['complete']]
         highs = [float(c['mid']['h']) for c in candles if c['complete']]
         lows = [float(c['mid']['l']) for c in candles if c['complete']]
-
-        # Vérifier s'il y a suffisamment de données
-        if len(closes) < 26:
-            logger.warning("Pas assez de données pour le calcul technique.")
-            return
-
-        # Continuer avec l'analyse...
-    except Exception as e:
-        logger.error(f"Erreur lors de l'analyse de {pair}: {e}")
-
-        # Extraire les prix
-        closes = [float(c['mid']['c']) for c in candles if c['complete']]
-        highs = [float(c['mid']['h']) for c in candles if c['complete']]
-        lows = [float(c['mid']['l']) for c in candles if c['complete']]
-
-        # Vérifier s'il y a suffisamment de données
-        if len(closes) < 26:
-            logger.warning("Pas assez de données pour le calcul technique.")
-            return
 
         # Calcul des indicateurs techniques
         close_series = pd.Series(closes)
         high_series = pd.Series(highs)
         low_series = pd.Series(lows)
-
-        # Calcul RSI
         delta = close_series.diff().dropna()
         gain = delta.where(delta > 0, 0).rolling(window=14).mean()
         loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         latest_rsi = rsi.iloc[-1]
-
-        # Calcul MACD
         ema12 = close_series.ewm(span=12, adjust=False).mean()
         ema26 = close_series.ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
@@ -498,17 +483,21 @@ def analyze_pair(pair):
         latest_macd = macd_line.iloc[-1]
         latest_signal = signal_line.iloc[-1]
 
-        # Détection breakout
+        # Détection de breakout
         breakout_up = closes[-1] > max(closes[-11:-1])
         breakout_down = closes[-1] < min(closes[-11:-1])
         breakout_detected = breakout_up or breakout_down
 
-        # Logs des informations
+        # Détecter des patterns LTF (pin bars, engulfings, etc.)
+        ltf_patterns = detect_ltf_patterns(candles)
+        logger.info(f"Patterns LTF détectés pour {pair}: {ltf_patterns}")
+
+        # Log des informations
         logger.info(f"📊 Indicateurs {pair}: RSI={latest_rsi:.2f}, MACD={latest_macd:.4f}, Signal MACD={latest_signal:.4f}")
         logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
 
         # Vérifier les conditions pour ouvrir un trade
-        key_zones = [(min(lows), max(highs))]  # Exemple simplifié de zones clés
+        key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]  # Zones clés pour la prise de décision
         if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected, closes[-1], key_zones):
             logger.info(f"🚀 Trade potentiel détecté sur {pair}")
             entry_price = closes[-1]
@@ -524,7 +513,8 @@ def analyze_pair(pair):
         else:
             logger.info("📉 Pas de conditions suffisantes pour ouvrir un trade.")
     except Exception as e:
-        logger.error(f"Erreur critique lors de l'analyse de {pair}: {e}")
+        logger.error(f"Erreur lors de l'analyse de {pair}: {str(e)}", exc_info=True)
+
 
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du bot de trading OANDA...")
