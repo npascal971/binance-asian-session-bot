@@ -789,23 +789,34 @@ def analyze_pair(pair):
         logger.info(f"📊 Indicateurs {pair}: RSI={latest_rsi:.2f}, MACD={latest_macd:.4f}, Signal MACD={latest_signal:.4f}")
         logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
         logger.debug(f"Prices - Entry:{entry_price}, SL:{stop_price}, Distance:{abs(entry_price-stop_price)}")
+     # Initialisation des variables avec des valeurs par défaut
+        entry_price = None
+        stop_price = None
+        direction = None
+        
         # 9. Vérifier les conditions de trading
         key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]
-        signal = should_open_trade(pair, latest_rsi, latest_macd, latest_signal, 
-                                 breakout_detected, closes[-1], key_zones, atr, candles)
+        trade_signal = should_open_trade(pair, latest_rsi, latest_macd, latest_signal, 
+                                      breakout_detected, closes[-1], key_zones, atr, candles)
         
-        if signal:  # 'buy' ou 'sell'
+        if trade_signal in ("buy", "sell"):
             entry_price = closes[-1]
-            if signal == "buy":
+            direction = trade_signal
+            
+            if direction == "buy":
                 stop_price = entry_price - ATR_MULTIPLIER_SL * atr
             else:  # sell
                 stop_price = entry_price + ATR_MULTIPLIER_SL * atr
             
-            # Déplacer le logging ICI après avoir défini les prix
-            logger.debug(f"Prices - Entry:{entry_price}, SL:{stop_price}, Distance:{abs(entry_price-stop_price)}")
+            # Logging sécurisé
+            if entry_price is not None and stop_price is not None:
+                logger.debug(f"Prices - Entry:{entry_price:.5f}, SL:{stop_price:.5f}, Distance:{abs(entry_price-stop_price):.5f}")
+            else:
+                logger.warning("Impossible de calculer les prix d'entrée/stop")
             
             account_balance = get_account_balance()
-            place_trade(pair, signal, entry_price, stop_price, atr, account_balance)
+            if entry_price and stop_price and direction:
+                place_trade(pair, direction, entry_price, stop_price, atr, account_balance)
         else:
             logger.info("📉 Pas de conditions suffisantes pour ouvrir un trade.")
             
