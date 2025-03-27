@@ -201,7 +201,7 @@ def detect_ltf_patterns(candles):
 
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
     """Calcule la taille de position selon le risque et le type d'instrument"""
-    risk_amount = account_balance * (RISK_PERCENTAGE / 100)  # Suppression de RISK_AMOUNT_CAP
+    risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
     risk_per_unit = abs(entry_price - stop_loss_price)
     
     if risk_per_unit == 0:
@@ -209,8 +209,11 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
         return 0
     
     # Conversion spéciale pour les paires crypto et XAU
-    if pair in CRYPTO_PAIRS or pair == "XAU_USD":
+    if pair in CRYPTO_PAIRS:
         units = risk_amount / risk_per_unit
+    elif pair == "XAU_USD":
+        # Pour l'or, 1 unité = 1 once, donc ajuster en divisant par 10000
+        units = risk_amount / (risk_per_unit * 10000)
     else:
         # Pour les paires forex standard
         units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
