@@ -478,6 +478,26 @@ def detect_reversal_patterns(candles):
 
     return reversal_patterns
 
+# Configuration des distances minimales par paire
+MIN_TRAILING_STOP_LOSS_DISTANCE = {
+    "XAU_USD": 0.5,  # Valeur minimale pour XAU/USD
+    "XAG_USD": 0.1,  # Valeur minimale pour XAG/USD
+    "EUR_USD": 0.0005,  # Valeur minimale pour EUR/USD
+    "GBP_JPY": 0.05,  # Valeur minimale pour GBP/JPY
+    "USD_JPY": 0.05,  # Valeur minimale pour USD/JPY
+    "DEFAULT": 0.0005  # Valeur par défaut pour les autres paires
+}
+
+logger = logging.getLogger(__name__)
+
+def validate_trailing_stop_loss_distance(pair, distance):
+    """Valide la distance du Trailing Stop Loss."""
+    min_distance = MIN_TRAILING_STOP_LOSS_DISTANCE.get(pair, MIN_TRAILING_STOP_LOSS_DISTANCE["DEFAULT"])
+    if distance < min_distance:
+        logger.warning(f"Distance Trailing Stop Loss ({distance}) inférieure à la valeur minimale autorisée ({min_distance}). Ajustement automatique.")
+        return min_distance
+    return distance
+
 def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
     """Exécute un trade sur le compte OANDA avec des contrôles renforcés"""
     
@@ -503,12 +523,12 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
 
         # Paramètres spécifiques aux paires
         PAIR_SETTINGS = {
-        "XAU_USD": {"decimal": 2, "min_distance": 0.5},
-        "XAG_USD": {"decimal": 2, "min_distance": 0.1},
-        "EUR_USD": {"decimal": 5, "min_distance": 0.0005},
-        "GBP_JPY": {"decimal": 3, "min_distance": 0.05},
-        "USD_JPY": {"decimal": 3, "min_distance": 0.05},
-        "DEFAULT": {"decimal": 5, "min_distance": 0.0005}  # Valeur par défaut
+            "XAU_USD": {"decimal": 2, "min_distance": 0.5},
+            "XAG_USD": {"decimal": 2, "min_distance": 0.1},
+            "EUR_USD": {"decimal": 5, "min_distance": 0.0005},
+            "GBP_JPY": {"decimal": 3, "min_distance": 0.05},
+            "USD_JPY": {"decimal": 3, "min_distance": 0.05},
+            "DEFAULT": {"decimal": 5, "min_distance": 0.0005}
         }
         settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
@@ -529,56 +549,50 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                 settings["decimal"]
             )
 
-        # 4. Préparation de l'ordre
-        trade_info = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "pair": pair,
-            "direction": direction,
-            "entry_price": entry_price,
-            "stop_price": stop_loss_price,
-            "take_profit": take_profit_price,
-            "units": units,
-            "atr": atr,
-            "risk_reward_ratio": round(abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price), 2)
-        }
+        # Validation de la distance du Trailing Stop Loss
+        trailing_stop_loss_distance = TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
+        validated_trailing_distance = validate_trailing_stop_loss_distance(pair, trailing_stop_loss_distance)
 
-        logger.info(
-            f"\n🎯 NOUVEAU TRADE {pair} {direction.upper()} 🎯\n"
-            f"Entrée: {entry_price:.{settings['decimal']}f}\n"
-            f"Stop: {stop_loss_price:.{settings['decimal']}f} ({abs(entry_price-stop_loss_price):.2f} pips)\n"
-            f"TP: {take_profit_price:.{settings['decimal']}f} (RR: {trade_info['risk_reward_ratio']}:1)\n"
-            f"Taille: {units} unités\n"
-            f"ATR: {atr:.2f} ({ATR_MULTIPLIER_SL}×ATR pour SL)"
-        )
+        # 4. Préparation de l'ordre
+        order_data = {
+            "order": {
+                "instrument": pair,
+                "units": str(int(units)) if direction == "buy" else str(-int(units)),
+                "type": "MARKET",
+                "positionFill": "DEFAULT",
+                "stopLossOnFill": {
+                    "price": f"{stop_loss_price:.{settings['decimal']}f}"
+                },
+                "takeProfitOnFill": {
+                    "price": f"{take_profit_price:.{settings['decimal']}f}"
+                },
+                "trailingStopLossOnFill": {
+                    "distance": f"{validated_trailing_distance:.5f}",
+                    "timeInForce": "GTC"
+                }
+            }
+        }
 
         # 5. Exécution en mode réel
         if not SIMULATION_MODE:
-            order_data = {
-                "order": {
-                    "instrument": pair,
-                    "units": str(int(units)) if direction == "buy" else str(-int(units)),
-                    "type": "MARKET",
-                    "positionFill": "DEFAULT",
-                    "stopLossOnFill": {
-                        "price": f"{stop_loss_price:.{settings['decimal']}f}"
-                    },
-                    "takeProfitOnFill": {
-                        "price": f"{take_profit_price:.{settings['decimal']}f}"
-                    },
-                    "trailingStopLossOnFill": {
-                        "distance": f"{TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:.5f}"
-                    }
-                }
-            }
-
-            # Gestion des erreurs OANDA
             try:
                 r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
                 response = client.request(r)
                 
                 if 'orderCreateTransaction' in response:
                     trade_id = response['orderCreateTransaction']['id']
-                    trade_info['trade_id'] = trade_id
+                    trade_info = {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "pair": pair,
+                        "direction": direction,
+                        "entry_price": entry_price,
+                        "stop_price": stop_loss_price,
+                        "take_profit": take_profit_price,
+                        "units": units,
+                        "atr": atr,
+                        "risk_reward_ratio": round(abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price), 2),
+                        "trade_id": trade_id
+                    }
                     active_trades.add(pair)
                     trade_history.append(trade_info)
                     
@@ -592,14 +606,34 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                     return None
 
             except oandapyV20.exceptions.V20Error as e:
-                logger.error(f"Erreur OANDA: {e.code} - {e.msg}")
-                return None
+                error_details = e.msg if hasattr(e, "msg") else str(e)
+                logger.error(f"Erreur OANDA: {error_details}")
+                
+                # Si l'erreur est liée à la distance minimale
+                if "TRAILING_STOP_LOSS_ON_FILL_PRICE_DISTANCE_MINIMUM_NOT_MET" in error_details:
+                    logger.warning("La distance minimale du Trailing Stop Loss n'est pas respectée. Réessayer avec une distance ajustée.")
+                    adjusted_distance = validate_trailing_stop_loss_distance(pair, validated_trailing_distance * 2)
+                    order_data["order"]["trailingStopLossOnFill"]["distance"] = f"{adjusted_distance:.5f}"
+                    response = client.request(orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data))
+                    logger.info(f"Trade exécuté après ajustement: {response}")
+                    return response['orderCreateTransaction']['id']
 
         # 6. Mode simulation
         else:
-            trade_info['trade_id'] = f"SIM_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-            trade_history.append(trade_info)
+            trade_info = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "pair": pair,
+                "direction": direction,
+                "entry_price": entry_price,
+                "stop_price": stop_loss_price,
+                "take_profit": take_profit_price,
+                "units": units,
+                "atr": atr,
+                "risk_reward_ratio": round(abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price), 2),
+                "trade_id": f"SIM_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            }
             active_trades.add(pair)
+            trade_history.append(trade_info)
             logger.info("📊 Trade simulé (non exécuté)")
             return trade_info['trade_id']
 
