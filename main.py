@@ -459,12 +459,21 @@ def analyze_pair(pair):
 
         # Récupérer les données M5 pour l'analyse LTF
         params = {"granularity": "M5", "count": 50, "price": "M"}
+        logger.debug(f"Requête API pour {pair}: URL=https://api-fxpractice.oanda.com/v3/instruments/{pair}/candles, Params={params}")
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        client.request(r)
-        candles = r.response['candles']
+        response = client.request(r)
+        candles = response['candles']
+        logger.debug(f"Réponse API reçue pour {pair}: {response}")
+
+        # Extraire les données des chandeliers
         closes = [float(c['mid']['c']) for c in candles if c['complete']]
         highs = [float(c['mid']['h']) for c in candles if c['complete']]
         lows = [float(c['mid']['l']) for c in candles if c['complete']]
+
+        # Vérifier si les données sont suffisantes
+        if len(closes) < 26:
+            logger.warning("Pas assez de données pour le calcul technique.")
+            return
 
         # Calcul des indicateurs techniques
         close_series = pd.Series(closes)
