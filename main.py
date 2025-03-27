@@ -78,24 +78,50 @@ def get_account_balance():
 
 def get_asian_session_range(pair):
     """Récupère le high et le low de la session asiatique"""
-    asian_start = dtime(23, 0)  # Début de la session asiatique (UTC)
-    asian_end = dtime(7, 0)     # Fin de la session asiatique (UTC)
+    # Définir les heures de début et de fin de la session asiatique
+    asian_start_time = dtime(23, 0)  # 23:00 UTC
+    asian_end_time = dtime(7, 0)     # 07:00 UTC
+
+    # Obtenir la date actuelle en UTC
+    now = datetime.utcnow()
+
+    # Calculer la date de début et de fin de la session asiatique
+    if now.time() < asian_end_time:
+        # Si nous sommes avant 07:00 UTC, la session asiatique correspond à la veille
+        asian_start_date = (now - timedelta(days=1)).date()
+        asian_end_date = now.date()
+    else:
+        # Sinon, la session asiatique correspond à aujourd'hui
+        asian_start_date = now.date()
+        asian_end_date = (now + timedelta(days=1)).date()
+
+    # Créer les objets datetime complets pour le début et la fin
+    asian_start = datetime.combine(asian_start_date, asian_start_time).isoformat() + "Z"
+    asian_end = datetime.combine(asian_end_date, asian_end_time).isoformat() + "Z"
+
+    # Paramètres de la requête API
     params = {
         "granularity": "M5",
-        "from": datetime.utcnow().replace(hour=asian_start.hour, minute=0, second=0, microsecond=0) - timedelta(days=1),
-        "to": datetime.utcnow().replace(hour=asian_end.hour, minute=0, second=0, microsecond=0),
+        "from": asian_start,
+        "to": asian_end,
         "price": "M"
     }
+
+    # Effectuer la requête API
     r = instruments.InstrumentsCandles(instrument=pair, params=params)
     client.request(r)
+
+    # Extraire les données des bougies
     candles = r.response['candles']
     highs = [float(c['mid']['h']) for c in candles if c['complete']]
     lows = [float(c['mid']['l']) for c in candles if c['complete']]
+
+    # Calculer le high et le low de la session asiatique
     asian_high = max(highs)
     asian_low = min(lows)
+
     logger.info(f"Range asiatique pour {pair}: High={asian_high}, Low={asian_low}")
     return asian_high, asian_low
-
 def analyze_htf(pair):
     """Analyse les timeframes élevés pour identifier des zones clés (FVG, OB, etc.)"""
     htf_params = {"granularity": "H4", "count": 50, "price": "M"}
