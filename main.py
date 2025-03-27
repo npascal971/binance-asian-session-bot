@@ -287,35 +287,91 @@ def detect_ltf_patterns(candles):
     return patterns_detected
 
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
-    """Calcule la taille de position selon le risque et le type d'instrument"""
-    risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
-    risk_per_unit = abs(entry_price - stop_loss_price)
-    
-    if risk_per_unit == 0:
-        logger.error("Distance SL nulle - trade annulé")
+    """
+    Calcule la taille de position selon le risque et le type d'instrument.
+    Ajout de validations pour éviter les erreurs liées à des données invalides.
+    """
+    try:
+        # Validation des paramètres d'entrée
+        if not all([account_balance, entry_price, stop_loss_price]):
+            logger.error("❌ Paramètres manquants pour le calcul des unités.")
+            return 0
+
+        # Conversion en nombres flottants pour éviter les erreurs de formatage
+        account_balance = float(account_balance)
+        entry_price = float(entry_price)
+        stop_loss_price = float(stop_loss_price)
+
+        # Calcul du montant de risque
+        risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
+        risk_per_unit = abs(entry_price - stop_loss_price)
+
+        # Vérification de la distance SL
+        if risk_per_unit == 0:
+            logger.error("❌ Distance SL nulle - trade annulé.")
+            return 0
+
+        # Conversion spéciale pour les paires crypto et XAU/XAG
+        if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
+            units = risk_amount / risk_per_unit
+        else:
+            # Pour les paires forex standard
+            units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
+
+        # Arrondir selon les conventions OANDA
+        if pair in CRYPTO_PAIRS:
+            units = round(units, 6)  # 6 décimales pour les cryptos
+        elif pair in ["XAU_USD", "XAG_USD"]:
+            units = round(units, 2)  # 2 décimales pour l'or et l'argent
+        else:
+            units = round(units)  # Unités entières pour forex
+
+        # Vérification finale : les unités doivent être strictement positives
+        if units <= 0:
+            logger.error("❌ Unités calculées invalides ou nulles.")
+            return 0
+
+        logger.info(
+            f"✅ Calcul des unités réussi : "
+            f"Montant risqué={risk_amount:.2f}, "
+            f"Distance SL={risk_per_unit:.5f}, "
+            f"Unités calculées={units}"
+        )
+        return units
+
+    except ValueError as ve:
+        logger.error(f"❌ Erreur de conversion numérique : {ve}")
         return 0
-    
-    # Conversion spéciale pour les paires crypto et XAU/XAG
-    if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
-        units = risk_amount / risk_per_unit
-    else:
-        # Pour les paires forex standard
-        units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
-    
-    # Arrondir selon les conventions OANDA
-    if pair in CRYPTO_PAIRS:
-        units = round(units, 6)  # 6 décimales pour les cryptos
-    elif pair in ["XAU_USD", "XAG_USD"]:
-        units = round(units, 2)  # 2 décimales pour l'or et l'argent
-    else:
-        units = round(units)  # Unités entières pour forex
-    
-    # Vérification finale : les unités doivent être strictement positives
-    if units <= 0:
-        logger.error("Unités calculées invalides ou nulles.")
+    except Exception as e:
+        logger.error(f"❌ Erreur inattendue lors du calcul des unités : {e}")
         return 0
-    
-    return units
+
+def process_pin_bar(pin_bar_data):
+    """Traite les données d'une Pin Bar."""
+    try:
+        # Extraction des valeurs numériques
+        high = validate_numeric(pin_bar_data.get("high"), "high")
+        low = validate_numeric(pin_bar_data.get("low"), "low")
+        close = validate_numeric(pin_bar_data.get("close"), "close")
+
+        if None in [high, low, close]:
+            logger.warning("Données Pin Bar invalides. Traitement ignoré.")
+            return None
+
+        # Calcul de la taille de la barre
+        bar_size = high - low
+        tail_size = max(close - low, high - close)
+
+        # Vérification si c'est une vraie Pin Bar
+        if tail_size > bar_size * 0.5:
+            return {"type": "Pin Bar", "size": bar_size}
+        else:
+            logger.info("Pin Bar détectée mais trop petite pour être considérée.")
+            return None
+
+    except Exception as e:
+        logger.error(f"Erreur lors du traitement de la Pin Bar: {e}")
+        return None
 
 def update_stop_loss(order_id, new_stop_loss):
     """Met à jour le Stop Loss d'une position existante"""
@@ -528,7 +584,7 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
             "EUR_USD": {"decimal": 5, "min_distance": 0.0005},
             "GBP_JPY": {"decimal": 3, "min_distance": 0.05},
             "USD_JPY": {"decimal": 3, "min_distance": 0.05},
-            "DEFAULT": {"decimal": 5, "min_distance": 0.0005}
+            "DEFAULT": {"decimal": 5, "min_distance": 0.0005}  # Valeur par défaut
         }
         settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
@@ -554,50 +610,60 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
         validated_trailing_distance = validate_trailing_stop_loss_distance(pair, trailing_stop_loss_distance)
 
         # 4. Préparation de l'ordre
-        order_data = {
-            "order": {
-                "instrument": pair,
-                "units": str(int(units)) if direction == "buy" else str(-int(units)),
-                "type": "MARKET",
-                "positionFill": "DEFAULT",
-                "stopLossOnFill": {
-                    "price": f"{stop_loss_price:.{settings['decimal']}f}"
-                },
-                "takeProfitOnFill": {
-                    "price": f"{take_profit_price:.{settings['decimal']}f}"
-                },
-                "trailingStopLossOnFill": {
-                    "distance": f"{validated_trailing_distance:.5f}",
-                    "timeInForce": "GTC"
-                }
-            }
+        trade_info = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "pair": pair,
+            "direction": direction,
+            "entry_price": entry_price,
+            "stop_price": stop_loss_price,
+            "take_profit": take_profit_price,
+            "units": units,
+            "atr": atr,
+            "risk_reward_ratio": round(abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price), 2)
         }
+
+        # Journalisation des détails du trade
+        logger.info(
+            f"\n🎯 NOUVEAU TRADE {pair} {direction.upper()} 🎯\n"
+            f"Entrée: {entry_price:.{settings['decimal']}f}\n"
+            f"Stop: {stop_loss_price:.{settings['decimal']}f} ({abs(entry_price-stop_loss_price):.2f} pips)\n"
+            f"TP: {take_profit_price:.{settings['decimal']}f} (RR: {trade_info['risk_reward_ratio']}:1)\n"
+            f"Taille: {units} unités\n"
+            f"ATR: {atr:.2f} ({ATR_MULTIPLIER_SL}×ATR pour SL)"
+        )
 
         # 5. Exécution en mode réel
         if not SIMULATION_MODE:
+            order_data = {
+                "order": {
+                    "instrument": pair,
+                    "units": str(int(units)) if direction == "buy" else str(-int(units)),
+                    "type": "MARKET",
+                    "positionFill": "DEFAULT",
+                    "stopLossOnFill": {
+                        "price": f"{stop_loss_price:.{settings['decimal']}f}"
+                    },
+                    "takeProfitOnFill": {
+                        "price": f"{take_profit_price:.{settings['decimal']}f}"
+                    },
+                    "trailingStopLossOnFill": {
+                        "distance": f"{validated_trailing_distance:.5f}",
+                        "timeInForce": "GTC"
+                    }
+                }
+            }
+
             try:
                 r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
                 response = client.request(r)
                 
                 if 'orderCreateTransaction' in response:
                     trade_id = response['orderCreateTransaction']['id']
-                    trade_info = {
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "pair": pair,
-                        "direction": direction,
-                        "entry_price": entry_price,
-                        "stop_price": stop_loss_price,
-                        "take_profit": take_profit_price,
-                        "units": units,
-                        "atr": atr,
-                        "risk_reward_ratio": round(abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price), 2),
-                        "trade_id": trade_id
-                    }
+                    trade_info['trade_id'] = trade_id
                     active_trades.add(pair)
                     trade_history.append(trade_info)
                     
-                    # Sauvegarde dans un journal
-                    save_trade_to_journal(trade_info)
+                  
                     
                     logger.info(f"✅ Trade exécuté (ID: {trade_id})")
                     return trade_id
@@ -620,20 +686,9 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
 
         # 6. Mode simulation
         else:
-            trade_info = {
-                "timestamp": datetime.utcnow().isoformat(),
-                "pair": pair,
-                "direction": direction,
-                "entry_price": entry_price,
-                "stop_price": stop_loss_price,
-                "take_profit": take_profit_price,
-                "units": units,
-                "atr": atr,
-                "risk_reward_ratio": round(abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price), 2),
-                "trade_id": f"SIM_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-            }
-            active_trades.add(pair)
+            trade_info['trade_id'] = f"SIM_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
             trade_history.append(trade_info)
+            active_trades.add(pair)
             logger.info("📊 Trade simulé (non exécuté)")
             return trade_info['trade_id']
 
@@ -641,17 +696,16 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
         logger.error(f"⛔ Erreur critique: {str(e)}", exc_info=True)
         return None
 
+def validate_numeric(value, name):
+    """Valide qu'une valeur est numérique."""
+    try:
+        return float(value)
+    except ValueError:
+        logger.error(f"Erreur de formatage {name}: '{value}' n'est pas un nombre.")
+        return None
 
-def save_trade_to_journal(trade_info):
-    """Sauvegarde les détails du trade dans un fichier journal"""
-    journal_file = "trading_journal.csv"
-    file_exists = os.path.exists(journal_file)
-    
-    with open(journal_file, 'a') as f:
-        writer = csv.DictWriter(f, fieldnames=trade_info.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(trade_info)
+
+
 def update_trailing_stop(pair, current_price, direction, current_sl):
     """Version plus conservative du trailing stop"""
     try:
