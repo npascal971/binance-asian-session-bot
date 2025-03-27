@@ -291,8 +291,8 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     reason = []
 
     # Filtre de volatilité : vérifiez que l'ATR est dans une plage acceptable
-    MIN_ATR_THRESHOLD = 0.5  # Exemple : seuil minimum d'ATR
-    MAX_ATR_THRESHOLD = 3.0  # Exemple : seuil maximum d'ATR
+    MIN_ATR_THRESHOLD = 0.3  # Exemple : seuil minimum d'ATR
+    MAX_ATR_THRESHOLD = 4.0  # Exemple : seuil maximum d'ATR
     if atr < MIN_ATR_THRESHOLD or atr > MAX_ATR_THRESHOLD:
         logger.info(f"Volatilité trop faible ou trop élevée pour {pair} (ATR={atr:.2f}). Aucun trade ouvert.")
         return False
@@ -501,7 +501,7 @@ def analyze_pair(pair):
         latest_signal = signal_line.iloc[-1]
         
         # Détection de breakout
-        breakout_up = closes[-1] > max(closes[-11:-1])
+        breakout_up = any(c['mid']['h'] > asian_high for c in candles[-5:])
         breakout_down = closes[-1] < min(closes[-11:-1])
         breakout_detected = breakout_up or breakout_down
         
