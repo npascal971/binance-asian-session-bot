@@ -334,6 +334,13 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     signal_detected = False
     reason = []
 
+    # Vérifier la volatilité
+    MIN_ATR_THRESHOLD = 0.5
+    MAX_ATR_THRESHOLD = 3.0
+    if atr < MIN_ATR_THRESHOLD or atr > MAX_ATR_THRESHOLD:
+        logger.info(f"Volatilité trop faible ou trop élevée pour {pair} (ATR={atr:.2f}). Aucun trade ouvert.")
+        return False
+
     # Vérifier si le prix est proche d'une zone clé
     for zone in key_zones:
         if abs(price - zone[0]) <= RETEST_ZONE_RANGE or abs(price - zone[1]) <= RETEST_ZONE_RANGE:
@@ -372,6 +379,19 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     if engulfing_patterns:
         signal_detected = True
         reason.append(f"Engulfing Pattern détecté: {engulfing_patterns}")
+
+    # Priorisation des signaux
+    if pin_bars or engulfing_patterns:
+        reason.append("Signal prioritaire: Pin Bar ou Engulfing Pattern")
+    elif breakout_detected:
+        reason.append("Signal secondaire: Breakout détecté")
+    elif rsi > 65 or rsi < 35:
+        reason.append("Signal basé sur RSI")
+
+    # Résolution des conflits entre signaux
+    if "RSI > 65 : signal de VENTE" in reason and "Breakout détecté" in reason:
+        logger.warning(f"Conflit de signal pour {pair}: RSI indique VENTE mais Breakout indique ACHAT.")
+        return False
 
     # Logs des raisons du signal
     if signal_detected:
