@@ -287,64 +287,51 @@ def detect_ltf_patterns(candles):
     return patterns_detected
 
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
-    """
-    Calcule la taille de position selon le risque et le type d'instrument.
-    Ajout de validations pour éviter les erreurs liées à des données invalides.
-    """
-    try:
-        # Validation des paramètres d'entrée
-        if not all([account_balance, entry_price, stop_loss_price]):
-            logger.error("❌ Paramètres manquants pour le calcul des unités.")
-            return 0
+    """Calcule la taille de position selon le risque et le type d'instrument"""
+    # Validation des paramètres
+    account_balance = validate_numeric(account_balance, "account_balance")
+    entry_price = validate_numeric(entry_price, "entry_price")
+    stop_loss_price = validate_numeric(stop_loss_price, "stop_loss_price")
 
-        # Conversion en nombres flottants pour éviter les erreurs de formatage
-        account_balance = float(account_balance)
-        entry_price = float(entry_price)
-        stop_loss_price = float(stop_loss_price)
-
-        # Calcul du montant de risque
-        risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
-        risk_per_unit = abs(entry_price - stop_loss_price)
-
-        # Vérification de la distance SL
-        if risk_per_unit == 0:
-            logger.error("❌ Distance SL nulle - trade annulé.")
-            return 0
-
-        # Conversion spéciale pour les paires crypto et XAU/XAG
-        if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
-            units = risk_amount / risk_per_unit
-        else:
-            # Pour les paires forex standard
-            units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
-
-        # Arrondir selon les conventions OANDA
-        if pair in CRYPTO_PAIRS:
-            units = round(units, 6)  # 6 décimales pour les cryptos
-        elif pair in ["XAU_USD", "XAG_USD"]:
-            units = round(units, 2)  # 2 décimales pour l'or et l'argent
-        else:
-            units = round(units)  # Unités entières pour forex
-
-        # Vérification finale : les unités doivent être strictement positives
-        if units <= 0:
-            logger.error("❌ Unités calculées invalides ou nulles.")
-            return 0
-
-        logger.info(
-            f"✅ Calcul des unités réussi : "
-            f"Montant risqué={risk_amount:.2f}, "
-            f"Distance SL={risk_per_unit:.5f}, "
-            f"Unités calculées={units}"
-        )
-        return units
-
-    except ValueError as ve:
-        logger.error(f"❌ Erreur de conversion numérique : {ve}")
+    if None in [account_balance, entry_price, stop_loss_price]:
+        logger.error("❌ Paramètres manquants ou invalides pour le calcul des unités.")
         return 0
-    except Exception as e:
-        logger.error(f"❌ Erreur inattendue lors du calcul des unités : {e}")
+
+    # Calcul du montant de risque
+    risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
+    risk_per_unit = abs(entry_price - stop_loss_price)
+
+    if risk_per_unit == 0:
+        logger.error("❌ Distance SL nulle - trade annulé.")
         return 0
+
+    # Conversion spéciale pour les paires crypto et XAU/XAG
+    if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
+        units = risk_amount / risk_per_unit
+    else:
+        # Pour les paires forex standard
+        units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
+
+    # Arrondir selon les conventions OANDA
+    if pair in CRYPTO_PAIRS:
+        units = round(units, 6)  # 6 décimales pour les cryptos
+    elif pair in ["XAU_USD", "XAG_USD"]:
+        units = round(units, 2)  # 2 décimales pour l'or et l'argent
+    else:
+        units = round(units)  # Unités entières pour forex
+
+    # Vérification finale : les unités doivent être strictement positives
+    if units <= 0:
+        logger.error("❌ Unités calculées invalides ou nulles.")
+        return 0
+
+    logger.info(
+        f"✅ Calcul des unités réussi : "
+        f"Montant risqué={risk_amount:.2f}, "
+        f"Distance SL={risk_per_unit:.5f}, "
+        f"Unités calculées={units}"
+    )
+    return units
 
 def process_pin_bar(pin_bar_data):
     """Traite les données d'une Pin Bar."""
@@ -701,9 +688,8 @@ def validate_numeric(value, name):
     try:
         return float(value)
     except ValueError:
-        logger.error(f"Erreur de formatage {name}: '{value}' n'est pas un nombre.")
+        logger.error(f"❌ Erreur de formatage {name}: '{value}' n'est pas un nombre.")
         return None
-
 
 
 def update_trailing_stop(pair, current_price, direction, current_sl):
