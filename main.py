@@ -285,10 +285,17 @@ def update_stop_loss(order_id, new_stop_loss):
     except Exception as e:
         logger.error(f"更新止损时发生错误: {e}")
 
-def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones):
+def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones, atr):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
     signal_detected = False
     reason = []
+
+    # Filtre de volatilité : vérifiez que l'ATR est dans une plage acceptable
+    MIN_ATR_THRESHOLD = 0.5  # Exemple : seuil minimum d'ATR
+    MAX_ATR_THRESHOLD = 3.0  # Exemple : seuil maximum d'ATR
+    if atr < MIN_ATR_THRESHOLD or atr > MAX_ATR_THRESHOLD:
+        logger.info(f"Volatilité trop faible ou trop élevée pour {pair} (ATR={atr:.2f}). Aucun trade ouvert.")
+        return False
 
     # Vérifier si le prix est proche d'une zone clé
     for zone in key_zones:
@@ -433,6 +440,23 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
         logger.error(f"❌ Erreur critique lors de la création de l'ordre: {str(e)}", exc_info=True)
         return None
 
+def update_trailing_stop(pair, current_price, direction, current_sl):
+    """Met à jour le Stop Loss dynamiquement avec un trailing stop"""
+    try:
+        # Calcul du nouveau Stop Loss
+        if direction == "buy":
+            new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
+            if new_sl > current_sl:  # Seulement si le SL peut être amélioré
+                return new_sl
+        elif direction == "sell":
+            new_sl = current_price + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
+            if new_sl < current_sl:  # Seulement si le SL peut être amélioré
+                return new_sl
+        return current_sl  # Si aucune amélioration n'est possible
+    except Exception as e:
+        logger.error(f"Erreur lors de la mise à jour du trailing stop pour {pair}: {e}")
+        return current_sl
+
 def analyze_pair(pair):
     """Analyse une paire de trading et exécute les trades si conditions remplies"""
     logger.info(f"🔍 Analyse de la paire {pair}...")
@@ -493,6 +517,10 @@ def analyze_pair(pair):
         # Détecter des patterns LTF (pin bars, engulfings, etc.)
         ltf_patterns = detect_ltf_patterns(candles)
         logger.info(f"Patterns LTF détectés pour {pair}: {ltf_patterns}")
+        # Ne pas ouvrir de trade si aucun pattern confirmatoire n'est détecté
+        if not ltf_patterns:
+            logger.info(f"Aucun pattern confirmatoire détecté pour {pair}. Trade annulé.")
+            return
 
         # Log des informations
         logger.info(f"📊 Indicateurs {pair}: RSI={latest_rsi:.2f}, MACD={latest_macd:.4f}, Signal MACD={latest_signal:.4f}")
@@ -570,7 +598,15 @@ while True:
                 response = client.request(r)
                 trade_id = response['position']['tradeIDs'][0]
                 current_sl = float(response['position']['long']['stopLossOrder']['price'])
-                direction = response['position']['long']['units'] > 0 and "buy" or "sell"
+                direction = "buy" if float(response['position']['long']['units']) > 0 else "sell"
+
+                # Mettre à jour le trailing stop
+                new_sl = update_trailing_stop(pair, current_price, direction, current_sl)
+                if new_sl != current_sl:
+                    update_stop_loss(trade_id, new_sl)
+                    logger.info(f"Trailing stop mis à jour pour {pair} : Nouveau SL={new_sl}")
+            except Exception as e:
+                logger.error(f"Erreur lors de la mise à jour du trailing stop pour {pair}: {e}")
 
                 # Calculer un nouveau SL si nécessaire
                 if direction == "buy" and current_price > current_sl + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
