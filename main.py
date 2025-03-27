@@ -656,9 +656,7 @@ def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_bala
                     active_trades.add(pair)
                     trade_history.append(trade_info)
                     
-                    # Sauvegarde dans un journal
-                    save_trade_to_journal(trade_info)
-                    
+                                       
                     logger.info(f"✅ Trade exécuté (ID: {trade_id})")
                     return trade_id
                 else:
