@@ -27,7 +27,7 @@ RISK_PERCENTAGE = 1
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 3.0
-SESSION_START = dtime(7, 0) #7
+SESSION_START = dtime(1, 0) #7
 SESSION_END = dtime(22, 0)
 RETEST_TOLERANCE_PIPS = 10
 RETEST_ZONE_RANGE = RETEST_TOLERANCE_PIPS * 0.0001
@@ -305,12 +305,12 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
             break
 
     # Conditions basées sur RSI
-    if rsi > 65:
+    if rsi > 70:
         signal_detected = True
-        reason.append("RSI > 65 : signal de VENTE")
-    elif rsi < 35:
+        reason.append("RSI > 70 : signal de VENTE")
+    elif rsi < 30:
         signal_detected = True
-        reason.append("RSI < 35 : signal d'ACHAT")
+        reason.append("RSI < 30 : signal d'ACHAT")
 
     # Conditions basées sur MACD
     if macd > macd_signal:
