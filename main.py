@@ -342,12 +342,11 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         "EUR_USD": {"min_atr": 0.0005, "rsi_overbought": 65, "rsi_oversold": 35},
         "GBP_JPY": {"min_atr": 0.10, "rsi_overbought": 70, "rsi_oversold": 30},
         "USD_JPY": {"min_atr": 0.08, "rsi_overbought": 70, "rsi_oversold": 30},
-        "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35}  # Ajouté
+        "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35}
     }
     
-    # Récupération sécurisée des paramètres
     settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
-    
+
     # 3. Vérification de la volatilité
     if atr < settings["min_atr"]:
         logger.info(f"Volatilité trop faible pour {pair} (ATR={atr:.2f}). Aucun trade ouvert.")
@@ -370,7 +369,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
             reasons.append("Prix dans zone clé")
             break
 
-    # RSI - Seuil plus strict
+    # RSI - Seuil strict
     if rsi > settings["rsi_overbought"]:
         signals["rsi"] = True
         reasons.append(f"RSI {rsi:.1f} > {settings['rsi_overbought']} (survendu)")
@@ -389,34 +388,41 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         signals["breakout"] = True
         reasons.append("Breakout fort détecté")
 
-    # Price Action - Plus exigeant
+    # Price Action - Correction ici
     pin_bars = detect_pin_bars(candles)
     engulfing_patterns = detect_engulfing_patterns(candles)
     
-    if pin_bars and len(pin_bars) > 0:
-        signals["price_action"] = True
-        reasons.append(f"Pin Bar confirmé (taille: {pin_bars[0][1]:.1f}×ATR)")
-    if engulfing_patterns and len(engulfing_patterns) > 0:
+    if pin_bars:
+        try:
+            # Conversion en float pour le formatage
+            pin_bar_size = float(pin_bars[0][1]) if isinstance(pin_bars[0][1], str) else pin_bars[0][1]
+            signals["price_action"] = True
+            reasons.append(f"Pin Bar confirmé (taille: {pin_bar_size:.1f}×ATR)")
+        except (IndexError, ValueError, TypeError) as e:
+            logger.warning(f"Erreur formatage Pin Bar: {e}")
+            signals["price_action"] = True
+            reasons.append("Pin Bar détecté (taille non disponible)")
+    
+    if engulfing_patterns:
         signals["price_action"] = True
         reasons.append("Engulfing Pattern fort")
 
-    # 5. Logique de décision améliorée
+    # 5. Logique de décision
     CONFIRMATION_REQUIRED = {
-        "XAU_USD": 3,  # Nécessite 3 signaux concordants pour l'or
+        "XAU_USD": 3,
         "XAG_USD": 2,
+        "GBP_JPY": 2,
         "DEFAULT": 2
     }
     required_confirmations = CONFIRMATION_REQUIRED.get(pair, CONFIRMATION_REQUIRED["DEFAULT"])
     
-    # Compter les signaux valides
     valid_signals = sum(signals.values())
     
-    # Vérifier la cohérence des signaux
     if valid_signals < required_confirmations:
         logger.info(f"Signaux insuffisants pour {pair} ({valid_signals}/{required_confirmations} confirmations)")
         return False
 
-    # Vérifier la cohérence de direction
+    # Vérification cohérence direction
     bullish_signals = 0
     bearish_signals = 0
     
@@ -435,10 +441,9 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     elif bearish_signals > bullish_signals and any([signals["breakout"], signals["price_action"], signals["zone"]]):
         logger.info(f"✅ Signal VENTE confirmé pour {pair} - Raisons: {', '.join(reasons)}")
         return "sell"
-    else:
-        logger.info(f"❌ Signaux contradictoires pour {pair} - Raisons: {', '.join(reasons)}")
-        return False
-
+    
+    logger.info(f"❌ Signaux contradictoires pour {pair} - Raisons: {', '.join(reasons)}")
+    return False
 def detect_reversal_patterns(candles):
     """Détecte des patterns de retournement (pin bars, engulfings)"""
     reversal_patterns = []
