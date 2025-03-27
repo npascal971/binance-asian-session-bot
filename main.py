@@ -341,11 +341,11 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
 
     # 2. Paramètres ajustés par paire
     PAIR_SETTINGS = {
-        "XAU_USD": {"min_atr": 1.5, "rsi_overbought": 70, "rsi_oversold": 30},
-        "XAG_USD": {"min_atr": 0.8, "rsi_overbought": 65, "rsi_oversold": 35},
+        "XAU_USD": {"min_atr": 0.5, "rsi_overbought": 70, "rsi_oversold": 30},
+        "XAG_USD": {"min_atr": 0.3, "rsi_overbought": 65, "rsi_oversold": 35},
         "EUR_USD": {"min_atr": 0.0005, "rsi_overbought": 65, "rsi_oversold": 35},
-        "GBP_JPY": {"min_atr": 0.10, "rsi_overbought": 70, "rsi_oversold": 30},
-        "USD_JPY": {"min_atr": 0.08, "rsi_overbought": 70, "rsi_oversold": 30},
+        "GBP_JPY": {"min_atr": 0.05, "rsi_overbought": 70, "rsi_oversold": 30},
+        "USD_JPY": {"min_atr": 0.05, "rsi_overbought": 70, "rsi_oversold": 30},
         "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35}
     }
     
