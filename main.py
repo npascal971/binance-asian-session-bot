@@ -274,37 +274,35 @@ def detect_ltf_patterns(candles):
     return patterns_detected
 
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
-    """
-    Calcule la taille de position selon le risque et le type d'instrument.
-    Correction incluse pour XAG_USD.
-    """
-    # Calcul du montant de risque
+    """Calcule la taille de position selon le risque et le type d'instrument"""
     risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
     risk_per_unit = abs(entry_price - stop_loss_price)
-
-    # Vérification de la validité du Stop Loss
+    
     if risk_per_unit == 0:
         logger.error("Distance SL nulle - trade annulé")
         return 0
-
-    # Conversion spéciale pour les paires crypto, XAU_USD (or) et XAG_USD (argent)
-    if pair in CRYPTO_PAIRS:  # Paires crypto
+    
+    # Conversion spéciale pour les paires crypto et XAU/XAG
+    if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
         units = risk_amount / risk_per_unit
-    elif pair == "XAU_USD" or pair == "XAG_USD":  # Or et argent
-        # Pour l'or et l'argent, 1 unité = 1 once, donc ajuster en divisant par 10000
-        units = risk_amount / (risk_per_unit * 10000)
-    else:  # Paires forex standard
-        # Pour les paires forex, convertir en USD (en supposant que 1 pip = 0.0001)
-        risk_per_unit_usd = (risk_per_unit * 10000) / entry_price
-        units = risk_amount / risk_per_unit_usd
-
+    else:
+        # Pour les paires forex standard
+        units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
+    
     # Arrondir selon les conventions OANDA
     if pair in CRYPTO_PAIRS:
-        return round(units, 6)  # 6 décimales pour les cryptos
-    elif pair == "XAU_USD" or pair == "XAG_USD":
-        return round(units, 2)  # 2 décimales pour l'or et l'argent
+        units = round(units, 6)  # 6 décimales pour les cryptos
+    elif pair in ["XAU_USD", "XAG_USD"]:
+        units = round(units, 2)  # 2 décimales pour l'or et l'argent
     else:
-        return round(units)  # Unités entières pour forex
+        units = round(units)  # Unités entières pour forex
+    
+    # Vérification finale : les unités doivent être strictement positives
+    if units <= 0:
+        logger.error("Unités calculées invalides ou nulles.")
+        return 0
+    
+    return units
 
 def update_stop_loss(order_id, new_stop_loss):
     """Met à jour le Stop Loss d'une position existante"""
@@ -396,13 +394,15 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
     if pair in active_trades:
         logger.info(f"🚫 Trade déjà actif sur {pair}, aucun nouveau trade ne sera ouvert.")
         return None
-
+    
     try:
         units = calculate_position_size(account_balance, entry_price, stop_price, pair)
-        if units == 0:
-            logger.error("❌ Calcul des unités invalide - trade annulé")
+        
+        # Validation des unités
+        if units <= 0:
+            logger.error("❌ Unités invalides ou nulles - trade annulé")
             return None
-
+        
         # Calcul du take profit
         if direction == "buy":
             take_profit_price = round(entry_price + ATR_MULTIPLIER_TP * atr, 5)
@@ -446,7 +446,6 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                     }
                 }
             }
-            
             logger.debug(f"Données de l'ordre envoyé à OANDA: {order_data}")
             
             r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
@@ -468,7 +467,6 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
             active_trades.add(pair)
             logger.info("✅ Trade simulé (mode simulation activé)")
             return "SIMULATED_TRADE_ID"
-            
     except Exception as e:
         logger.error(f"❌ Erreur critique lors de la création de l'ordre: {str(e)}", exc_info=True)
         return None
