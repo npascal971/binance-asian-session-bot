@@ -541,12 +541,19 @@ def main_loop():
 if __name__ == "__main__":
     logger.info("🚀 DÉMARRAGE DU BOT DE TRADING 🚀")
     
-    # Initialisation des données asiatiques
+    # Initialize session ranges if they don't exist
+    global asian_ranges, european_ranges
+    asian_ranges = {}
+    european_ranges = {}
+    
+    # Analyze Asian session first
+    analyze_asian_session()
+    
+    # If we still don't have ranges for some pairs, use empty dict as fallback
     for pair in PAIRS:
         if pair not in asian_ranges:
-            logger.info(f"🔍 Récupération des données asiatiques historiques pour {pair}...")
-            historical_range = fetch_historical_asian_range(pair)
-            if historical_range:
-                asian_ranges[pair] = historical_range
-            else:
-                analyze_asian_session()  # Appel ici
+            asian_ranges[pair] = {"high": 0, "low": 0}
+            logger.warning(f"⚠️ Aucune donnée de range asiatique pour {pair}, utilisation de valeurs par défaut")
+    
+    # Start the main loop
+    main_loop()
