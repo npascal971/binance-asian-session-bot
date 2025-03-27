@@ -397,23 +397,23 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
     
     try:
         units = calculate_position_size(account_balance, entry_price, stop_price, pair)
-        
-        # Validation des unités
-        if units <= 0:
-            logger.error("❌ Unités invalides ou nulles - trade annulé")
+        if units == 0:
+            logger.error("❌ Calcul des unités invalide - trade annulé")
             return None
         
-        # Calcul du take profit
-        if direction == "buy":
-            take_profit_price = round(entry_price + ATR_MULTIPLIER_TP * atr, 5)
+        # Calcul du take profit et du stop loss avec arrondi spécifique
+        if pair in ["XAU_USD", "XAG_USD"]:
+            take_profit_price = round(entry_price + ATR_MULTIPLIER_TP * atr, 2)  # 2 décimales pour XAU_USD et XAG_USD
+            stop_loss_price = round(stop_price, 2)  # 2 décimales pour XAU_USD et XAG_USD
         else:
-            take_profit_price = round(entry_price - ATR_MULTIPLIER_TP * atr, 5)
+            take_profit_price = round(entry_price + ATR_MULTIPLIER_TP * atr, 5)  # 5 décimales pour forex
+            stop_loss_price = round(stop_price, 5)  # 5 décimales pour forex
         
         logger.info(f"\n💖 NOUVEAU TRADE DÉTECTÉ 💖\n"
                     f"Paire: {pair}\n"
                     f"Direction: {direction.upper()}\n"
                     f"Prix d'entrée: {entry_price}\n"
-                    f"Stop Loss: {stop_price}\n"
+                    f"Stop Loss: {stop_loss_price}\n"
                     f"Take Profit: {take_profit_price}\n"
                     f"Unités: {units}\n"
                     f"Solde compte: {account_balance}")
@@ -423,7 +423,7 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
             "pair": pair,
             "direction": direction,
             "entry_price": entry_price,
-            "stop_price": stop_price,
+            "stop_price": stop_loss_price,
             "take_profit": take_profit_price,
             "units": units
         }
@@ -436,10 +436,10 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                     "type": "MARKET",
                     "positionFill": "DEFAULT",
                     "stopLossOnFill": {
-                        "price": "{0:.5f}".format(stop_price)
+                        "price": "{0:.5f}".format(stop_loss_price) if pair not in ["XAU_USD", "XAG_USD"] else "{0:.2f}".format(stop_loss_price)
                     },
                     "takeProfitOnFill": {
-                        "price": "{0:.5f}".format(take_profit_price)
+                        "price": "{0:.5f}".format(take_profit_price) if pair not in ["XAU_USD", "XAG_USD"] else "{0:.2f}".format(take_profit_price)
                     },
                     "trailingStopLossOnFill": {
                         "distance": "{0:.5f}".format(TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001)
