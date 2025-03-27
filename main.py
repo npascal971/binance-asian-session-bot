@@ -337,17 +337,15 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
 
     # 2. Paramètres ajustés par paire
     PAIR_SETTINGS = {
-    "XAU_USD": {
-        "risk_multiplier": 0.5,  # Réduire le risque pour l'or
-        "min_atr": 1.5,
-        "trailing_distance": 50
-    },
-    "XAG_USD": {
-        "risk_multiplier": 0.3,
-        "min_atr": 0.5,
-        "trailing_distance": 30
-    }}
+        "XAU_USD": {"min_atr": 1.5, "rsi_overbought": 70, "rsi_oversold": 30},
+        "XAG_USD": {"min_atr": 0.8, "rsi_overbought": 65, "rsi_oversold": 35},
+        "EUR_USD": {"min_atr": 0.0005, "rsi_overbought": 65, "rsi_oversold": 35},
+        "GBP_JPY": {"min_atr": 0.10, "rsi_overbought": 70, "rsi_oversold": 30},
+        "USD_JPY": {"min_atr": 0.08, "rsi_overbought": 70, "rsi_oversold": 30},
+        "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35}  # Ajouté
+    }
     
+    # Récupération sécurisée des paramètres
     settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
     
     # 3. Vérification de la volatilité
@@ -492,9 +490,12 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
 
         # Paramètres spécifiques aux paires
         PAIR_SETTINGS = {
-            "XAU_USD": {"decimal": 2, "min_distance": 0.5},
-            "XAG_USD": {"decimal": 2, "min_distance": 0.1},
-            "DEFAULT": {"decimal": 5, "min_distance": 0.0005}
+        "XAU_USD": {"decimal": 2, "min_distance": 0.5},
+        "XAG_USD": {"decimal": 2, "min_distance": 0.1},
+        "EUR_USD": {"decimal": 5, "min_distance": 0.0005},
+        "GBP_JPY": {"decimal": 3, "min_distance": 0.05},
+        "USD_JPY": {"decimal": 3, "min_distance": 0.05},
+        "DEFAULT": {"decimal": 5, "min_distance": 0.0005}  # Valeur par défaut
         }
         settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
