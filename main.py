@@ -165,37 +165,49 @@ def update_closed_trades():
     except Exception as e:
         logger.error(f"Erreur lors de la mise à jour des trades fermés: {e}")
 
-def detect_htf_zones(pair):
-    """Détecte des zones clés (FVG, OB) sur des timeframes élevés"""
+def analyze_htf(pair):
+    """Analyse les timeframes élevés pour identifier des zones clés (FVG, OB, etc.)"""
     htf_params = {"granularity": "H4", "count": 50, "price": "M"}
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=htf_params)
         client.request(r)
         candles = r.response['candles']
+        
+        # Vérifier si les bougies sont valides
+        if not candles or not all(c['complete'] for c in candles):
+            logger.warning(f"Données incomplètes ou invalides pour {pair}.")
+            return [], []
+        
         closes = [float(c['mid']['c']) for c in candles if c['complete']]
         highs = [float(c['mid']['h']) for c in candles if c['complete']]
         lows = [float(c['mid']['l']) for c in candles if c['complete']]
-
+        
+        # Vérification supplémentaire : au moins deux bougies sont nécessaires
+        if len(closes) < 2:
+            logger.warning(f"Pas assez de données HTF pour {pair}.")
+            return [], []
+        
+        # Calcul des FVG (Fair Value Gaps)
         fvg_zones = []
-        ob_zones = []
-
         for i in range(1, len(candles) - 1):
             if highs[i] < lows[i - 1] and closes[i + 1] > highs[i]:
                 fvg_zones.append((highs[i], lows[i - 1]))
             elif lows[i] > highs[i - 1] and closes[i + 1] < lows[i]:
                 fvg_zones.append((lows[i], highs[i - 1]))
-
+        
+        # Identification des Order Blocks (OB)
+        ob_zones = []
+        for i in range(len(candles) - 1):
             if closes[i] > closes[i + 1]:  # Bearish candle
                 ob_zones.append((lows[i + 1], highs[i]))
             elif closes[i] < closes[i + 1]:  # Bullish candle
                 ob_zones.append((lows[i], highs[i + 1]))
-
+        
         logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
         return fvg_zones, ob_zones
     except Exception as e:
-        logger.error(f"Erreur lors de la détection des zones HTF pour {pair}: {e}")
+        logger.error(f"Erreur lors de l'analyse HTF pour {pair}: {e}")
         return [], []
-
 def analyze_htf(pair):
     """Analyse les timeframes élevés pour identifier des zones clés (FVG, OB, etc.)"""
     htf_params = {"granularity": "H4", "count": 50, "price": "M"}
