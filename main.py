@@ -541,7 +541,7 @@ def validate_trailing_stop_loss_distance(pair, distance):
         return min_distance
     return distance
 
-def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
+def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_balance):
     """Exécute un trade sur le compte OANDA avec des contrôles renforcés"""
     
     # 1. Contrôles pré-trade
@@ -559,9 +559,9 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
 
     try:
         # 2. Calculs de position avec vérifications
-        units = calculate_position_size(account_balance, entry_price, stop_price, pair)
+        units = calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
         if units <= 0:
-            logger.error("❌ Taille de position invalide")
+            logger.error("❌ Taille de position invalide. Aucun trade exécuté.")
             return None
 
         # Paramètres spécifiques aux paires
@@ -581,7 +581,7 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
             settings["decimal"]
         )
         
-        stop_loss_price = round(stop_price, settings["decimal"])
+        stop_loss_price = round(stop_loss_price, settings["decimal"])
         
         # Validation des distances
         min_distance = settings["min_distance"]
@@ -596,7 +596,7 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
         trailing_stop_loss_distance = TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
         validated_trailing_distance = validate_trailing_stop_loss_distance(pair, trailing_stop_loss_distance)
 
-        # 4. Préparation de l'ordre
+        # 4. Préparation des informations du trade
         trade_info = {
             "timestamp": datetime.utcnow().isoformat(),
             "pair": pair,
@@ -650,7 +650,8 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                     active_trades.add(pair)
                     trade_history.append(trade_info)
                     
-                  
+                    # Sauvegarde dans un journal
+                    save_trade_to_journal(trade_info)
                     
                     logger.info(f"✅ Trade exécuté (ID: {trade_id})")
                     return trade_id
