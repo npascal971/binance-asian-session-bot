@@ -51,7 +51,11 @@ logging.basicConfig(
 logger = logging.getLogger()
 
 SIMULATION_MODE = False  # Mettre à True pour tester sans exécuter de vrais trades
-CONFIRMATION_REQUIRED = True 
+CONFIRMATION_REQUIRED = {
+    "XAU_USD": 2,  # Nombre de confirmations requises pour XAU_USD
+    "EUR_USD": 1,  # Nombre de confirmations requises pour EUR_USD
+    "DEFAULT": 1   # Valeur par défaut pour les autres paires
+}
 trade_history = []
 active_trades = set()
 
