@@ -330,79 +330,116 @@ def update_stop_loss(order_id, new_stop_loss):
 
 def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones, atr, candles):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
-    # Vérifier que les indicateurs sont valides
+    # 1. Vérifications initiales
     if rsi is None or macd is None or macd_signal is None:
         logger.error(f"Indicateurs manquants pour {pair}. Aucun trade ouvert.")
         return False
 
-    signal_detected = False
-    reason = []
-
-    # Vérifier la volatilité
-    MIN_ATR_THRESHOLD = 0.5
-    MAX_ATR_THRESHOLD = 3.0
-    if atr < MIN_ATR_THRESHOLD or atr > MAX_ATR_THRESHOLD:
-        logger.info(f"Volatilité trop faible ou trop élevée pour {pair} (ATR={atr:.2f}). Aucun trade ouvert.")
+    # 2. Paramètres ajustés par paire
+    PAIR_SETTINGS = {
+    "XAU_USD": {
+        "risk_multiplier": 0.5,  # Réduire le risque pour l'or
+        "min_atr": 1.5,
+        "trailing_distance": 50
+    },
+    "XAG_USD": {
+        "risk_multiplier": 0.3,
+        "min_atr": 0.5,
+        "trailing_distance": 30
+    }
+    
+    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+    
+    # 3. Vérification de la volatilité
+    if atr < settings["min_atr"]:
+        logger.info(f"Volatilité trop faible pour {pair} (ATR={atr:.2f}). Aucun trade ouvert.")
         return False
 
-    # Vérifier si le prix est proche d'une zone clé
+    # 4. Détection des signaux
+    signals = {
+        "rsi": False,
+        "macd": False,
+        "price_action": False,
+        "breakout": False,
+        "zone": False
+    }
+    reasons = []
+
+    # Vérification des zones clés
     for zone in key_zones:
         if abs(price - zone[0]) <= RETEST_ZONE_RANGE or abs(price - zone[1]) <= RETEST_ZONE_RANGE:
-            signal_detected = True
-            reason.append("Prix proche d'une zone clé")
+            signals["zone"] = True
+            reasons.append("Prix dans zone clé")
             break
 
-    # Conditions basées sur RSI
-    if rsi > 65:
-        signal_detected = True
-        reason.append("RSI > 65 : signal de VENTE")
-    elif rsi < 35:
-        signal_detected = True
-        reason.append("RSI < 35 : signal d'ACHAT")
+    # RSI - Seuil plus strict
+    if rsi > settings["rsi_overbought"]:
+        signals["rsi"] = True
+        reasons.append(f"RSI {rsi:.1f} > {settings['rsi_overbought']} (survendu)")
+    elif rsi < settings["rsi_oversold"]:
+        signals["rsi"] = True
+        reasons.append(f"RSI {rsi:.1f} < {settings['rsi_oversold']} (suracheté)")
 
-    # Conditions basées sur MACD
-    if macd > macd_signal:
-        signal_detected = True
-        reason.append("MACD croise au-dessus du signal : signal d'ACHAT")
-    elif macd < macd_signal:
-        signal_detected = True
-        reason.append("MACD croise en dessous du signal : signal de VENTE")
+    # MACD - Confirmation requise
+    macd_crossover = (macd > macd_signal and macd_signal > 0) or (macd < macd_signal and macd_signal < 0)
+    if macd_crossover:
+        signals["macd"] = True
+        reasons.append("Croisement MACD confirmé")
 
-    # Détection de breakout
-    if breakout_detected:
-        signal_detected = True
-        reason.append("Breakout détecté sur le range asiatique")
+    # Breakout - Plus strict
+    if breakout_detected and atr > settings["min_atr"] * 1.5:
+        signals["breakout"] = True
+        reasons.append("Breakout fort détecté")
 
-    # Détecter des patterns (pin bars, engulfing)
+    # Price Action - Plus exigeant
     pin_bars = detect_pin_bars(candles)
     engulfing_patterns = detect_engulfing_patterns(candles)
+    
+    if pin_bars and len(pin_bars) > 0:
+        signals["price_action"] = True
+        reasons.append(f"Pin Bar confirmé (taille: {pin_bars[0][1]:.1f}×ATR)")
+    if engulfing_patterns and len(engulfing_patterns) > 0:
+        signals["price_action"] = True
+        reasons.append("Engulfing Pattern fort")
 
-    if pin_bars:
-        signal_detected = True
-        reason.append(f"Pin Bar détecté: {pin_bars}")
-    if engulfing_patterns:
-        signal_detected = True
-        reason.append(f"Engulfing Pattern détecté: {engulfing_patterns}")
-
-    # Priorisation des signaux
-    if pin_bars or engulfing_patterns:
-        reason.append("Signal prioritaire: Pin Bar ou Engulfing Pattern")
-    elif breakout_detected:
-        reason.append("Signal secondaire: Breakout détecté")
-    elif rsi > 65 or rsi < 35:
-        reason.append("Signal basé sur RSI")
-
-    # Résolution des conflits entre signaux
-    if "RSI > 65 : signal de VENTE" in reason and "Breakout détecté" in reason:
-        logger.warning(f"Conflit de signal pour {pair}: RSI indique VENTE mais Breakout indique ACHAT.")
+    # 5. Logique de décision améliorée
+    CONFIRMATION_REQUIRED = {
+        "XAU_USD": 3,  # Nécessite 3 signaux concordants pour l'or
+        "XAG_USD": 2,
+        "DEFAULT": 2
+    }
+    required_confirmations = CONFIRMATION_REQUIRED.get(pair, CONFIRMATION_REQUIRED["DEFAULT"])
+    
+    # Compter les signaux valides
+    valid_signals = sum(signals.values())
+    
+    # Vérifier la cohérence des signaux
+    if valid_signals < required_confirmations:
+        logger.info(f"Signaux insuffisants pour {pair} ({valid_signals}/{required_confirmations} confirmations)")
         return False
 
-    # Logs des raisons du signal
-    if signal_detected:
-        logger.info(f"💡 Signal détecté pour {pair} → Raisons: {', '.join(reason)}")
+    # Vérifier la cohérence de direction
+    bullish_signals = 0
+    bearish_signals = 0
+    
+    if signals["rsi"]:
+        if rsi < settings["rsi_oversold"]: bullish_signals += 1
+        else: bearish_signals += 1
+        
+    if signals["macd"]:
+        if macd > macd_signal: bullish_signals += 1
+        else: bearish_signals += 1
+
+    # Décision finale
+    if bullish_signals >= bearish_signals and any([signals["breakout"], signals["price_action"], signals["zone"]]):
+        logger.info(f"✅ Signal ACHAT confirmé pour {pair} - Raisons: {', '.join(reasons)}")
+        return "buy"
+    elif bearish_signals > bullish_signals and any([signals["breakout"], signals["price_action"], signals["zone"]]):
+        logger.info(f"✅ Signal VENTE confirmé pour {pair} - Raisons: {', '.join(reasons)}")
+        return "sell"
     else:
-        logger.info(f"🔍 Aucun signal détecté pour {pair}")
-    return signal_detected
+        logger.info(f"❌ Signaux contradictoires pour {pair} - Raisons: {', '.join(reasons)}")
+        return False
 
 def detect_reversal_patterns(candles):
     """Détecte des patterns de retournement (pin bars, engulfings)"""
@@ -431,45 +468,54 @@ def detect_reversal_patterns(candles):
     return reversal_patterns
 
 def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
-    """Exécute un trade sur le compte OANDA"""
-    if pair in active_trades:
-        logger.info(f"🚫 Trade déjà actif sur {pair}, aucun nouveau trade ne sera ouvert.")
-        return None
+    """Exécute un trade sur le compte OANDA avec des contrôles renforcés"""
     
+    # 1. Contrôles pré-trade
+    if pair in active_trades:
+        logger.info(f"🚫 Trade déjà actif sur {pair}")
+        return None
+
+    # Délai minimum entre trades sur même paire (30 minutes)
+    MIN_TRADE_INTERVAL = 1800  
+    last_trade = next((t for t in reversed(trade_history) if t['pair'] == pair), None)
+    
+    if last_trade and (datetime.utcnow() - datetime.fromisoformat(last_trade['timestamp'])).seconds < MIN_TRADE_INTERVAL:
+        logger.info(f"⏳ Délai minimum non respecté pour {pair} (attendre {MIN_TRADE_INTERVAL//60} min)")
+        return None
+
     try:
-        # Calcul de la taille de position
+        # 2. Calculs de position avec vérifications
         units = calculate_position_size(account_balance, entry_price, stop_price, pair)
-        if units == 0:
-            logger.error("❌ Calcul des unités invalide - trade annulé")
+        if units <= 0:
+            logger.error("❌ Taille de position invalide")
             return None
-        
-        # Calcul du take profit et du stop loss avec arrondi spécifique
-        if pair in ["XAU_USD", "XAG_USD"]:
-            take_profit_price = round(entry_price + ATR_MULTIPLIER_TP * atr, 2)  # 2 décimales pour XAU_USD et XAG_USD
-            stop_loss_price = round(stop_price, 2)  # 2 décimales pour XAU_USD et XAG_USD
-        else:
-            take_profit_price = round(entry_price + ATR_MULTIPLIER_TP * atr, 5)  # 5 décimales pour forex
-            stop_loss_price = round(stop_price, 5)  # 5 décimales pour forex
-        
-        # Validation de la distance minimale pour le Trailing Stop Loss
-        MIN_TRAILING_STOP_LOSS_DISTANCE = 0.5  # Valeur minimale pour XAU_USD (à ajuster selon l'instrument)
-        trailing_stop_loss_distance = TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
 
-        if trailing_stop_loss_distance < MIN_TRAILING_STOP_LOSS_DISTANCE:
-            logger.warning(f"Distance Trailing Stop Loss ({trailing_stop_loss_distance}) inférieure à la valeur minimale autorisée ({MIN_TRAILING_STOP_LOSS_DISTANCE}). Ajustement automatique.")
-            trailing_stop_loss_distance = MIN_TRAILING_STOP_LOSS_DISTANCE
+        # Paramètres spécifiques aux paires
+        PAIR_SETTINGS = {
+            "XAU_USD": {"decimal": 2, "min_distance": 0.5},
+            "XAG_USD": {"decimal": 2, "min_distance": 0.1},
+            "DEFAULT": {"decimal": 5, "min_distance": 0.0005}
+        }
+        settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
-        # Logs pour le débogage
-        logger.info(f"\n💖 NOUVEAU TRADE DÉTECTÉ 💖\n"
-                    f"Paire: {pair}\n"
-                    f"Direction: {direction.upper()}\n"
-                    f"Prix d'entrée: {entry_price}\n"
-                    f"Stop Loss: {stop_loss_price}\n"
-                    f"Take Profit: {take_profit_price}\n"
-                    f"Unités: {units}\n"
-                    f"Solde compte: {account_balance}")
+        # 3. Calcul des niveaux de stop et take profit
+        take_profit_price = round(
+            entry_price + (ATR_MULTIPLIER_TP * atr if direction == "buy" else -ATR_MULTIPLIER_TP * atr),
+            settings["decimal"]
+        )
         
-        # Préparation des données de l'ordre
+        stop_loss_price = round(stop_price, settings["decimal"])
+        
+        # Validation des distances
+        min_distance = settings["min_distance"]
+        if abs(entry_price - stop_loss_price) < min_distance:
+            logger.warning(f"Distance SL trop faible (<{min_distance}), ajustement automatique")
+            stop_loss_price = round(
+                entry_price - (min_distance if direction == "buy" else -min_distance),
+                settings["decimal"]
+            )
+
+        # 4. Préparation de l'ordre
         trade_info = {
             "timestamp": datetime.utcnow().isoformat(),
             "pair": pair,
@@ -477,9 +523,21 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
             "entry_price": entry_price,
             "stop_price": stop_loss_price,
             "take_profit": take_profit_price,
-            "units": units
+            "units": units,
+            "atr": atr,
+            "risk_reward_ratio": round(abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price), 2)
         }
-        
+
+        logger.info(
+            f"\n🎯 NOUVEAU TRADE {pair} {direction.upper()} 🎯\n"
+            f"Entrée: {entry_price:.{settings['decimal']}f}\n"
+            f"Stop: {stop_loss_price:.{settings['decimal']}f} ({abs(entry_price-stop_loss_price):.2f} pips)\n"
+            f"TP: {take_profit_price:.{settings['decimal']}f} (RR: {trade_info['risk_reward_ratio']}:1)\n"
+            f"Taille: {units} unités\n"
+            f"ATR: {atr:.2f} ({ATR_MULTIPLIER_SL}×ATR pour SL)"
+        )
+
+        # 5. Exécution en mode réel
         if not SIMULATION_MODE:
             order_data = {
                 "order": {
@@ -488,58 +546,85 @@ def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
                     "type": "MARKET",
                     "positionFill": "DEFAULT",
                     "stopLossOnFill": {
-                        "price": "{0:.5f}".format(stop_loss_price) if pair not in ["XAU_USD", "XAG_USD"] else "{0:.2f}".format(stop_loss_price)
+                        "price": f"{stop_loss_price:.{settings['decimal']}f}"
                     },
                     "takeProfitOnFill": {
-                        "price": "{0:.5f}".format(take_profit_price) if pair not in ["XAU_USD", "XAG_USD"] else "{0:.2f}".format(take_profit_price)
+                        "price": f"{take_profit_price:.{settings['decimal']}f}"
                     },
                     "trailingStopLossOnFill": {
-                        "distance": "{0:.5f}".format(trailing_stop_loss_distance)
+                        "distance": f"{TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:.5f}"
                     }
                 }
             }
-            logger.debug(f"Données de l'ordre envoyé à OANDA: {order_data}")
-            
-            # Envoi de la requête pour créer l'ordre
-            r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
-            response = client.request(r)
-            
-            # Vérification de la réponse
-            if 'orderCreateTransaction' in response:
-                trade_id = response['orderCreateTransaction']['id']
-                logger.info(f"✔️ Trade exécuté avec succès. ID: {trade_id}")
-                trade_info['trade_id'] = trade_id
-                active_trades.add(pair)
-                trade_history.append(trade_info)
-                return trade_id
-            else:
-                logger.error(f"❌ Erreur dans la réponse OANDA: {response}")
+
+            # Gestion des erreurs OANDA
+            try:
+                r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+                response = client.request(r)
+                
+                if 'orderCreateTransaction' in response:
+                    trade_id = response['orderCreateTransaction']['id']
+                    trade_info['trade_id'] = trade_id
+                    active_trades.add(pair)
+                    trade_history.append(trade_info)
+                    
+                    # Sauvegarde dans un journal
+                    save_trade_to_journal(trade_info)
+                    
+                    logger.info(f"✅ Trade exécuté (ID: {trade_id})")
+                    return trade_id
+                else:
+                    logger.error(f"❌ Réponse OANDA anormale: {response}")
+                    return None
+
+            except oandapyV20.exceptions.V20Error as e:
+                logger.error(f"Erreur OANDA: {e.code} - {e.msg}")
                 return None
+
+        # 6. Mode simulation
         else:
-            # Mode simulation
-            trade_info['trade_id'] = "SIMULATED_TRADE_ID"
+            trade_info['trade_id'] = f"SIM_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
             trade_history.append(trade_info)
             active_trades.add(pair)
-            logger.info("✅ Trade simulé (mode simulation activé)")
-            return "SIMULATED_TRADE_ID"
+            logger.info("📊 Trade simulé (non exécuté)")
+            return trade_info['trade_id']
+
     except Exception as e:
-        logger.error(f"❌ Erreur critique lors de la création de l'ordre: {str(e)}", exc_info=True)
+        logger.error(f"⛔ Erreur critique: {str(e)}", exc_info=True)
         return None
+
+
+def save_trade_to_journal(trade_info):
+    """Sauvegarde les détails du trade dans un fichier journal"""
+    journal_file = "trading_journal.csv"
+    file_exists = os.path.exists(journal_file)
+    
+    with open(journal_file, 'a') as f:
+        writer = csv.DictWriter(f, fieldnames=trade_info.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(trade_info)
 def update_trailing_stop(pair, current_price, direction, current_sl):
-    """Met à jour le Stop Loss dynamiquement avec un trailing stop"""
+    """Version plus conservative du trailing stop"""
     try:
-        # Calcul du nouveau Stop Loss
-        if direction == "buy":
-            new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
-            if new_sl > current_sl:  # Seulement si le SL peut être amélioré
+        # Augmenter la distance d'activation
+        TRAILING_DISTANCE = 50 * 0.0001  # 50 pips pour XAU/USD
+        
+        # Ne mettre à jour que si le profit est > 2x le risque
+        if direction == "buy" and current_price > entry_price + 2*(entry_price - current_sl):
+            new_sl = current_price - TRAILING_DISTANCE
+            if new_sl > current_sl:
                 return new_sl
-        elif direction == "sell":
-            new_sl = current_price + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
-            if new_sl < current_sl:  # Seulement si le SL peut être amélioré
+                
+        # Logique similaire pour les shorts
+        elif direction == "sell" and current_price < entry_price - 2*(current_sl - entry_price):
+            new_sl = current_price + TRAILING_DISTANCE
+            if new_sl < current_sl:
                 return new_sl
-        return current_sl  # Si aucune amélioration n'est possible
+                
+        return current_sl
     except Exception as e:
-        logger.error(f"Erreur lors de la mise à jour du trailing stop pour {pair}: {e}")
+        logger.error(f"Erreur trailing stop: {e}")
         return current_sl
 
 def analyze_pair(pair):
