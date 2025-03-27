@@ -27,7 +27,7 @@ RISK_PERCENTAGE = 1
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 3.0
-SESSION_START = dtime(7, 0)
+SESSION_START = dtime(1, 0) #7
 SESSION_END = dtime(22, 0)
 RETEST_TOLERANCE_PIPS = 10
 RETEST_ZONE_RANGE = RETEST_TOLERANCE_PIPS * 0.0001
@@ -148,6 +148,37 @@ def update_closed_trades():
     except Exception as e:
         logger.error(f"Erreur lors de la mise à jour des trades fermés: {e}")
 
+def detect_htf_zones(pair):
+    """Détecte des zones clés (FVG, OB) sur des timeframes élevés"""
+    htf_params = {"granularity": "H4", "count": 50, "price": "M"}
+    try:
+        r = instruments.InstrumentsCandles(instrument=pair, params=htf_params)
+        client.request(r)
+        candles = r.response['candles']
+        closes = [float(c['mid']['c']) for c in candles if c['complete']]
+        highs = [float(c['mid']['h']) for c in candles if c['complete']]
+        lows = [float(c['mid']['l']) for c in candles if c['complete']]
+
+        fvg_zones = []
+        ob_zones = []
+
+        for i in range(1, len(candles) - 1):
+            if highs[i] < lows[i - 1] and closes[i + 1] > highs[i]:
+                fvg_zones.append((highs[i], lows[i - 1]))
+            elif lows[i] > highs[i - 1] and closes[i + 1] < lows[i]:
+                fvg_zones.append((lows[i], highs[i - 1]))
+
+            if closes[i] > closes[i + 1]:  # Bearish candle
+                ob_zones.append((lows[i + 1], highs[i]))
+            elif closes[i] < closes[i + 1]:  # Bullish candle
+                ob_zones.append((lows[i], highs[i + 1]))
+
+        logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
+        return fvg_zones, ob_zones
+    except Exception as e:
+        logger.error(f"Erreur lors de la détection des zones HTF pour {pair}: {e}")
+        return [], []
+
 def analyze_htf(pair):
     """Analyse les timeframes élevés pour identifier des zones clés (FVG, OB, etc.)"""
     htf_params = {"granularity": "H4", "count": 50, "price": "M"}
@@ -265,10 +296,10 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected):
     signal_detected = False
     reason = []
 
-    if rsi > 70:
+    if rsi > 60:
         signal_detected = True
         reason.append("RSI > 70 : signal de VENTE")
-    elif rsi < 30:
+    elif rsi < 35:
         signal_detected = True
         reason.append("RSI < 30 : signal d'ACHAT")
 
@@ -289,6 +320,32 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected):
         logger.info(f"🔍 Aucun signal détecté pour {pair}")
 
     return signal_detected
+
+def detect_reversal_patterns(candles):
+    """Détecte des patterns de retournement (pin bars, engulfings)"""
+    reversal_patterns = []
+
+    for i in range(1, len(candles)):
+        open_price = float(candles[i]['mid']['o'])
+        close_price = float(candles[i]['mid']['c'])
+        high_price = float(candles[i]['mid']['h'])
+        low_price = float(candles[i]['mid']['l'])
+
+        # Pin bar
+        body = abs(open_price - close_price)
+        wick = high_price - low_price
+        if wick > 3 * body:
+            reversal_patterns.append("Pin Bar")
+
+        # Engulfing
+        prev_close = float(candles[i - 1]['mid']['c'])
+        prev_open = float(candles[i - 1]['mid']['o'])
+        if close_price > prev_open and open_price < prev_close:
+            reversal_patterns.append("Bullish Engulfing")
+        elif close_price < prev_open and open_price > prev_close:
+            reversal_patterns.append("Bearish Engulfing")
+
+    return reversal_patterns
 
 def place_trade(pair, direction, entry_price, stop_price, atr, account_balance):
     """Exécute un trade sur le compte OANDA"""
@@ -378,9 +435,16 @@ def analyze_pair(pair):
     try:
         # Récupérer le range asiatique
         asian_high, asian_low = get_asian_session_range(pair)
+        if asian_high is None or asian_low is None:
+            logger.warning(f"Impossible de récupérer le range asiatique pour {pair}.")
+            return
 
-        # Analyser les timeframes élevés (HTF)
+        # Log du range asiatique
+        logger.info(f"Range asiatique pour {pair}: High={asian_high}, Low={asian_low}")
+
+        # Analyser les timeframes élevés (HTF) pour détecter les zones clés (FVG, OB)
         fvg_zones, ob_zones = analyze_htf(pair)
+        logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
 
         # Récupérer les données M5 pour l'analyse LTF
         params = {"granularity": "M5", "count": 50, "price": "M"}
@@ -413,16 +477,17 @@ def analyze_pair(pair):
         breakout_down = closes[-1] < min(closes[-11:-1])
         breakout_detected = breakout_up or breakout_down
 
-        # Détecter des patterns LTF
+        # Détecter des patterns LTF (pin bars, engulfings, etc.)
         ltf_patterns = detect_ltf_patterns(candles)
+        logger.info(f"Patterns LTF détectés pour {pair}: {ltf_patterns}")
 
         # Log des informations
         logger.info(f"📊 Indicateurs {pair}: RSI={latest_rsi:.2f}, MACD={latest_macd:.4f}, Signal MACD={latest_signal:.4f}")
         logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
-        logger.info(f"Patterns LTF détectés: {ltf_patterns}")
 
         # Vérifier les conditions pour ouvrir un trade
-        if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected):
+        key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]  # Zones clés pour la prise de décision
+        if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected, closes[-1], key_zones):
             logger.info(f"🚀 Trade potentiel détecté sur {pair}")
             entry_price = closes[-1]
             atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
