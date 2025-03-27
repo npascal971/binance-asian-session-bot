@@ -776,6 +776,7 @@ def analyze_pair(pair):
         # ATR
         atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
         logger.debug(f"ATR calculé pour {pair}: {atr} (14 périodes)")
+        
         # 6. Détection de breakout
         breakout_up = any(float(c['mid']['h']) > asian_high for c in candles[-5:] if c['complete'])
         breakout_down = closes[-1] < min(closes[-11:-1])
@@ -788,11 +789,9 @@ def analyze_pair(pair):
         # 8. Log des indicateurs
         logger.info(f"📊 Indicateurs {pair}: RSI={latest_rsi:.2f}, MACD={latest_macd:.4f}, Signal MACD={latest_signal:.4f}")
         logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
-        logger.debug(f"Prices - Entry:{entry_price}, SL:{stop_price}, Distance:{abs(entry_price-stop_price)}")
-     # Initialisation des variables avec des valeurs par défaut
-        entry_price = None
-        stop_price = None
-        direction = None
+
+        # Initialisation des variables avant utilisation
+        entry_price = stop_price = direction = None
         
         # 9. Vérifier les conditions de trading
         key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]
@@ -803,20 +802,26 @@ def analyze_pair(pair):
             entry_price = closes[-1]
             direction = trade_signal
             
-            if direction == "buy":
-                stop_price = entry_price - ATR_MULTIPLIER_SL * atr
-            else:  # sell
-                stop_price = entry_price + ATR_MULTIPLIER_SL * atr
+            # Calcul du stop loss en fonction de la direction
+            stop_price = (entry_price - ATR_MULTIPLIER_SL * atr) if direction == "buy" \
+                        else (entry_price + ATR_MULTIPLIER_SL * atr)
             
             # Logging sécurisé
-            if entry_price is not None and stop_price is not None:
-                logger.debug(f"Prices - Entry:{entry_price:.5f}, SL:{stop_price:.5f}, Distance:{abs(entry_price-stop_price):.5f}")
+            if all([entry_price is not None, stop_price is not None]):
+                logger.debug(f"Trade parameters - Pair: {pair}, "
+                           f"Direction: {direction}, "
+                           f"Entry: {entry_price:.5f}, "
+                           f"SL: {stop_price:.5f}, "
+                           f"Distance: {abs(entry_price-stop_price):.5f}")
             else:
-                logger.warning("Impossible de calculer les prix d'entrée/stop")
+                logger.warning("Données de prix manquantes pour le logging")
             
+            # Exécution du trade
             account_balance = get_account_balance()
-            if entry_price and stop_price and direction:
+            if all([entry_price, stop_price, direction, account_balance]):
                 place_trade(pair, direction, entry_price, stop_price, atr, account_balance)
+            else:
+                logger.error("Paramètres de trade invalides - trade annulé")
         else:
             logger.info("📉 Pas de conditions suffisantes pour ouvrir un trade.")
             
