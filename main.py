@@ -453,7 +453,7 @@ if __name__ == "__main__":
         logger.error(f"❌ Échec de la connexion à OANDA: {e}")
         exit(1)
     
-    while True:
+while True:
     now = datetime.utcnow().time()
     if SESSION_START <= now <= SESSION_END:
         logger.info("⏱ Session active - Analyse des paires...")
