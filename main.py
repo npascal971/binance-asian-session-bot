@@ -400,6 +400,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         logger.info(f"🔍 Aucun signal détecté pour {pair}")
     return signal_detected
 
+
 def detect_reversal_patterns(candles):
     """Détecte des patterns de retournement (pin bars, engulfings)"""
     reversal_patterns = []
