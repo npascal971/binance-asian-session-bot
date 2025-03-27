@@ -216,7 +216,8 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
         units = risk_amount / (risk_per_unit * 10000)
     else:
         # Pour les paires forex standard
-        units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
+        risk_per_unit_usd = (risk_per_unit * 10000) / entry_price  # Convertir en USD
+        units = risk_amount / risk_per_unit_usd  # Calcul en lots standard
     
     # Arrondir selon les conventions OANDA
     if pair in CRYPTO_PAIRS:
