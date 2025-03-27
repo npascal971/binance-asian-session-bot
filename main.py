@@ -331,6 +331,11 @@ def update_stop_loss(order_id, new_stop_loss):
 
 def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones, atr, candles):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
+    # Vérifier que les indicateurs sont valides
+    if rsi is None or macd is None or macd_signal is None:
+        logger.error(f"Indicateurs manquants pour {pair}. Aucun trade ouvert.")
+        return False
+
     signal_detected = False
     reason = []
 
@@ -399,7 +404,6 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     else:
         logger.info(f"🔍 Aucun signal détecté pour {pair}")
     return signal_detected
-
 
 def detect_reversal_patterns(candles):
     """Détecte des patterns de retournement (pin bars, engulfings)"""
