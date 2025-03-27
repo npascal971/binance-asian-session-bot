@@ -41,7 +41,9 @@ INSTRUMENT_SPECS = {
     "USD_JPY": {"pip": 0.01, "min_units": 1000, "precision": 0, "margin_rate": 0.04},
     "XAU_USD": {"pip": 0.01, "min_units": 1, "precision": 2, "margin_rate": 0.02},
 }
-
+# Initialize session ranges
+asian_ranges = {}
+european_ranges = {}
 # Sessions horaires
 ASIAN_SESSION_START = datetime.strptime("00:00", "%H:%M").time()
 ASIAN_SESSION_END = datetime.strptime("08:00", "%H:%M").time()
