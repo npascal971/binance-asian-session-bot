@@ -533,40 +533,46 @@ def analyze_pair(pair):
     """Analyse une paire de trading et exécute les trades si conditions remplies"""
     logger.info(f"🔍 Analyse de la paire {pair}...")
     try:
-        # Récupérer le range asiatique
+        # 1. Récupérer le range asiatique
         asian_high, asian_low = get_asian_session_range(pair)
         if asian_high is None or asian_low is None:
             logger.warning(f"Impossible de récupérer le range asiatique pour {pair}.")
             return
         
-        # Log du range asiatique
         logger.info(f"Range asiatique pour {pair}: High={asian_high}, Low={asian_low}")
         
-        # Analyser les timeframes élevés (HTF) pour détecter les zones clés (FVG, OB)
+        # 2. Analyser les timeframes élevés (HTF)
         fvg_zones, ob_zones = analyze_htf(pair)
         logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
         
-        # Récupérer les données M5 pour l'analyse LTF
-       # Récupérer les données M5 pour l'analyse LTF
+        # 3. Récupérer les données M5
         params = {"granularity": "M5", "count": 50, "price": "M"}
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         client.request(r)
         candles = r.response['candles']
-
-        # Passer les bougies à should_open_trade
-        if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected, closes[-1], key_zones, atr, candles):
-            logger.info(f"🚀 Trade potentiel détecté sur {pair}")
         
-        # Calcul des indicateurs techniques
+        # 4. Extraire les séries de prix
+        closes = [float(c['mid']['c']) for c in candles if c['complete']]
+        highs = [float(c['mid']['h']) for c in candles if c['complete']]
+        lows = [float(c['mid']['l']) for c in candles if c['complete']]
+        
+        if len(closes) < 20:
+            logger.warning(f"Pas assez de bougies complètes pour {pair} ({len(closes)}/20)")
+            return
+
+        # 5. Calculer les indicateurs techniques
         close_series = pd.Series(closes)
         high_series = pd.Series(highs)
         low_series = pd.Series(lows)
+        
+        # RSI
         delta = close_series.diff().dropna()
         gain = delta.where(delta > 0, 0).rolling(window=14).mean()
         loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
         rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        latest_rsi = rsi.iloc[-1]
+        latest_rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        
+        # MACD
         ema12 = close_series.ewm(span=12, adjust=False).mean()
         ema26 = close_series.ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
@@ -574,25 +580,25 @@ def analyze_pair(pair):
         latest_macd = macd_line.iloc[-1]
         latest_signal = signal_line.iloc[-1]
         
-        # Détection de breakout
-        breakout_up = any(c['mid']['h'] > asian_high for c in candles[-5:])
+        # ATR
+        atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
+        
+        # 6. Détection de breakout
+        breakout_up = any(float(c['mid']['h']) > asian_high for c in candles[-5:] if c['complete'])
         breakout_down = closes[-1] < min(closes[-11:-1])
         breakout_detected = breakout_up or breakout_down
         
-        # Détecter des patterns LTF (pin bars, engulfings, etc.)
+        # 7. Détecter les patterns
         ltf_patterns = detect_ltf_patterns(candles)
         logger.info(f"Patterns LTF détectés pour {pair}: {ltf_patterns}")
         
-        # Log des informations
+        # 8. Log des indicateurs
         logger.info(f"📊 Indicateurs {pair}: RSI={latest_rsi:.2f}, MACD={latest_macd:.4f}, Signal MACD={latest_signal:.4f}")
         logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
         
-        # Calcul de l'ATR (Average True Range)
-        atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
-        
-        # Vérifier les conditions pour ouvrir un trade
-        key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]  # Zones clés pour la prise de décision
-        if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected, closes[-1], key_zones, atr):
+        # 9. Vérifier les conditions de trading
+        key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]
+        if should_open_trade(pair, latest_rsi, latest_macd, latest_signal, breakout_detected, closes[-1], key_zones, atr, candles):
             logger.info(f"🚀 Trade potentiel détecté sur {pair}")
             entry_price = closes[-1]
             if breakout_up:
@@ -605,6 +611,7 @@ def analyze_pair(pair):
             place_trade(pair, direction, entry_price, stop_price, atr, account_balance)
         else:
             logger.info("📉 Pas de conditions suffisantes pour ouvrir un trade.")
+            
     except Exception as e:
         logger.error(f"Erreur lors de l'analyse de {pair}: {str(e)}", exc_info=True)
 
