@@ -445,15 +445,15 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
             reasons.append("Prix dans zone clé")
             break
 
-    # RSI - Seuil strict
-    if rsi > settings["rsi_overbought"]:
-        signals["rsi"] = True
-        reasons.append(f"RSI {rsi:.1f} > {settings['rsi_overbought']} (survendu)")
-    elif rsi < settings["rsi_oversold"]:
+    # RSI - Seuils stricts (achat si RSI < 30, vente si RSI > 70)
+    if rsi < settings["rsi_oversold"]:
         signals["rsi"] = True
         reasons.append(f"RSI {rsi:.1f} < {settings['rsi_oversold']} (suracheté)")
+    elif rsi > settings["rsi_overbought"]:
+        signals["rsi"] = True
+        reasons.append(f"RSI {rsi:.1f} > {settings['rsi_overbought']} (survendu)")
 
-    # MACD -  requise
+    # MACD - Confirmation requise
     macd_crossover = (macd > macd_signal and macd_signal > 0) or (macd < macd_signal and macd_signal < 0)
     if macd_crossover:
         signals["macd"] = True
@@ -501,23 +501,28 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     bearish_signals = 0
     
     if signals["rsi"]:
-        if rsi < settings["rsi_oversold"]: bullish_signals += 1
-        else: bearish_signals += 1
+        if rsi < settings["rsi_oversold"]: 
+            bullish_signals += 1
+        elif rsi > settings["rsi_overbought"]: 
+            bearish_signals += 1
         
     if signals["macd"]:
-        if macd > macd_signal: bullish_signals += 1
-        else: bearish_signals += 1
+        if macd > macd_signal: 
+            bullish_signals += 1
+        else: 
+            bearish_signals += 1
 
     # Décision finale
     if bullish_signals >= bearish_signals and any([signals["breakout"], signals["price_action"], signals["zone"]]):
-        logger.info(f"✅ Signal ACHAT confirmé pour {pair}")
+        logger.info(f"✅ Signal ACHAT confirmé pour {pair} - Raisons: {', '.join(reasons)}")
         return "buy"
     elif bearish_signals > bullish_signals and any([signals["breakout"], signals["price_action"], signals["zone"]]):
-        logger.info(f"✅ Signal VENTE confirmé pour {pair}")
+        logger.info(f"✅ Signal VENTE confirmé pour {pair} - Raisons: {', '.join(reasons)}")
         return "sell"
     
     logger.info(f"❌ Signaux contradictoires pour {pair} - Raisons: {', '.join(reasons)}")
     return False
+
 def detect_reversal_patterns(candles):
     """Détecte des patterns de retournement (pin bars, engulfings)"""
     reversal_patterns = []
