@@ -164,32 +164,45 @@ def get_asian_session_range(pair):
         return None, None
 
 def detect_pin_bars(candles):
-    """Détecte des pin bars dans une série de bougies"""
+    """Détecte les pin bars dans les données des bougies"""
     pin_bars = []
-    for i in range(1, len(candles)-1):
-        if not candles[i]['complete']:
+    for candle in candles:
+        try:
+            # Extraction des données de la bougie
+            open_price = float(candle['mid']['o'])
+            high = float(candle['mid']['h'])
+            low = float(candle['mid']['l'])
+            close = float(candle['mid']['c'])
+
+            # Calcul des composants de la bougie
+            upper_wick = high - max(open_price, close)
+            lower_wick = min(open_price, close) - low
+            body_size = abs(close - open_price)
+
+            # Vérification pour éviter une division par zéro
+            if body_size == 0:
+                logger.warning("Bougie avec body_size=0 détectée (doji ou données invalides). Ignorée.")
+                continue
+
+            # Calcul du ratio entre les mèches et le corps
+            ratio = round(max(upper_wick, lower_wick) / body_size, 1)
+
+            # Détection d'une pin bar
+            if ratio >= PIN_BAR_RATIO_THRESHOLD:
+                pin_bar_type = "Bullish" if close > open_price else "Bearish"
+                pin_bars.append({
+                    "type": pin_bar_type,
+                    "ratio": ratio,
+                    "open": open_price,
+                    "high": high,
+                    "low": low,
+                    "close": close
+                })
+
+        except Exception as e:
+            logger.error(f"Erreur lors de la détection des pin bars : {e}")
             continue
-            
-        open_p = float(candles[i]['mid']['o'])
-        close_p = float(candles[i]['mid']['c'])
-        high_p = float(candles[i]['mid']['h'])
-        low_p = float(candles[i]['mid']['l'])
-        
-        body_size = abs(close_p - open_p)
-        upper_wick = high_p - max(open_p, close_p)
-        lower_wick = min(open_p, close_p) - low_p
-        
-        # Critère Pin Bar
-        if (upper_wick > 2 * body_size) or (lower_wick > 2 * body_size):
-            pin_type = "Bullish" if lower_wick > upper_wick else "Bearish"
-            pin_bar_size = max(upper_wick, lower_wick)  # Taille réelle en pips
-            pin_bars.append({
-                "index": i,
-                "type": pin_type,
-                "size": pin_bar_size,
-                "ratio": round(max(upper_wick, lower_wick) / body_size, 1)
-            })
-    
+
     return pin_bars
 
 def detect_engulfing_patterns(candles):
