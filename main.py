@@ -298,66 +298,26 @@ def detect_ltf_patterns(candles):
 
     return patterns_detected
 
+MIN_DISTANCE = 0.0001  # Distance minimale acceptable
+
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
     """Calcule la taille de position selon le risque et le type d'instrument"""
-    try:
-        # Validation des paramètres
-        account_balance = float(account_balance)
-        entry_price = float(entry_price)
-        stop_loss_price = float(stop_loss_price)
+    risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
+    risk_per_unit = abs(entry_price - stop_loss_price)
 
-        # Calcul du montant de risque
-        risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
-        risk_per_unit = abs(entry_price - stop_loss_price)
+    # Ajustement automatique si la distance est trop faible
+    if risk_per_unit < MIN_DISTANCE:
+        logger.warning(f"Distance SL trop faible (<{MIN_DISTANCE}), ajustement automatique")
+        risk_per_unit = MIN_DISTANCE
 
-        # Vérification pour éviter une division par zéro
-        if risk_per_unit == 0:
-            logger.error("❌ Distance SL nulle - trade annulé.")
-            return 0
+    # Conversion spéciale pour les paires crypto et XAU/XAG
+    if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
+        units = risk_amount / risk_per_unit
+    else:
+        # Pour les paires forex standard
+        units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
 
-        # Ajustement automatique si la distance est trop faible
-        MIN_DISTANCE = 0.0001
-        if risk_per_unit < MIN_DISTANCE:
-            logger.warning(f"Distance SL trop faible (<{MIN_DISTANCE}), ajustement automatique")
-            risk_per_unit = MIN_DISTANCE
-
-        # Conversion spéciale pour les paires crypto et XAU/XAG
-        if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
-            units = risk_amount / risk_per_unit
-        else:
-            # Pour les paires forex standard
-            units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
-
-        # Arrondir selon les conventions OANDA
-        if pair in CRYPTO_PAIRS:
-            units = round(units, 6)  # 6 décimales pour les cryptos
-        elif pair in ["XAU_USD", "XAG_USD"]:
-            units = round(units, 2)  # 2 décimales pour l'or et l'argent
-        else:
-            units = round(units)  # Unités entières pour forex
-
-        # Vérification finale : les unités doivent être strictement positives
-        if units <= 0:
-            logger.error("❌ Unités calculées invalides ou nulles.")
-            return 0
-
-        logger.info(
-            f"✅ Calcul des unités réussi : "
-            f"Montant risqué={risk_amount:.2f}, "
-            f"Distance SL={risk_per_unit:.5f}, "
-            f"Unités calculées={units}"
-        )
-        return units
-
-    except ValueError as ve:
-        logger.error(f"❌ Erreur de conversion numérique : {ve}")
-        return 0
-    except ZeroDivisionError:
-        logger.error("❌ Division par zéro détectée.")
-        return 0
-    except Exception as e:
-        logger.error(f"❌ Erreur inattendue lors du calcul des unités : {e}")
-        return 0
+    return units
     
 def process_pin_bar(pin_bar_data):
     """Traite les données d'une Pin Bar."""
