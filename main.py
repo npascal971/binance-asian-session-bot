@@ -301,68 +301,42 @@ def detect_ltf_patterns(candles):
 MIN_DISTANCE = 0.0001  # Distance minimale acceptable
 
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
-    """Calcule la taille de position selon le risque et le type d'instrument"""
+    """Version corrigée pour GBP_JPY et autres paires JPY"""
     try:
-        # Conversion en nombres flottants
-        account_balance = float(account_balance)
-        entry_price = float(entry_price)
-        stop_loss_price = float(stop_loss_price)
-
-        # Journalisation des paramètres
-        logger.debug(
-            f"Paramètres pour calculate_position_size: "
-            f"account_balance={account_balance}, "
-            f"entry_price={entry_price}, "
-            f"stop_loss_price={stop_loss_price}, "
-            f"pair={pair}"
-        )
+        # Validation des paramètres
+        if None in [account_balance, entry_price, stop_loss_price]:
+            logger.error("Paramètres manquants pour le calcul des unités")
+            return 0
 
         # Calcul du montant de risque
         risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
         risk_per_unit = abs(entry_price - stop_loss_price)
 
-        # Ajustement automatique si la distance est trop faible
-        MIN_DISTANCE = 0.0001
-        if risk_per_unit < MIN_DISTANCE:
-            logger.warning(f"Distance SL trop faible (<{MIN_DISTANCE}), ajustement automatique")
-            risk_per_unit = MIN_DISTANCE
+        logger.debug(f"Paramètres calcul: RiskAmount={risk_amount:.2f} "
+                    f"RiskPerUnit={risk_per_unit:.5f} "
+                    f"Pair={pair}")
 
-        # Conversion spéciale pour les paires crypto et XAU/XAG
-        if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
-            units = risk_amount / risk_per_unit
-        else:
-            # Pour les paires forex standard
-            units = risk_amount / (risk_per_unit * 10000)  # Conversion en lots standard
-
-        # Arrondir selon les conventions OANDA
-        if pair in CRYPTO_PAIRS:
-            units = round(units, 6)  # 6 décimales pour les cryptos
-        elif pair in ["XAU_USD", "XAG_USD"]:
-            units = round(units, 2)  # 2 décimales pour l'or et l'argent
-        else:
-            units = round(units)  # Unités entières pour forex
-
-        # Vérification finale : les unités doivent être strictement positives
-        if units <= 0:
-            logger.error("❌ Unités calculées invalides ou nulles.")
+        if risk_per_unit <= 0:
+            logger.error("Distance SL nulle ou négative")
             return 0
 
-        logger.info(
-            f"✅ Calcul des unités réussi : "
-            f"Montant risqué={risk_amount:.2f}, "
-            f"Distance SL={risk_per_unit:.5f}, "
-            f"Unités calculées={units}"
-        )
-        return units
+        # Conversion spéciale pour les paires JPY
+        if "_JPY" in pair:
+            units = (risk_amount / risk_per_unit)  # Pas de division supplémentaire pour JPY
+            units = round(units)  # Unités entières
+        elif pair in ["XAU_USD", "XAG_USD"]:
+            units = risk_amount / risk_per_unit
+            units = round(units, 2)
+        else:  # Forex standard
+            units = (risk_amount / risk_per_unit) / 10000
+            units = round(units)
 
-    except ValueError as ve:
-        logger.error(f"❌ Erreur de conversion numérique : {ve}")
-        return 0
-    except ZeroDivisionError:
-        logger.error("❌ Division par zéro détectée.")
-        return 0
+        logger.info(f"Unités calculées: {units} (Type: {'JPY' if '_JPY' in pair else 'Standard'})")
+        
+        return units if units > 0 else 0
+
     except Exception as e:
-        logger.error(f"❌ Erreur inattendue lors du calcul des unités : {e}")
+        logger.error(f"Erreur calcul position: {str(e)}")
         return 0
 
 def process_pin_bar(pin_bar_data):
@@ -574,7 +548,23 @@ def validate_trailing_stop_loss_distance(pair, distance):
 
 def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_balance):
     """Exécute un trade sur le compte OANDA avec des contrôles renforcés"""
+    """Version corrigée avec validation renforcée"""
+    # Vérification initiale
+    if None in [entry_price, stop_price, direction, atr, account_balance]:
+        logger.error("Paramètres manquants pour le trade")
+        return None
+
+    # Conversion spéciale pour GBP_JPY
+    if pair == "GBP_JPY":
+        entry_price = round(entry_price, 3)
+        stop_price = round(stop_price, 3)
+
+    units = calculate_position_size(account_balance, entry_price, stop_price, pair)
     
+    if units <= 0:
+        logger.error(f"Unités invalides: {units} - Vérifiez Risk% ou SL Distance")
+        return None
+
     # 1. Contrôles pré-trade
     if pair in active_trades:
         logger.info(f"🚫 Trade déjà actif sur {pair}")
