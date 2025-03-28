@@ -770,12 +770,19 @@ def analyze_pair(pair):
         high_series = pd.Series(highs)
         low_series = pd.Series(lows)
         
-        # RSI
+        # RSI avec gestion des divisions par zéro
         delta = close_series.diff().dropna()
         gain = delta.where(delta > 0, 0).rolling(window=14).mean()
         loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
-        rs = gain / loss
-        latest_rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rs = np.divide(gain, loss, out=np.ones_like(gain), where=loss!=0)
+            latest_rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        
+        # Gestion des cas limites RSI
+        if np.isnan(latest_rsi) or np.isinf(latest_rsi):
+            latest_rsi = 100 if gain.iloc[-1] > 0 else 50
+            logger.debug(f"RSI ajusté pour {pair} (cas limite): {latest_rsi}")
         
         # MACD
         ema12 = close_series.ewm(span=12, adjust=False).mean()
@@ -787,7 +794,7 @@ def analyze_pair(pair):
         
         # ATR
         atr = np.mean([h - l for h, l in zip(highs[-14:], lows[-14:])])
-        logger.debug(f"ATR calculé pour {pair}: {atr} (14 périodes)")
+        logger.debug(f"ATR calculé pour {pair}: {atr:.5f} (14 périodes)")
         
         # 6. Détection de breakout
         breakout_up = any(float(c['mid']['h']) > asian_high for c in candles[-5:] if c['complete'])
@@ -799,10 +806,14 @@ def analyze_pair(pair):
         logger.info(f"Patterns LTF détectés pour {pair}: {ltf_patterns}")
         
         # 8. Log des indicateurs
-        logger.info(f"📊 Indicateurs {pair}: RSI={latest_rsi:.2f}, MACD={latest_macd:.4f}, Signal MACD={latest_signal:.4f}")
+        logger.info(f"📊 Indicateurs {pair}: "
+                   f"RSI={latest_rsi:.2f}, "
+                   f"MACD={latest_macd:.5f}, "
+                   f"Signal={latest_signal:.5f}, "
+                   f"ATR={atr:.5f}")
         logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
 
-        # Initialisation des variables avant utilisation
+        # Initialisation des variables
         entry_price = stop_price = direction = None
         
         # 9. Vérifier les conditions de trading
@@ -813,33 +824,30 @@ def analyze_pair(pair):
         if trade_signal in ("buy", "sell"):
             entry_price = closes[-1]
             direction = trade_signal
-            
-            # Calcul du stop loss en fonction de la direction
             stop_price = (entry_price - ATR_MULTIPLIER_SL * atr) if direction == "buy" \
                         else (entry_price + ATR_MULTIPLIER_SL * atr)
             
-            # Logging sécurisé
-            if all([entry_price is not None, stop_price is not None]):
-                logger.debug(f"Trade parameters - Pair: {pair}, "
-                           f"Direction: {direction}, "
-                           f"Entry: {entry_price:.5f}, "
-                           f"SL: {stop_price:.5f}, "
-                           f"Distance: {abs(entry_price-stop_price):.5f}")
-            else:
-                logger.warning("Données de prix manquantes pour le logging")
+            # Validation des prix
+            if None in [entry_price, stop_price]:
+                logger.error("Erreur dans le calcul des prix d'entrée/stop")
+                return
+                
+            logger.debug(f"Paramètres trade: {direction} {pair} "
+                        f"Entrée={entry_price:.5f} "
+                        f"SL={stop_price:.5f} "
+                        f"Distance={abs(entry_price-stop_price):.5f}")
             
             # Exécution du trade
             account_balance = get_account_balance()
-            if all([entry_price, stop_price, direction, account_balance]):
+            if account_balance > 0:
                 place_trade(pair, direction, entry_price, stop_price, atr, account_balance)
             else:
-                logger.error("Paramètres de trade invalides - trade annulé")
+                logger.error("Solde du compte invalide")
         else:
-            logger.info("📉 Pas de conditions suffisantes pour ouvrir un trade.")
+            logger.info("📉 Pas de signal de trading valide")
             
     except Exception as e:
-        logger.error(f"Erreur lors de l'analyse de {pair}: {str(e)}", exc_info=True)
-
+        logger.error(f"Erreur analyse {pair}: {str(e)}", exc_info=True)
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du bot de trading OANDA...")
     
