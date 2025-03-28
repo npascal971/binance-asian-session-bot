@@ -570,75 +570,74 @@ def validate_trailing_stop_loss_distance(pair, distance):
 
 def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_balance):
     """Exécute un trade sur le compte OANDA avec des contrôles renforcés"""
-    # Vérification initiale
-    if None in [entry_price, stop_loss_price, direction, atr, account_balance]:
-        logger.error("Paramètres manquants pour le trade")
+    
+    # 1. Vérification initiale des paramètres
+    if None in [entry_price, stop_loss_price, direction, atr, account_balance] or \
+       entry_price <= 0 or atr <= 0 or account_balance <= 0:
+        logger.error("Paramètres invalides ou manquants pour le trade")
         return None
 
-    # Conversion spéciale pour GBP_JPY
-    if pair == "GBP_JPY":
-        entry_price = round(entry_price, 3)
-        stop_loss_price = round(stop_loss_price, 3)
+    # 2. Conversion spécifique pour certaines paires (exemple : GBP_JPY)
+    PAIR_SETTINGS = {
+        "XAU_USD": {"decimal": 2, "min_distance": 0.5},
+        "XAG_USD": {"decimal": 2, "min_distance": 0.1},
+        "EUR_USD": {"decimal": 5, "min_distance": 0.0005},
+        "GBP_JPY": {"decimal": 3, "min_distance": 0.05},
+        "USD_JPY": {"decimal": 3, "min_distance": 0.05},
+        "DEFAULT": {"decimal": 5, "min_distance": 0.0005}  # Valeur par défaut
+    }
+    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
+    # Appliquer l'arrondi spécifique à chaque paire
+    entry_price = round(entry_price, settings["decimal"])
+    stop_loss_price = round(stop_loss_price, settings["decimal"])
+
+    # 3. Calcul de la taille de position
     units = calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
-    
     if units <= 0:
-        logger.error(f"Unités invalides: {units} - Vérifiez Risk% ou SL Distance")
+        logger.error(f"❌ Taille de position invalide ({units}). Aucun trade exécuté.")
         return None
 
-    # 1. Contrôles pré-trade
+    # 4. Contrôles pré-trade
+    # Vérifier si un trade est déjà actif sur cette paire
     if pair in active_trades:
-        logger.info(f"🚫 Trade déjà actif sur {pair}")
+        logger.info(f"🚫 Trade déjà actif sur {pair}. Aucun nouveau trade ouvert.")
         return None
 
-    # Délai minimum entre trades sur même paire (30 minutes)
-    MIN_TRADE_INTERVAL = 1800  
+    # Délai minimum entre deux trades sur la même paire (30 minutes)
+    MIN_TRADE_INTERVAL = 1800  # 30 minutes en secondes
     last_trade = next((t for t in reversed(trade_history) if t['pair'] == pair), None)
-    
     if last_trade and (datetime.utcnow() - datetime.fromisoformat(last_trade['timestamp'])).seconds < MIN_TRADE_INTERVAL:
-        logger.info(f"⏳ Délai minimum non respecté pour {pair} (attendre {MIN_TRADE_INTERVAL//60} min)")
+        logger.info(f"⏳ Délai minimum non respecté pour {pair} (attendre {MIN_TRADE_INTERVAL // 60} min)")
         return None
 
     try:
-        # 2. Calculs de position avec vérifications
-        units = calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
-        if units <= 0:
-            logger.error("❌ Taille de position invalide. Aucun trade exécuté.")
-            return None
-
-        # Paramètres spécifiques aux paires
-        PAIR_SETTINGS = {
-            "XAU_USD": {"decimal": 2, "min_distance": 0.5},
-            "XAG_USD": {"decimal": 2, "min_distance": 0.1},
-            "EUR_USD": {"decimal": 5, "min_distance": 0.0005},
-            "GBP_JPY": {"decimal": 3, "min_distance": 0.05},
-            "USD_JPY": {"decimal": 3, "min_distance": 0.05},
-            "DEFAULT": {"decimal": 5, "min_distance": 0.0005}  # Valeur par défaut
-        }
-        settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
-
-        # 3. Calcul des niveaux de stop et take profit
+        # 5. Calcul des niveaux de Stop Loss et Take Profit
         take_profit_price = round(
             entry_price + (ATR_MULTIPLIER_TP * atr if direction == "buy" else -ATR_MULTIPLIER_TP * atr),
             settings["decimal"]
         )
-        
-        stop_loss_price = round(stop_loss_price, settings["decimal"])
-        
-        # Validation des distances
+
+        # Validation de la distance minimale pour le Stop Loss
         min_distance = settings["min_distance"]
         if abs(entry_price - stop_loss_price) < min_distance:
-            logger.warning(f"Distance SL trop faible (<{min_distance}), ajustement automatique")
+            logger.warning(f"Distance SL trop faible (<{min_distance}), ajustement automatique.")
             stop_loss_price = round(
                 entry_price - (min_distance if direction == "buy" else -min_distance),
                 settings["decimal"]
             )
 
+        # Validation du ratio Risk/Reward
+        risk_reward_ratio = abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price)
+        if risk_reward_ratio < 2:
+            logger.error(f"Ratio Risk/Reward insuffisant ({risk_reward_ratio:.2f}). Aucun trade exécuté.")
+            return None
+
         # Validation de la distance du Trailing Stop Loss
         trailing_stop_loss_distance = TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
         validated_trailing_distance = validate_trailing_stop_loss_distance(pair, trailing_stop_loss_distance)
 
-        # 4. Préparation des informations du trade
+        # 6. Préparation des informations du trade
         trade_info = {
             "timestamp": datetime.utcnow().isoformat(),
             "pair": pair,
@@ -648,20 +647,20 @@ def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_bala
             "take_profit": take_profit_price,
             "units": units,
             "atr": atr,
-            "risk_reward_ratio": round(abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price), 2)
+            "risk_reward_ratio": round(risk_reward_ratio, 2)
         }
 
         # Journalisation des détails du trade
         logger.info(
             f"\n🎯 NOUVEAU TRADE {pair} {direction.upper()} 🎯\n"
             f"Entrée: {entry_price:.{settings['decimal']}f}\n"
-            f"Stop: {stop_loss_price:.{settings['decimal']}f} ({abs(entry_price-stop_loss_price):.2f} pips)\n"
-            f"TP: {take_profit_price:.{settings['decimal']}f} (RR: {trade_info['risk_reward_ratio']}:1)\n"
+            f"Stop: {stop_loss_price:.{settings['decimal']}f} ({abs(entry_price - stop_loss_price):.2f} pips)\n"
+            f"TP: {take_profit_price:.{settings['decimal']}f} (RR: {risk_reward_ratio}:1)\n"
             f"Taille: {units} unités\n"
             f"ATR: {atr:.2f} ({ATR_MULTIPLIER_SL}×ATR pour SL)"
         )
 
-        # 5. Exécution en mode réel
+        # 7. Exécution en mode réel
         if not SIMULATION_MODE:
             order_data = {
                 "order": {
@@ -702,16 +701,21 @@ def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_bala
                 error_details = e.msg if hasattr(e, "msg") else str(e)
                 logger.error(f"Erreur OANDA: {error_details}")
                 
-                # Si l'erreur est liée à la distance minimale
+                # Si l'erreur est liée à la distance minimale du Trailing Stop Loss
                 if "TRAILING_STOP_LOSS_ON_FILL_PRICE_DISTANCE_MINIMUM_NOT_MET" in error_details:
                     logger.warning("La distance minimale du Trailing Stop Loss n'est pas respectée. Réessayer avec une distance ajustée.")
                     adjusted_distance = validate_trailing_stop_loss_distance(pair, validated_trailing_distance * 2)
                     order_data["order"]["trailingStopLossOnFill"]["distance"] = f"{adjusted_distance:.5f}"
-                    response = client.request(orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data))
-                    logger.info(f"Trade exécuté après ajustement: {response}")
-                    return response['orderCreateTransaction']['id']
+                    
+                    try:
+                        response = client.request(orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data))
+                        logger.info(f"Trade exécuté après ajustement: {response}")
+                        return response['orderCreateTransaction']['id']
+                    except Exception as e:
+                        logger.error(f"Échec de l'exécution après ajustement: {e}")
+                        return None
 
-        # 6. Mode simulation
+        # 8. Mode simulation
         else:
             trade_info['trade_id'] = f"SIM_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
             trade_history.append(trade_info)
