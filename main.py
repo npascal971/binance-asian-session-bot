@@ -548,18 +548,17 @@ def validate_trailing_stop_loss_distance(pair, distance):
 
 def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_balance):
     """Exécute un trade sur le compte OANDA avec des contrôles renforcés"""
-    """Version corrigée avec validation renforcée"""
     # Vérification initiale
-    if None in [entry_price, stop_price, direction, atr, account_balance]:
+    if None in [entry_price, stop_loss_price, direction, atr, account_balance]:
         logger.error("Paramètres manquants pour le trade")
         return None
 
     # Conversion spéciale pour GBP_JPY
     if pair == "GBP_JPY":
         entry_price = round(entry_price, 3)
-        stop_price = round(stop_price, 3)
+        stop_loss_price = round(stop_loss_price, 3)
 
-    units = calculate_position_size(account_balance, entry_price, stop_price, pair)
+    units = calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
     
     if units <= 0:
         logger.error(f"Unités invalides: {units} - Vérifiez Risk% ou SL Distance")
@@ -671,7 +670,6 @@ def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_bala
                     active_trades.add(pair)
                     trade_history.append(trade_info)
                     
-                                       
                     logger.info(f"✅ Trade exécuté (ID: {trade_id})")
                     return trade_id
                 else:
@@ -702,7 +700,7 @@ def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_bala
     except Exception as e:
         logger.error(f"⛔ Erreur critique: {str(e)}", exc_info=True)
         return None
-
+        
 def validate_numeric(value, name):
     """Valide qu'une valeur est numérique."""
     try:
