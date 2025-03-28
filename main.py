@@ -308,14 +308,24 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
         entry_price = float(entry_price)
         stop_loss_price = float(stop_loss_price)
 
+        # Journalisation des paramètres
+        logger.debug(
+            f"Paramètres pour calculate_position_size: "
+            f"account_balance={account_balance}, "
+            f"entry_price={entry_price}, "
+            f"stop_loss_price={stop_loss_price}, "
+            f"pair={pair}"
+        )
+
         # Calcul du montant de risque
         risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
         risk_per_unit = abs(entry_price - stop_loss_price)
 
-        # Vérification pour éviter une division par zéro
-        if risk_per_unit == 0:
-            logger.error("❌ Distance SL nulle - trade annulé.")
-            return 0
+        # Ajustement automatique si la distance est trop faible
+        MIN_DISTANCE = 0.0001
+        if risk_per_unit < MIN_DISTANCE:
+            logger.warning(f"Distance SL trop faible (<{MIN_DISTANCE}), ajustement automatique")
+            risk_per_unit = MIN_DISTANCE
 
         # Conversion spéciale pour les paires crypto et XAU/XAG
         if pair in CRYPTO_PAIRS or pair in ["XAU_USD", "XAG_USD"]:
