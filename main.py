@@ -567,7 +567,7 @@ def validate_trailing_stop_loss_distance(pair, distance):
 
 def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_balance):
     """Exécute un trade sur le compte OANDA avec des contrôles renforcés"""
-   global active_trades
+    global active_trades
 
     # 1. Vérifier si un trade est déjà actif sur cette paire
     if pair in active_trades:
