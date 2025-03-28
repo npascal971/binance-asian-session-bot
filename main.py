@@ -166,21 +166,29 @@ def get_asian_session_range(pair):
 def detect_pin_bars(candles):
     """Détecte des pin bars dans une série de bougies"""
     pin_bars = []
-    for i in range(len(candles)):
-        open_price = float(candles[i]['mid']['o'])
-        close_price = float(candles[i]['mid']['c'])
-        high_price = float(candles[i]['mid']['h'])
-        low_price = float(candles[i]['mid']['l'])
-
-        # Calcul du corps et des ombres
-        body = abs(close_price - open_price)
-        upper_wick = high_price - max(open_price, close_price)
-        lower_wick = min(open_price, close_price) - low_price
-
-        # Critères pour un pin bar
-        if upper_wick > 2 * body or lower_wick > 2 * body:
+    for i in range(1, len(candles)-1):
+        if not candles[i]['complete']:
+            continue
+            
+        open_p = float(candles[i]['mid']['o'])
+        close_p = float(candles[i]['mid']['c'])
+        high_p = float(candles[i]['mid']['h'])
+        low_p = float(candles[i]['mid']['l'])
+        
+        body_size = abs(close_p - open_p)
+        upper_wick = high_p - max(open_p, close_p)
+        lower_wick = min(open_p, close_p) - low_p
+        
+        # Critère Pin Bar
+        if (upper_wick > 2 * body_size) or (lower_wick > 2 * body_size):
             pin_type = "Bullish" if lower_wick > upper_wick else "Bearish"
-            pin_bars.append((i, pin_type))
+            pin_bar_size = max(upper_wick, lower_wick)  # Taille réelle en pips
+            pin_bars.append({
+                "index": i,
+                "type": pin_type,
+                "size": pin_bar_size,
+                "ratio": round(max(upper_wick, lower_wick) / body_size, 1)
+            })
     
     return pin_bars
 
@@ -454,15 +462,13 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     engulfing_patterns = detect_engulfing_patterns(candles)
     
     if pin_bars:
-        try:
-            # Conversion en float pour le formatage
-            pin_bar_size = float(pin_bars[0][1]) if isinstance(pin_bars[0][1], str) else pin_bars[0][1]
-            signals["price_action"] = True
-            reasons.append(f"Pin Bar confirmé (taille: {pin_bar_size:.1f}×ATR)")
-        except (IndexError, ValueError, TypeError) as e:
-            logger.warning(f"Erreur formatage Pin Bar: {e}")
-            signals["price_action"] = True
-            reasons.append("Pin Bar détecté (taille non disponible)")
+        latest_pin = pin_bars[-1]  # Prend la plus récente
+        signals["price_action"] = True
+        reasons.append(
+            f"Pin Bar {latest_pin['type']} "
+            f"(taille:{latest_pin['size']:.5f}, "
+            f"ratio:{latest_pin['ratio']}x)"
+        )
     
     if engulfing_patterns:
         signals["price_action"] = True
