@@ -560,6 +560,8 @@ def validate_trailing_stop_loss_distance(pair, distance):
     MIN_TRAILING_STOP_LOSS_DISTANCE = {
         "XAU_USD": 0.5,  # Valeur minimale pour XAU/USD
         "XAG_USD": 0.5,  # Valeur minimale pour XAG/USD
+        "GBP_JPY": 0.005,  # Exemple : distance minimale pour GBP_JPY
+        "USD_JPY": 0.005,  # Exemple : distance minimale pour USD_JPY
         "DEFAULT": 0.0005  # Valeur par défaut pour les autres paires
     }
     min_distance = MIN_TRAILING_STOP_LOSS_DISTANCE.get(pair, MIN_TRAILING_STOP_LOSS_DISTANCE["DEFAULT"])
