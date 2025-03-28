@@ -368,24 +368,25 @@ def process_pin_bar(pin_bar_data):
         logger.error(f"Erreur lors du traitement de la Pin Bar: {e}")
         return None
 
-def update_stop_loss(order_id, new_stop_loss):
+def update_stop_loss(trade_id, new_stop_loss):
     """Met à jour le Stop Loss d'une position existante"""
     try:
         data = {
             "order": {
                 "stopLoss": {
-                    "price": "{0:.5f}".format(new_stop_loss)
+                    "price": "{0:.5f}".format(new_stop_loss),
+                    "timeInForce": "GTC"
                 }
             }
         }
-        r = orders.OrderReplace(accountID=OANDA_ACCOUNT_ID, orderSpecifier=order_id, data=data)
+        r = orders.OrderReplace(accountID=OANDA_ACCOUNT_ID, orderSpecifier=trade_id, data=data)
         response = client.request(r)
         if 'orderCancelTransaction' in response:
-            logger.info(f"止损更新成功。新止损: {new_stop_loss}")
+            logger.info(f"Stop loss mis à jour: {new_stop_loss}")
         else:
-            logger.error(f"更新止损失败: {response}")
+            logger.error(f"Échec mise à jour SL: {response}")
     except Exception as e:
-        logger.error(f"更新止损时发生错误: {e}")
+        logger.error(f"Erreur mise à jour SL: {e}")
 
 def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones, atr, candles):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
@@ -702,20 +703,24 @@ def validate_numeric(value, name):
 def update_trailing_stop(pair, current_price, direction, current_sl, entry_price):
     """Version plus conservative du trailing stop"""
     try:
-        # Augmenter la distance d'activation
-        TRAILING_DISTANCE = 50 * 0.0001  # 50 pips pour XAU/USD
-        
-        # Ne mettre à jour que si le profit est > 2x le risque
-        if direction == "buy" and current_price > entry_price + 2*(entry_price - current_sl):
-            new_sl = current_price - TRAILING_DISTANCE
-            if new_sl > current_sl:
-                return new_sl
+        # Définir la distance en fonction du type de paire
+        if pair in ["XAU_USD", "XAG_USD"]:
+            trailing_distance = 0.5  # 50 cents pour les métaux
+        elif "_JPY" in pair:
+            trailing_distance = 0.5  # 50 pips pour les JPY
+        else:
+            trailing_distance = 0.005  # 5 pips pour forex standard
+
+        # Calcul du nouveau stop loss
+        if direction == "buy":
+            if current_price > entry_price + trailing_distance:
+                new_sl = current_price - trailing_distance
+                return max(new_sl, current_sl)  # Ne pas descendre le SL
                 
-        # Logique similaire pour les shorts
-        elif direction == "sell" and current_price < entry_price - 2*(current_sl - entry_price):
-            new_sl = current_price + TRAILING_DISTANCE
-            if new_sl < current_sl:
-                return new_sl
+        elif direction == "sell":
+            if current_price < entry_price - trailing_distance:
+                new_sl = current_price + trailing_distance
+                return min(new_sl, current_sl)  # Ne pas monter le SL
                 
         return current_sl
     except Exception as e:
@@ -867,7 +872,7 @@ while True:
         time.sleep(300)  # Attente plus longue hors session
 
         # Mettre à jour le SL pour chaque paire active
-        for pair in active_trades:
+        for pair in list(active_trades):  # Utilisez list() pour une copie
             try:
                 # Récupérer le prix actuel
                 params = {"granularity": "M5", "count": 1, "price": "M"}
@@ -878,24 +883,33 @@ while True:
                 # Récupérer les détails de la position
                 r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
                 response = client.request(r)
-        
+                
                 # Déterminer la direction et les prix
                 if float(response['position']['long']['units']) > 0:
+                    trade_data = response['position']['long']
                     direction = "buy"
-                    current_sl = float(response['position']['long']['stopLossOrder']['price'])
-                    entry_price = float(response['position']['long']['averagePrice'])
-                else:
+                    entry_price = float(trade_data['averagePrice'])
+                    current_sl = float(trade_data['stopLossOrder']['price'])
+                    trade_id = trade_data['tradeIDs'][0]
+                elif float(response['position']['short']['units']) < 0:
+                    trade_data = response['position']['short']
                     direction = "sell"
-                    current_sl = float(response['position']['short']['stopLossOrder']['price'])
-                    entry_price = float(response['position']['short']['averagePrice'])
+                    entry_price = float(trade_data['averagePrice'])
+                    current_sl = float(trade_data['stopLossOrder']['price'])
+                    trade_id = trade_data['tradeIDs'][0]
+                else:
+                    logger.warning(f"Position neutre pour {pair}")
+                    continue
 
                 # Mettre à jour le trailing stop
                 new_sl = update_trailing_stop(pair, current_price, direction, current_sl, entry_price)
                 if new_sl != current_sl:
                     update_stop_loss(trade_id, new_sl)
-                    logger.info(f"Trailing stop mis à jour pour {pair} : Nouveau SL={new_sl}")
+                    logger.info(f"Trailing stop mis à jour pour {pair}: {current_sl} -> {new_sl}")
+                    
             except Exception as e:
-                logger.error(f"Erreur lors de la mise à jour du trailing stop pour {pair}: {e}")
+                logger.error(f"Erreur position pour {pair}: {str(e)}")
+                continue
                 # Calculer un nouveau SL si nécessaire
                 if direction == "buy" and current_price > current_sl + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
                     new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
