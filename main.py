@@ -734,6 +734,46 @@ def update_trailing_stop(pair, current_price, direction, current_sl, entry_price
         logger.error(f"Erreur trailing stop: {e}")
         return current_sl
 
+# Dans analyze_pair(), remplacez la section RSI par :
+
+# RSI robuste avec gestion des divisions par zéro
+def calculate_rsi(prices, window=14):
+    deltas = np.diff(prices)
+    seed = deltas[:window]
+    
+    up = seed[seed >= 0].sum()/window
+    down = -seed[seed < 0].sum()/window
+    
+    # Cas particulier initial
+    if down == 0:
+        return 100.0  # Si aucune perte, RSI = 100
+    
+    rs = up/down
+    rsi = 100.0 - (100.0/(1.0 + rs))
+    
+    # Calcul pour les valeurs suivantes
+    for i in range(window, len(deltas)):
+        delta = deltas[i]
+        
+        if delta > 0:
+            upval = delta
+            downval = 0.0
+        else:
+            upval = 0.0
+            downval = -delta
+            
+        up = (up*(window-1) + upval)/window
+        down = (down*(window-1) + downval)/window
+        
+        if down == 0:
+            rsi = 100.0  # Évite la division par zéro
+        else:
+            rs = up/down
+            rsi = 100.0 - (100.0/(1.0 + rs))
+    
+    return rsi
+
+
 def analyze_pair(pair):
     """Analyse une paire de trading et exécute les trades si conditions remplies"""
     logger.info(f"🔍 Analyse de la paire {pair}...")
@@ -767,22 +807,16 @@ def analyze_pair(pair):
 
         # 5. Calculer les indicateurs techniques
         close_series = pd.Series(closes)
-        high_series = pd.Series(highs)
-        low_series = pd.Series(lows)
-        
-        # RSI avec gestion des divisions par zéro
-        delta = close_series.diff().dropna()
-        gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-        loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
-        
-        with np.errstate(divide='ignore', invalid='ignore'):
-            rs = np.divide(gain, loss, out=np.ones_like(gain), where=loss!=0)
-            latest_rsi = 100 - (100 / (1 + rs)).iloc[-1]
-        
-        # Gestion des cas limites RSI
-        if np.isnan(latest_rsi) or np.isinf(latest_rsi):
-            latest_rsi = 100 if gain.iloc[-1] > 0 else 50
-            logger.debug(f"RSI ajusté pour {pair} (cas limite): {latest_rsi}")
+    
+        # RSI robuste
+        try:
+            latest_rsi = calculate_rsi(np.array(closes))
+            if np.isnan(latest_rsi):
+                latest_rsi = 50.0
+                logger.warning(f"RSI invalide pour {pair}, utilisation de 50.0")
+        except Exception as e:
+            logger.error(f"Erreur calcul RSI pour {pair}: {str(e)}")
+            latest_rsi = 50.0
         
         # MACD
         ema12 = close_series.ewm(span=12, adjust=False).mean()
