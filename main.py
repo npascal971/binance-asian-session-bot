@@ -163,23 +163,26 @@ def get_asian_session_range(pair):
         logger.error(f"Erreur lors de la récupération du range asiatique pour {pair}: {e}")
         return None, None
 
+# Définir le seuil de ratio pour les pin bars
+PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois plus grande que le corps
+
 def detect_pin_bars(candles):
-    """Détecte les pin bars dans les données des bougies"""
+    """Détecte des pin bars dans une série de bougies"""
     pin_bars = []
     for candle in candles:
         try:
             # Extraction des données de la bougie
             open_price = float(candle['mid']['o'])
-            high = float(candle['mid']['h'])
-            low = float(candle['mid']['l'])
-            close = float(candle['mid']['c'])
+            high_price = float(candle['mid']['h'])
+            low_price = float(candle['mid']['l'])
+            close_price = float(candle['mid']['c'])
 
-            # Calcul des composants de la bougie
-            upper_wick = high - max(open_price, close)
-            lower_wick = min(open_price, close) - low
-            body_size = abs(close - open_price)
+            # Calcul du corps et des mèches
+            body_size = abs(close_price - open_price)
+            upper_wick = high_price - max(open_price, close_price)
+            lower_wick = min(open_price, close_price) - low_price
 
-            # Vérification pour éviter une division par zéro
+            # Validation pour éviter les divisions par zéro
             if body_size == 0:
                 logger.warning("Bougie avec body_size=0 détectée (doji ou données invalides). Ignorée.")
                 continue
@@ -187,16 +190,16 @@ def detect_pin_bars(candles):
             # Calcul du ratio entre les mèches et le corps
             ratio = round(max(upper_wick, lower_wick) / body_size, 1)
 
-            # Détection d'une pin bar
+            # Critère pour une pin bar
             if ratio >= PIN_BAR_RATIO_THRESHOLD:
-                pin_bar_type = "Bullish" if close > open_price else "Bearish"
+                pin_bar_type = "Bullish" if close_price > open_price else "Bearish"
                 pin_bars.append({
                     "type": pin_bar_type,
                     "ratio": ratio,
                     "open": open_price,
-                    "high": high,
-                    "low": low,
-                    "close": close
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price
                 })
 
         except Exception as e:
