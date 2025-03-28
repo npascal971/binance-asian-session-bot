@@ -38,7 +38,8 @@ RETEST_TOLERANCE_PIPS = 10
 RETEST_ZONE_RANGE = RETEST_TOLERANCE_PIPS * 0.0001
 RISK_AMOUNT_CAP = 100
 CRYPTO_PAIRS = ["BTC_USD", "ETH_USD"]
-
+# Seuil pour détecter une pin bar (ratio entre la taille des mèches et le corps)
+PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois plus grande que le corps
 
 # Configuration logs
 logging.basicConfig(
