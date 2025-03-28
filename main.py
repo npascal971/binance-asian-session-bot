@@ -199,7 +199,8 @@ def detect_pin_bars(candles):
                     "open": open_price,
                     "high": high_price,
                     "low": low_price,
-                    "close": close_price
+                    "close": close_price,
+                    "size": body_size  # Ajout de la clé 'size'
                 })
 
         except Exception as e:
@@ -207,7 +208,6 @@ def detect_pin_bars(candles):
             continue
 
     return pin_bars
-
 def detect_engulfing_patterns(candles):
     """Détecte des engulfing patterns dans une série de bougies"""
     engulfing_patterns = []
