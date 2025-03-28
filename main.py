@@ -233,14 +233,15 @@ def detect_engulfing_patterns(candles):
 
 
 def update_closed_trades():
-    """Met à jour la liste des trades actifs en supprimant ceux qui sont fermés"""
     try:
         r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
         response = client.request(r)
-        current_trades = {t['instrument'] for t in response['trades']}
-        closed_trades = active_trades - current_trades
-        if closed_trades:
-            logger.info(f"🔄 Trades fermés détectés: {closed_trades}")
+        current_trades = {t['instrument'] for t in response.get('trades', [])}
+        
+        # Retirer les paires qui ne sont plus actives
+        closed_pairs = active_trades - current_trades
+        if closed_pairs:
+            logger.info(f"❌ Trades fermés détectés: {closed_pairs}")
             active_trades.clear()
             active_trades.update(current_trades)
     except Exception as e:
