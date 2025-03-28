@@ -567,8 +567,12 @@ def validate_trailing_stop_loss_distance(pair, distance):
 
 def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_balance):
     """Exécute un trade sur le compte OANDA avec des contrôles renforcés"""
-    
-    # 1. Vérification initiale des paramètres
+   global active_trades
+
+    # 1. Vérifier si un trade est déjà actif sur cette paire
+    if pair in active_trades:
+        logger.info(f"🚫 Trade déjà actif sur {pair}. Aucun nouveau trade ouvert.")
+        return None
     if None in [entry_price, stop_loss_price, direction, atr, account_balance]:
         logger.error("Paramètres manquants pour le trade")
         return None
