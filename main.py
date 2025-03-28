@@ -3,6 +3,7 @@ import time
 import logging
 from datetime import datetime, timedelta, time as dtime
 from dotenv import load_dotenv
+from oandapyV20.endpoints import positions
 import numpy as np
 import pandas as pd
 import oandapyV20
