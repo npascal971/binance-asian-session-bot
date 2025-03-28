@@ -557,6 +557,11 @@ logger = logging.getLogger(__name__)
 
 def validate_trailing_stop_loss_distance(pair, distance):
     """Valide la distance du Trailing Stop Loss."""
+    MIN_TRAILING_STOP_LOSS_DISTANCE = {
+        "XAU_USD": 0.5,  # Valeur minimale pour XAU/USD
+        "XAG_USD": 0.5,  # Valeur minimale pour XAG/USD
+        "DEFAULT": 0.0005  # Valeur par défaut pour les autres paires
+    }
     min_distance = MIN_TRAILING_STOP_LOSS_DISTANCE.get(pair, MIN_TRAILING_STOP_LOSS_DISTANCE["DEFAULT"])
     if distance < min_distance:
         logger.warning(f"Distance Trailing Stop Loss ({distance}) inférieure à la valeur minimale autorisée ({min_distance}). Ajustement automatique.")
