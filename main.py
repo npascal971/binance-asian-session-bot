@@ -11,6 +11,7 @@ import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.accounts as accounts
 import oandapyV20.endpoints.trades as trades
+from email.mime.text import MIMEText
 
 load_dotenv()
 
@@ -733,7 +734,27 @@ def validate_numeric(value, name):
     except ValueError:
         logger.error(f"❌ Erreur de formatage {name}: '{value}' n'est pas un nombre.")
         return None
+def calculate_adx(highs, lows, closes, window=14):
+    plus_dm = [highs[i] - highs[i-1] if (highs[i] - highs[i-1]) > (lows[i-1] - lows[i]) else 0 
+               for i in range(1, len(highs))]
+    minus_dm = [lows[i-1] - lows[i] if (lows[i-1] - lows[i]) > (highs[i] - highs[i-1]) else 0 
+                for i in range(1, len(lows))]
+    
+    tr = [max(highs[i], closes[i-1]) - min(lows[i], closes[i-1]) for i in range(1, len(highs))]
+    
+    atr = pd.Series(tr).rolling(window).mean()
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window).mean() / atr)
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.rolling(window).mean()
+    return adx.iloc[-1]
 
+adx_value = calculate_adx(highs, lows, closes)
+
+# Volume Weighted Average Price (VWAP)
+vwap = (pd.Series(closes) * pd.Series([c['volume'] for c in candles if c['complete']])).cumsum() / \
+       pd.Series([c['volume'] for c in candles if c['complete']]).cumsum()
+vwap_value = vwap.iloc[-1]
 
 def update_trailing_stop(*args, **kwargs):
     """Désactivée"""
@@ -867,13 +888,23 @@ def analyze_pair(pair):
                         else (entry_price + ATR_MULTIPLIER_SL * atr)
             take_profit = (entry_price + ATR_MULTIPLIER_TP * atr) if direction == "buy" \
                          else (entry_price - ATR_MULTIPLIER_TP * atr)
+            # Nouveau log détaillé
+            logger.info(f"""
+            \n📈 SIGNAL DÉTECTÉ 📉
+            Paire: {pair}
+            Direction: {direction.upper()}
+            Entrée: {entry_price:.5f}
+            Stop Loss: {stop_price:.5f}
+            Take Profit: {take_profit:.5f}
+            Ratio R/R: {(take_profit-entry_price)/(entry_price-stop_price):.1f}
+            ATR utilisé: {atr:.5f}""")
 
             # Récupérer les motifs détectés
             raw_patterns = detect_ltf_patterns(candles)
             patterns = []
-            for p in detect_ltf_patterns(candles):
+            for p in raw_patterns:  # Utiliser la variable existante
                 if isinstance(p, tuple):
-                    patterns.append(p[0])  # Extraire le nom du pattern
+                    patterns.append(p[0].split()[0])  # Prendre le premier mot (ex: "Bullish" dans "Bullish Engulfing")
                 else:
                     patterns.append(str(p))
             reasons = [
