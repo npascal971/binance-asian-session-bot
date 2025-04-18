@@ -78,6 +78,26 @@ def get_account_balance():
         logger.debug(f"Solde du compte récupéré: {balance}")
         return balance
 
+def send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons):
+    """Envoie une alerte par email au lieu d'exécuter un trade"""
+    subject = f"🚨 Signal {direction.upper()} détecté sur {pair}"
+    body = f"""
+Nouveau signal de trading détecté !
+
+📌 Paire : {pair}
+📈 Direction : {direction.upper()}
+💰 Prix d'entrée : {entry_price:.5f}
+🎯 Take Profit : {take_profit:.5f}
+🛡️ Stop Loss : {stop_price:.5f}
+
+📊 Raisons du signal :
+- {chr(10).join(reasons)}
+
+⚠️ Ceci est une alerte informative - Aucun trade n'a été exécuté automatiquement.
+"""
+
+    send_email(subject, body)
+
 def get_asian_session_range(pair):
     """Récupère le high et le low de la session asiatique"""
     # Définir les heures de début et de fin de la session asiatique
