@@ -838,7 +838,7 @@ def analyze_pair(pair):
                 if isinstance(p, tuple):
                     patterns.append(p[0])  # Extraire le nom du pattern
                 else:
-                    patterns.append(str(p)
+                    patterns.append(str(p))
             reasons = [
                 f"RSI: {latest_rsi:.2f}",
                 f"MACD: {latest_macd:.5f}",
