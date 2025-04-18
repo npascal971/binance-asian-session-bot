@@ -98,6 +98,23 @@ Nouveau signal de trading détecté !
 
     send_email(subject, body)
 
+def send_email(subject, body):
+    """Envoie un e-mail avec les signaux"""
+    try:
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = EMAIL_ADDRESS
+        msg['To'] = EMAIL_ADDRESS
+
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_ADDRESS, EMAIL_ADDRESS, msg.as_string())
+        logger.info(f"E-mail envoyé avec succès: {subject}")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi de l'e-mail: {e}")
+
+
 def get_asian_session_range(pair):
     """Récupère le high et le low de la session asiatique"""
     # Définir les heures de début et de fin de la session asiatique
