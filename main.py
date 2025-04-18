@@ -588,7 +588,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         else: 
             bearish_signals += 1
 
-     if is_ranging(pair):
+    if is_ranging(pair):
         logger.warning(f"Marché en range sur H1 - Trade annulé pour {pair}")
         return False
 
