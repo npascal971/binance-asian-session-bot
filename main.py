@@ -832,7 +832,7 @@ def analyze_pair(pair):
                          else (entry_price - ATR_MULTIPLIER_TP * atr)
 
             # Récupérer les motifs détectés
-            patterns = detect_ltf_patterns(candles)
+            patterns = [p[0] for p in detect_ltf_patterns(candles)]
             reasons = [
                 f"RSI: {latest_rsi:.2f}",
                 f"MACD: {latest_macd:.5f}",
