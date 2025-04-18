@@ -12,6 +12,8 @@ import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.accounts as accounts
 import oandapyV20.endpoints.trades as trades
 from email.mime.text import MIMEText
+import smtplib 
+from scipy.stats import gaussian_kde
 
 load_dotenv()
 
@@ -114,7 +116,55 @@ def send_email(subject, body):
         logger.info(f"E-mail envoyé avec succès: {subject}")
     except Exception as e:
         logger.error(f"Erreur lors de l'envoi de l'e-mail: {e}")
+def is_trend_aligned(pair, direction):
+    timeframes = ["M15", "H1", "H4"]
+    trends = []
+    
+    for tf in timeframes:
+        candles = get_candles(pair, tf, 50)  # Implémentez cette fonction
+        ema50 = pd.Series([c["mid"]["c"] for c in candles]).ewm(span=50).mean().iloc[-1]
+        current_price = float(candles[-1]["mid"]["c"])
+        trends.append(current_price > ema50 if direction == "BUY" else current_price < ema50)
+    
+    return all(trends)
 
+# Dans should_open_trade():
+
+
+def dynamic_sl_tp(atr, direction, risk_reward=1.5, min_sl_multiplier=1.8):
+    """Gestion dynamique avec filet de sécurité"""
+    base_sl = max(atr * 1.5, atr * min_sl_multiplier)  # Le plus grand des deux
+    sl = base_sl * 1.2  # Marge supplémentaire de 20%
+    tp = sl * risk_reward
+    
+    return (sl, tp) if direction == "buy" else (-sl, -tp)
+
+def is_trend_aligned(pair, direction):
+    """Vérifie l'alignement sur M15/H1/H4"""
+    timeframes = ['M15', 'H1', 'H4']
+    aligned = []
+    
+    for tf in timeframes:
+        try:
+            # Récupère les 50 dernières bougies
+            params = {"granularity": tf, "count": 50}
+            candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+            closes = [float(c['mid']['c']) for c in candles if c['complete']]
+            
+            # Calcule la tendance
+            sma_50 = pd.Series(closes).rolling(50).mean().iloc[-1]
+            current_price = closes[-1]
+            
+            if direction == "buy":
+                aligned.append(current_price > sma_50)
+            else:
+                aligned.append(current_price < sma_50)
+                
+        except Exception as e:
+            logger.error(f"Erreur vérification alignement {tf} : {str(e)}")
+            aligned.append(False)  # Fail-safe
+    
+    return sum(aligned) >= 2  # Au moins 2/3 timeframes alignés
 
 def get_asian_session_range(pair):
     """Récupère le high et le low de la session asiatique"""
@@ -470,7 +520,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
             signals["zone"] = True
             reasons.append("Prix dans zone clé")
             break
-
+    
     # RSI - Seuils stricts (achat si RSI < 30, vente si RSI > 70)
     if rsi < settings["rsi_oversold"]:
         signals["rsi"] = True
@@ -537,6 +587,14 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
             bullish_signals += 1
         else: 
             bearish_signals += 1
+
+     if is_ranging(pair):
+        logger.warning(f"Marché en range sur H1 - Trade annulé pour {pair}")
+        return False
+
+    if not is_trend_aligned(pair, direction):
+        logger.warning(f"Désalignement des tendances HTF - Trade annulé pour {pair}")
+        return False
 
     # Décision finale
     if bullish_signals >= bearish_signals and any([signals["breakout"], signals["price_action"], signals["zone"]]):
@@ -669,15 +727,15 @@ def place_trade(*args, **kwargs):
     }
 
     # Journalisation des détails du trade
-    logger.info(
-        f"\n🎯 NOUVEAU TRADE {pair} {direction.upper()} 🎯\n"
-        f"Entrée: {entry_price:.{settings['decimal']}f}\n"
-        f"Stop: {stop_loss_price:.{settings['decimal']}f} ({abs(entry_price - stop_loss_price):.2f} pips)\n"
-        f"TP: {take_profit_price:.{settings['decimal']}f} (RR: {round(abs(take_profit_price - entry_price) / abs(entry_price - stop_loss_price), 2)}:1)\n"
-        f"Taille: {units} unités\n"
-        f"ATR: {atr:.2f} ({ATR_MULTIPLIER_SL}×ATR pour SL)"
-    )
-
+    logger.info(f"""
+    📈 SIGNAL CONFIRMÉ - {pair} {direction.upper()} ✅
+    ░ Entrée: {entry_price:.5f}
+    ░ SL: {stop_price:.5f} (Distance: {abs(entry_price-stop_price):.2f} pips)
+    ░ TP: {take_profit:.5f} (RR: {(take_profit-entry_price)/(entry_price-stop_price):.1f}:1)
+    ░ ATR H1: {atr_h1:.5f}
+    ░ Alignement tendances: {is_trend_aligned(pair, direction)}
+    ░ Régime marché: {'Trending' if not is_ranging(pair) else 'Range'}
+    """)
     # 7. Exécution en mode réel
     if not SIMULATION_MODE:
         try:
@@ -761,6 +819,26 @@ def calculate_adx(highs, lows, closes, window=14):
     except Exception as e:
         logger.error(f"Erreur calcul ADX: {str(e)}")
         return 0
+
+def get_atr(pair, timeframe="H1", period=14):
+    params = {"granularity": timeframe, "count": period*2, "price": "M"}
+    candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))["candles"]
+    highs = [float(c["mid"]["h"]) for c in candles]
+    lows = [float(c["mid"]["l"]) for c in candles]
+    closes = [float(c["mid"]["c"]) for c in candles]
+    return calculate_atr(highs, lows, closes)  # Votre fonction ATR existante
+
+
+
+def detect_liquidity_zones(prices, bandwidth=0.5):
+    kde = gaussian_kde(prices, bw_method=bandwidth)
+    x = np.linspace(min(prices), max(prices), 100)
+    density = kde(x)
+    return x[np.argpeaks(density)[0]]  # Retourne les zones de concentration
+
+# Utilisation :
+atr_h1 = get_atr("GBP_JPY", "H1")
+sl = entry_price - (1.5 * atr_h1) if direction == "BUY" else entry_price + (1.5 * atr_h1)
 
 def calculate_vwap(closes, volumes):
     """Calcule le Volume Weighted Average Price"""
@@ -908,12 +986,16 @@ def analyze_pair(pair):
                                       breakout_detected, closes[-1], key_zones, atr, candles)
         
         if trade_signal in ("buy", "sell"):
+            # Récupérer l'ATR H1
+            atr_h1 = get_atr(pair, "H1")  # Utilisez votre fonction get_atr
+        
+            # Calcul dynamique du SL/TP
+            sl_pips, tp_pips = dynamic_sl_tp(atr_h1, trade_signal)
+        
             entry_price = closes[-1]
             direction = trade_signal
-            stop_price = (entry_price - ATR_MULTIPLIER_SL * atr) if direction == "buy" \
-                        else (entry_price + ATR_MULTIPLIER_SL * atr)
-            take_profit = (entry_price + ATR_MULTIPLIER_TP * atr) if direction == "buy" \
-                         else (entry_price - ATR_MULTIPLIER_TP * atr)
+            stop_price = entry_price - sl_pips if direction == "buy" else entry_price + sl_pips
+            take_profit = entry_price + tp_pips if direction == "buy" else entry_price - tp_pips
             # Nouveau log détaillé
             logger.info(f"""
             \n📈 SIGNAL DÉTECTÉ 📉
