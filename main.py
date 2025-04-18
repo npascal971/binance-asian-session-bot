@@ -62,20 +62,8 @@ trade_history = []
 active_trades = set()
 
 def check_active_trades():
-    """Vérifie les trades actuellement ouverts avec OANDA"""
-    try:
-        r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
-        response = client.request(r)
-        current_trades = {t['instrument'] for t in response['trades']}
-        
-        global active_trades
-        active_trades = current_trades
-        
-        logger.info(f"Trades actuellement ouverts: {current_trades}")
-        return current_trades
-    except Exception as e:
-        logger.error(f"Erreur lors de la vérification des trades ouverts: {e}")
-        return set()
+    """Désactivée"""
+    pass
 
 def get_account_balance():
     """Récupère le solde du compte OANDA"""
@@ -570,9 +558,9 @@ def validate_trailing_stop_loss_distance(pair, distance):
         return min_distance
     return distance
 
-def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_balance):
-    """Exécute un trade sur le compte OANDA avec des contrôles renforcés"""
-    global active_trades
+def place_trade(*args, **kwargs):
+    """Désactivée"""
+    logger.info("Fonction désactivée - Mode alerte email seulement")
 
     # 1. Vérifier si un trade est déjà actif sur cette paire
     if pair in active_trades:
@@ -710,32 +698,9 @@ def validate_numeric(value, name):
         return None
 
 
-def update_trailing_stop(pair, current_price, direction, current_sl, entry_price):
-    """Version plus conservative du trailing stop"""
-    try:
-        # Définir la distance en fonction du type de paire
-        if pair in ["XAU_USD", "XAG_USD"]:
-            trailing_distance = 0.5  # 50 cents pour les métaux
-        elif "_JPY" in pair:
-            trailing_distance = 0.5  # 50 pips pour les JPY
-        else:
-            trailing_distance = 0.005  # 5 pips pour forex standard
-
-        # Calcul du nouveau stop loss
-        if direction == "buy":
-            if current_price > entry_price + trailing_distance:
-                new_sl = current_price - trailing_distance
-                return max(new_sl, current_sl)  # Ne pas descendre le SL
-                
-        elif direction == "sell":
-            if current_price < entry_price - trailing_distance:
-                new_sl = current_price + trailing_distance
-                return min(new_sl, current_sl)  # Ne pas monter le SL
-                
-        return current_sl
-    except Exception as e:
-        logger.error(f"Erreur trailing stop: {e}")
-        return current_sl
+def update_trailing_stop(*args, **kwargs):
+    """Désactivée"""
+    pass
 
 # Dans analyze_pair(), remplacez la section RSI par :
 
@@ -863,28 +828,29 @@ def analyze_pair(pair):
             direction = trade_signal
             stop_price = (entry_price - ATR_MULTIPLIER_SL * atr) if direction == "buy" \
                         else (entry_price + ATR_MULTIPLIER_SL * atr)
+            take_profit = (entry_price + ATR_MULTIPLIER_TP * atr) if direction == "buy" \
+                         else (entry_price - ATR_MULTIPLIER_TP * atr)
+
+            # Récupérer les motifs détectés
+            patterns = detect_ltf_patterns(candles)
+            reasons = [
+                f"RSI: {latest_rsi:.2f}",
+                f"MACD: {latest_macd:.5f}",
+                f"ATR: {atr:.5f}",
+                f"Patterns: {', '.join(patterns) if patterns else 'Aucun'}"
+            ]
+
+            # Envoyer l'email d'alerte
+            send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons)
             
-            # Validation des prix
-            if None in [entry_price, stop_price]:
-                logger.error("Erreur dans le calcul des prix d'entrée/stop")
-                return
-                
-            logger.debug(f"Paramètres trade: {direction} {pair} "
-                        f"Entrée={entry_price:.5f} "
-                        f"SL={stop_price:.5f} "
-                        f"Distance={abs(entry_price-stop_price):.5f}")
-            
-            # Exécution du trade
-            account_balance = get_account_balance()
-            if account_balance > 0:
-                place_trade(pair, direction, entry_price, stop_price, atr, account_balance)
-            else:
-                logger.error("Solde du compte invalide")
         else:
             logger.info("📉 Pas de signal de trading valide")
             
     except Exception as e:
         logger.error(f"Erreur analyse {pair}: {str(e)}", exc_info=True)
+
+            
+
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du bot de trading OANDA...")
     
