@@ -735,32 +735,49 @@ def validate_numeric(value, name):
         logger.error(f"❌ Erreur de formatage {name}: '{value}' n'est pas un nombre.")
         return None
 def calculate_adx(highs, lows, closes, window=14):
-    plus_dm = [highs[i] - highs[i-1] if (highs[i] - highs[i-1]) > (lows[i-1] - lows[i]) else 0 
-               for i in range(1, len(highs))]
-    minus_dm = [lows[i-1] - lows[i] if (lows[i-1] - lows[i]) > (highs[i] - highs[i-1]) else 0 
-                for i in range(1, len(lows))]
-    
-    tr = [max(highs[i], closes[i-1]) - min(lows[i], closes[i-1]) for i in range(1, len(highs))]
-    
-    atr = pd.Series(tr).rolling(window).mean()
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window).mean() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window).mean() / atr)
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(window).mean()
-    return adx.iloc[-1]
+    """Calcule l'Average Directional Index (ADX)"""
+    try:
+        # Calcul des mouvements directionnels
+        plus_dm = []
+        minus_dm = []
+        for i in range(1, len(highs)):
+            up_move = highs[i] - highs[i-1]
+            down_move = lows[i-1] - lows[i]
+            plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
+            minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
 
-adx_value = calculate_adx(highs, lows, closes)
+        # Calcul des True Ranges
+        tr = [max(highs[i], closes[i-1]) - min(lows[i], closes[i-1]) for i in range(1, len(highs))]
+        
+        # Calcul des indicateurs directionnels
+        plus_di = 100 * (pd.Series(plus_dm).rolling(window).sum() / pd.Series(tr).rolling(window).sum()).fillna(0)
+        minus_di = 100 * (pd.Series(minus_dm).rolling(window).sum() / pd.Series(tr).rolling(window).sum()).fillna(0)
+        
+        # Calcul de l'ADX
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1)
+        adx = dx.rolling(window).mean().iloc[-1]
+        
+        return round(adx, 2)
+    except Exception as e:
+        logger.error(f"Erreur calcul ADX: {str(e)}")
+        return 0
 
-# Volume Weighted Average Price (VWAP)
-vwap = (pd.Series(closes) * pd.Series([c['volume'] for c in candles if c['complete']])).cumsum() / \
-       pd.Series([c['volume'] for c in candles if c['complete']]).cumsum()
-vwap_value = vwap.iloc[-1]
+def calculate_vwap(closes, volumes):
+    """Calcule le Volume Weighted Average Price"""
+    try:
+        cumulative_pv = np.cumsum([c * v for c, v in zip(closes, volumes)])
+        cumulative_volume = np.cumsum(volumes)
+        return cumulative_pv[-1] / cumulative_volume[-1]
+    except ZeroDivisionError:
+        return closes[-1]
+    except Exception as e:
+        logger.error(f"Erreur calcul VWAP: {str(e)}")
+        return 0
 
 def update_trailing_stop(*args, **kwargs):
     """Désactivée"""
     pass
 
-# Dans analyze_pair(), remplacez la section RSI par :
 
 # RSI robuste avec gestion des divisions par zéro
 def calculate_rsi(prices, window=14):
@@ -822,15 +839,22 @@ def analyze_pair(pair):
         client.request(r)
         candles = r.response['candles']
         
-        # 4. Extraire les séries de prix
+        # 4. Extraire les séries de prix AVANT les calculs
         closes = [float(c['mid']['c']) for c in candles if c['complete']]
         highs = [float(c['mid']['h']) for c in candles if c['complete']]
         lows = [float(c['mid']['l']) for c in candles if c['complete']]
-        
-        if len(closes) < 20:
-            logger.warning(f"Pas assez de bougies complètes pour {pair} ({len(closes)}/20)")
+        volumes = [c['volume'] for c in candles if c['complete']]
+
+        # Vérifier que les données sont valides
+        if len(closes) < 20 or not highs or not lows:
+            logger.warning("Données de prix insuffisantes")
             return
 
+        # 5. Calculer les indicateurs TECHNIQUES ICI
+        adx_value = calculate_adx(highs, lows, closes)
+        vwap_value = calculate_vwap(closes, volumes)
+        
+    
         # 5. Calculer les indicateurs techniques
         close_series = pd.Series(closes)
     
@@ -870,6 +894,8 @@ def analyze_pair(pair):
                    f"RSI={latest_rsi:.2f}, "
                    f"MACD={latest_macd:.5f}, "
                    f"Signal={latest_signal:.5f}, "
+                   f"ADX: {adx_value} (force de tendance), "
+                   f"VWAP: {vwap_value:.5f}, "
                    f"ATR={atr:.5f}")
         logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
 
