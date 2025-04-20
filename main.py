@@ -1037,26 +1037,22 @@ def analyze_pair(pair):
         key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]
         trade_signal = should_open_trade(pair, latest_rsi, latest_macd, latest_signal, 
                                       breakout_detected, closes[-1], key_zones, atr, candles)
-        
+
         if trade_signal in ("buy", "sell"):
-            # Récupérer l'ATR H1
+                # Récupérer l'ATR H1
             atr_h1 = get_atr(pair, "H1")
             if atr_h1 <= 0:
                 logger.warning(f"Invalid ATR value for {pair}, skipping trade")
-                sl = None  # or some default value
-        else:
-            sl = calculate_sl(entry_price, direction, atr_h1)
-            if sl is None:
-                # Handle error case
-                continue  # if you're in a loop
-        
+                    return  # Exit the function instead of using continue
+    
             # Calcul dynamique du SL/TP
             sl_pips, tp_pips = dynamic_sl_tp(atr_h1, trade_signal)
-        
+
             entry_price = closes[-1]
             direction = trade_signal
             stop_price = entry_price - sl_pips if direction == "buy" else entry_price + sl_pips
             take_profit = entry_price + tp_pips if direction == "buy" else entry_price - tp_pips
+    
             # Nouveau log détaillé
             logger.info(f"""
             \n📈 SIGNAL DÉTECTÉ 📉
@@ -1071,9 +1067,9 @@ def analyze_pair(pair):
             # Récupérer les motifs détectés
             raw_patterns = detect_ltf_patterns(candles)
             patterns = []
-            for p in raw_patterns:  # Utiliser la variable existante
+            for p in raw_patterns:
                 if isinstance(p, tuple):
-                    patterns.append(p[0].split()[0])  # Prendre le premier mot (ex: "Bullish" dans "Bullish Engulfing")
+                    patterns.append(p[0].split()[0])
                 else:
                     patterns.append(str(p))
             reasons = [
@@ -1085,7 +1081,7 @@ def analyze_pair(pair):
 
             # Envoyer l'email d'alerte
             send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons)
-            
+    
         else:
             logger.info("📉 Pas de signal de trading valide")
             
