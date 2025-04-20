@@ -81,6 +81,37 @@ def get_account_balance():
         logger.debug(f"Solde du compte récupéré: {balance}")
         return balance
 
+def calculate_atr(highs, lows, closes, period=14):
+    """Calculate the Average True Range (ATR)"""
+    try:
+        if len(highs) < period or len(lows) < period or len(closes) < period:
+            logger.warning(f"Not enough data to calculate ATR (need {period} periods)")
+            return 0.0
+
+        true_ranges = []
+        for i in range(1, len(closes)):
+            high = highs[i]
+            low = lows[i]
+            prev_close = closes[i-1]
+            
+            tr1 = high - low
+            tr2 = abs(high - prev_close)
+            tr3 = abs(low - prev_close)
+            true_range = max(tr1, tr2, tr3)
+            true_ranges.append(true_range)
+
+        # Calculate initial ATR as simple average of first 'period' TR values
+        atr = sum(true_ranges[:period]) / period
+        
+        # Calculate subsequent ATR values using Wilder's smoothing method
+        for i in range(period, len(true_ranges)):
+            atr = (atr * (period - 1) + true_ranges[i]) / period
+            
+        return atr
+    except Exception as e:
+        logger.error(f"Error calculating ATR: {str(e)}")
+        return 0.0
+
 def send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons):
     """Envoie une alerte par email au lieu d'exécuter un trade"""
     subject = f"🚨 Signal {direction.upper()} détecté sur {pair}"
@@ -821,13 +852,22 @@ def calculate_adx(highs, lows, closes, window=14):
         return 0
 
 def get_atr(pair, timeframe="H1", period=14):
-    params = {"granularity": timeframe, "count": period*2, "price": "M"}
-    candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))["candles"]
-    highs = [float(c["mid"]["h"]) for c in candles]
-    lows = [float(c["mid"]["l"]) for c in candles]
-    closes = [float(c["mid"]["c"]) for c in candles]
-    return calculate_atr(highs, lows, closes)  # Votre fonction ATR existante
-
+    """Get the ATR for a given pair and timeframe"""
+    try:
+        params = {"granularity": timeframe, "count": period*2, "price": "M"}
+        candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))["candles"]
+        highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
+        lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
+        closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
+        
+        if not highs or not lows or not closes:
+            logger.warning(f"No complete candles for {pair} {timeframe}")
+            return 0.0
+            
+        return calculate_atr(highs, lows, closes, period)
+    except Exception as e:
+        logger.error(f"Error getting ATR for {pair}: {str(e)}")
+        return 0.0
 
 
 def detect_liquidity_zones(prices, bandwidth=0.5):
@@ -837,7 +877,11 @@ def detect_liquidity_zones(prices, bandwidth=0.5):
     return x[np.argpeaks(density)[0]]  # Retourne les zones de concentration
 
 # Utilisation :
-atr_h1 = get_atr("GBP_JPY", "H1")
+# In analyze_pair function:
+atr_h1 = get_atr(pair, "H1")
+if atr_h1 <= 0:
+    logger.warning(f"Invalid ATR value for {pair}, skipping trade")
+    continue
 sl = entry_price - (1.5 * atr_h1) if direction == "BUY" else entry_price + (1.5 * atr_h1)
 
 def calculate_vwap(closes, volumes):
