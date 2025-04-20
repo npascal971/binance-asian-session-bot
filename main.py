@@ -1103,85 +1103,72 @@ if __name__ == "__main__":
         logger.error(f"❌ Échec de la connexion à OANDA: {e}")
         exit(1)
     
-while True:
-    now = datetime.utcnow().time()
-    if SESSION_START <= now <= SESSION_END:
-        logger.info("⏱ Session active - Analyse des paires...")
-        
-        # Vérifier les trades ouverts et fermés
-        check_active_trades()
-        update_closed_trades()
-        
-        # Analyser chaque paire
-        for pair in PAIRS:
-            analyze_pair(pair)  # This will handle its own errors
+    while True:
+        now = datetime.utcnow().time()
+        if SESSION_START <= now <= SESSION_END:
+            logger.info("⏱ Session active - Analyse des paires...")
             
-        # Attente avec vérification plus fréquente des trades
-        for _ in range(12):
+            # Vérifier les trades ouverts et fermés
             check_active_trades()
             update_closed_trades()
-            time.sleep(5)
-    else:
-        logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
-        time.sleep(300) # Attente plus longue hors session
+            
+            # Analyser chaque paire
+            for pair in PAIRS:
+                try:
+                    analyze_pair(pair)
+                except Exception as e:
+                    logger.error(f"Erreur critique avec {pair}: {e}")
+                    continue  # Continue to next pair if error occurs
+            
+            # Mettre à jour le SL pour chaque paire active
+            for pair in list(active_trades):  # Use list() for a copy
+                try:
+                    # Récupérer le prix actuel
+                    params = {"granularity": "M5", "count": 1, "price": "M"}
+                    r = instruments.InstrumentsCandles(instrument=pair, params=params)
+                    client.request(r)
+                    current_price = float(r.response['candles'][0]['mid']['c'])
 
-        # Mettre à jour le SL pour chaque paire active
-        for pair in list(active_trades):  # Utilisez list() pour une copie
-            try:
-                # Récupérer le prix actuel
-                params = {"granularity": "M5", "count": 1, "price": "M"}
-                r = instruments.InstrumentsCandles(instrument=pair, params=params)
-                client.request(r)
-                current_price = float(r.response['candles'][0]['mid']['c'])
-
-                # Récupérer les détails de la position
-                r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
-                response = client.request(r)
-                
-                # Déterminer la direction et les prix
-                if float(response['position']['long']['units']) > 0:
-                    trade_data = response['position']['long']
-                    direction = "buy"
-                    entry_price = float(trade_data['averagePrice'])
-                    current_sl = float(trade_data['stopLossOrder']['price'])
-                    trade_id = trade_data['tradeIDs'][0]
-                elif float(response['position']['short']['units']) < 0:
-                    trade_data = response['position']['short']
-                    direction = "sell"
-                    entry_price = float(trade_data['averagePrice'])
-                    current_sl = float(trade_data['stopLossOrder']['price'])
-                    trade_id = trade_data['tradeIDs'][0]
-                else:
-                    logger.warning(f"Position neutre pour {pair}")
-                    return
-
-                # Mettre à jour le trailing stop
-                new_sl = update_trailing_stop(pair, current_price, direction, current_sl, entry_price)
-                if new_sl != current_sl:
-                    update_stop_loss(trade_id, new_sl)
-                    logger.info(f"Trailing stop mis à jour pour {pair}: {current_sl} -> {new_sl}")
+                    # Récupérer les détails de la position
+                    r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
+                    response = client.request(r)
                     
-            except Exception as e:
-                logger.error(f"Erreur position pour {pair}: {str(e)}")
-                return
-                # Calculer un nouveau SL si nécessaire
-                if direction == "buy" and current_price > current_sl + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
-                    new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
-                    update_stop_loss(trade_id, new_sl)
-                elif direction == "sell" and current_price < current_sl - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
-                    new_sl = current_price + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
-                    update_stop_loss(trade_id, new_sl)
-            except Exception as e:
-                logger.error(f"Erreur lors de la mise à jour du SL pour {pair}: {e}")
+                    # Déterminer la direction et les prix
+                    if float(response['position']['long']['units']) > 0:
+                        trade_data = response['position']['long']
+                        direction = "buy"
+                        entry_price = float(trade_data['averagePrice'])
+                        current_sl = float(trade_data['stopLossOrder']['price'])
+                        trade_id = trade_data['tradeIDs'][0]
+                    elif float(response['position']['short']['units']) < 0:
+                        trade_data = response['position']['short']
+                        direction = "sell"
+                        entry_price = float(trade_data['averagePrice'])
+                        current_sl = float(trade_data['stopLossOrder']['price'])
+                        trade_id = trade_data['tradeIDs'][0]
+                    else:
+                        logger.warning(f"Position neutre pour {pair}")
+                        continue  # Skip to next pair
 
-        # Analyser chaque paire
-        for pair in PAIRS:
-            try:
-                analyze_pair(pair)
-            except Exception as e:
-                logger.error(f"Erreur critique avec {pair}: {e}")
-        
-        # Attente avec vérification plus fréquente des trades
-        for _ in range(12):  # 12 x 5 secondes = 1 minute
-            check_active_trades()
-            time.sleep(5)
+                    # Mettre à jour le trailing stop
+                    if direction == "buy" and current_price > current_sl + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
+                        new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
+                        update_stop_loss(trade_id, new_sl)
+                        logger.info(f"Trailing stop mis à jour pour {pair}: {current_sl} -> {new_sl}")
+                    elif direction == "sell" and current_price < current_sl - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
+                        new_sl = current_price + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
+                        update_stop_loss(trade_id, new_sl)
+                        logger.info(f"Trailing stop mis à jour pour {pair}: {current_sl} -> {new_sl}")
+                        
+                except Exception as e:
+                    logger.error(f"Erreur position pour {pair}: {str(e)}")
+                    continue  # Skip to next pair if error occurs
+
+            # Attente avec vérification plus fréquente des trades
+            for _ in range(12):  # 12 x 5 secondes = 1 minute
+                check_active_trades()
+                update_closed_trades()
+                time.sleep(5)
+        else:
+            logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
+            time.sleep(300)
