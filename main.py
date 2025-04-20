@@ -293,7 +293,7 @@ def detect_pin_bars(candles):
             # Validation pour éviter les divisions par zéro
             if body_size == 0:
                 logger.warning("Bougie avec body_size=0 détectée (doji ou données invalides). Ignorée.")
-                continue
+                return
 
             # Calcul du ratio entre les mèches et le corps
             ratio = round(max(upper_wick, lower_wick) / body_size, 1)
@@ -313,7 +313,7 @@ def detect_pin_bars(candles):
 
         except Exception as e:
             logger.error(f"Erreur lors de la détection des pin bars : {e}")
-            continue
+            return
 
     return pin_bars
 def detect_engulfing_patterns(candles):
@@ -880,7 +880,7 @@ def detect_liquidity_zones(prices, bandwidth=0.5):
 atr_h1 = get_atr(pair, "H1")
 if atr_h1 <= 0:
     logger.warning(f"Invalid ATR value for {pair}, skipping trade")
-    continue
+    return
 sl = entry_price - (1.5 * atr_h1) if direction == "BUY" else entry_price + (1.5 * atr_h1)
 
 def calculate_vwap(closes, volumes):
@@ -1104,19 +1104,16 @@ while True:
         
         # Analyser chaque paire
         for pair in PAIRS:
-            try:
-                analyze_pair(pair)
-            except Exception as e:
-                logger.error(f"Erreur critique avec {pair}: {e}")
-        
+            analyze_pair(pair)  # This will handle its own errors
+            
         # Attente avec vérification plus fréquente des trades
-        for _ in range(12):  # 12 x 5 secondes = 1 minute
+        for _ in range(12):
             check_active_trades()
             update_closed_trades()
             time.sleep(5)
     else:
         logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
-        time.sleep(300)  # Attente plus longue hors session
+        time.sleep(300) # Attente plus longue hors session
 
         # Mettre à jour le SL pour chaque paire active
         for pair in list(active_trades):  # Utilisez list() pour une copie
@@ -1146,7 +1143,7 @@ while True:
                     trade_id = trade_data['tradeIDs'][0]
                 else:
                     logger.warning(f"Position neutre pour {pair}")
-                    continue
+                    return
 
                 # Mettre à jour le trailing stop
                 new_sl = update_trailing_stop(pair, current_price, direction, current_sl, entry_price)
@@ -1156,7 +1153,7 @@ while True:
                     
             except Exception as e:
                 logger.error(f"Erreur position pour {pair}: {str(e)}")
-                continue
+                return
                 # Calculer un nouveau SL si nécessaire
                 if direction == "buy" and current_price > current_sl + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
                     new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
