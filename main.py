@@ -871,17 +871,27 @@ def get_atr(pair, timeframe="H1", period=14):
 
 
 def detect_liquidity_zones(prices, bandwidth=0.5):
-    kde = gaussian_kde(prices, bw_method=bandwidth)
-    x = np.linspace(min(prices), max(prices), 100)
-    density = kde(x)
-    return x[np.argpeaks(density)[0]]  # Retourne les zones de concentration
+    """Detect liquidity zones using KDE"""
+    try:
+        kde = gaussian_kde(prices, bw_method=bandwidth)
+        x = np.linspace(min(prices), max(prices), 100)
+        density = kde(x)
+        peaks = np.argwhere(density == np.max(density)).flatten()
+        return x[peaks[0]] if len(peaks) > 0 else np.median(prices)
+    except Exception as e:
+        logger.error(f"Error detecting liquidity zones: {e}")
+        return np.median(prices)
 
-
-atr_h1 = get_atr(pair, "H1")
-if atr_h1 <= 0:
-    logger.warning(f"Invalid ATR value for {pair}, skipping trade")
-    return
-sl = entry_price - (1.5 * atr_h1) if direction == "BUY" else entry_price + (1.5 * atr_h1)
+def calculate_sl(entry_price, direction, atr_h1):
+    """Calculate stop loss based on ATR"""
+    if atr_h1 <= 0:
+        logger.error("Invalid ATR value for SL calculation")
+        return None
+    
+    if direction.upper() == "BUY":
+        return entry_price - (1.5 * atr_h1)
+    else:
+        return entry_price + (1.5 * atr_h1)
 
 def calculate_vwap(closes, volumes):
     """Calcule le Volume Weighted Average Price"""
@@ -1033,8 +1043,12 @@ def analyze_pair(pair):
             atr_h1 = get_atr(pair, "H1")
             if atr_h1 <= 0:
                 logger.warning(f"Invalid ATR value for {pair}, skipping trade")
-                return  # Changed from continue to return
-
+                sl = None  # or some default value
+        else:
+            sl = calculate_sl(entry_price, direction, atr_h1)
+            if sl is None:
+                # Handle error case
+                continue  # if you're in a loop
         
             # Calcul dynamique du SL/TP
             sl_pips, tp_pips = dynamic_sl_tp(atr_h1, trade_signal)
