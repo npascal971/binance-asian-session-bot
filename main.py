@@ -233,8 +233,8 @@ def get_asian_session_range(pair):
     # Paramètres de la requête API
     params = {
         "granularity": "M5",
-        "from": "2025-04-15", #asian_start,
-        "to": "2025-04-17", #asian_end,
+        "from": asian_start,
+        "to": asian_end,
         "price": "M"
     }
 
