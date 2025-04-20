@@ -200,8 +200,8 @@ def is_trend_aligned(pair, direction):
 def get_asian_session_range(pair):
     """Récupère le high et le low de la session asiatique"""
     # Définir les heures de début et de fin de la session asiatique
-    asian_start_time = "2025-04-15" #dtime(23, 0)  # 23:00 UTC
-    asian_end_time = '2025-04-17' #dtime(7, 0)     # 07:00 UTC
+    asian_start_time = dtime(23, 0)  # 23:00 UTC
+    asian_end_time = dtime(7, 0)     # 07:00 UTC
 
     # Obtenir la date et l'heure actuelles en UTC
     now = datetime.utcnow()
@@ -233,8 +233,8 @@ def get_asian_session_range(pair):
     # Paramètres de la requête API
     params = {
         "granularity": "M5",
-        "from": asian_start,
-        "to": asian_end,
+        "from": "2025-04-15", #asian_start,
+        "to": "2025-04-17", #asian_end,
         "price": "M"
     }
 
