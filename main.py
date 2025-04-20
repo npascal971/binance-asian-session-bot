@@ -876,8 +876,7 @@ def detect_liquidity_zones(prices, bandwidth=0.5):
     density = kde(x)
     return x[np.argpeaks(density)[0]]  # Retourne les zones de concentration
 
-# Utilisation :
-# In analyze_pair function:
+
 atr_h1 = get_atr(pair, "H1")
 if atr_h1 <= 0:
     logger.warning(f"Invalid ATR value for {pair}, skipping trade")
@@ -1031,7 +1030,11 @@ def analyze_pair(pair):
         
         if trade_signal in ("buy", "sell"):
             # Récupérer l'ATR H1
-            atr_h1 = get_atr(pair, "H1")  # Utilisez votre fonction get_atr
+            atr_h1 = get_atr(pair, "H1")
+            if atr_h1 <= 0:
+                logger.warning(f"Invalid ATR value for {pair}, skipping trade")
+                return  # Changed from continue to return
+
         
             # Calcul dynamique du SL/TP
             sl_pips, tp_pips = dynamic_sl_tp(atr_h1, trade_signal)
