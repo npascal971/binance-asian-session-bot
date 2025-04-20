@@ -1043,7 +1043,7 @@ def analyze_pair(pair):
             atr_h1 = get_atr(pair, "H1")
             if atr_h1 <= 0:
                 logger.warning(f"Invalid ATR value for {pair}, skipping trade")
-                    return  # Exit the function instead of using continue
+                return  # Exit the function instead of using continue
     
             # Calcul dynamique du SL/TP
             sl_pips, tp_pips = dynamic_sl_tp(atr_h1, trade_signal)
