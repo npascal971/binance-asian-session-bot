@@ -14,6 +14,8 @@ import oandapyV20.endpoints.trades as trades
 from email.mime.text import MIMEText
 import smtplib 
 from scipy.stats import gaussian_kde
+import pandas as pd
+import numpy as np
 
 load_dotenv()
 
@@ -80,6 +82,28 @@ def get_account_balance():
         balance = float(r.response["account"]["balance"])
         logger.debug(f"Solde du compte récupéré: {balance}")
         return balance
+
+def is_ranging(pair, timeframe="H1", threshold=0.5):
+    """Determine if a pair is in a ranging market using ADX"""
+    try:
+        # Get ADX value (already have this calculation in your code)
+        params = {"granularity": timeframe, "count": 20, "price": "M"}
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        candles = client.request(r)["candles"]
+        
+        highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
+        lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
+        closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
+        
+        if len(closes) < 14:  # Need at least 14 periods for ADX
+            return False
+            
+        adx_value = calculate_adx(highs, lows, closes)
+        return adx_value < threshold  # Market is ranging if ADX below threshold
+        
+    except Exception as e:
+        logger.error(f"Error checking ranging market for {pair}: {e}")
+        return False  # Default to False if error occurs
 
 def calculate_atr(highs, lows, closes, period=14):
     """Calculate the Average True Range (ATR)"""
@@ -159,7 +183,6 @@ def is_trend_aligned(pair, direction):
     
     return all(trends)
 
-# Dans should_open_trade():
 
 
 def dynamic_sl_tp(atr, direction, risk_reward=1.5, min_sl_multiplier=1.8):
@@ -619,7 +642,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         else: 
             bearish_signals += 1
 
-    if is_ranging(pair):
+    if is_ranging(pair) and not breakout_detected:
         logger.warning(f"Marché en range sur H1 - Trade annulé pour {pair}")
         return False
 
