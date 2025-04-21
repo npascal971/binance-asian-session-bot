@@ -536,6 +536,8 @@ def update_stop_loss(trade_id, new_stop_loss):
 
 def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones, atr, candles):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
+     # Initialize direction variable
+    direction = None
     # 1. Vérifications initiales
     if rsi is None or macd is None or macd_signal is None:
         logger.error(f"Indicateurs manquants pour {pair}. Aucun trade ouvert.")
@@ -552,6 +554,19 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     }
     
     settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+
+    # 3. Détermination de la direction
+    bullish_signals = sum([
+        signals["rsi"] and rsi < settings["rsi_oversold"],
+        signals["macd"] and macd > macd_signal
+    ])
+    
+    bearish_signals = sum([
+        signals["rsi"] and rsi > settings["rsi_overbought"],
+        signals["macd"] and macd <= macd_signal
+    ])
+
+    direction = "buy" if bullish_signals >= bearish_signals else "sell" if bearish_signals > bullish_signals else None
 
     # 3. Vérification de la volatilité
     if atr < settings["min_atr"]:
@@ -646,7 +661,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         logger.warning(f"Marché en range sur H1 - Trade annulé pour {pair}")
         return False
 
-    if not is_trend_aligned(pair, direction):
+    if direction and not is_trend_aligned(pair, direction):
         logger.warning(f"Désalignement des tendances HTF - Trade annulé pour {pair}")
         return False
 
@@ -660,6 +675,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     
     logger.info(f"❌ Signaux contradictoires pour {pair} - Raisons: {', '.join(reasons)}")
     return False
+
 
 def detect_reversal_patterns(candles):
     """Détecte des patterns de retournement (pin bars, engulfings)"""
