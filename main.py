@@ -1192,6 +1192,18 @@ class LiquidityHunter:
         self.liquidity_zones = {}
         self.session_ranges = {}
     
+    def get_cached_price(self, pair):
+        """Version avec cache pour éviter les requêtes répétées"""
+        if pair in self.price_cache:
+            price, timestamp = self.price_cache[pair]
+            if time.time() - timestamp < 10:  # 10 secondes de cache
+                return price
+        
+        price = get_current_price(pair)
+        if price is not None:
+            self.price_cache[pair] = (price, time.time())
+        return price
+
     def update_asian_range(self, pair):
         """Met à jour le range asiatique avec une gestion plus robuste"""
         asian_high, asian_low = get_asian_session_range(pair)
