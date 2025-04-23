@@ -35,6 +35,8 @@ PAIRS = [
     "EUR_USD", "GBP_USD", "USD_CHF", "AUD_USD", "NZD_USD",  # Majors
     "GBP_JPY", "USD_JPY", "EUR_JPY", "AUD_JPY", "CAD_JPY"  # Crosses et JPY  
 ]
+
+
 RISK_PERCENTAGE = 1
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
@@ -299,7 +301,8 @@ def get_asian_session_range(pair):
 # Définir le seuil de ratio pour les pin bars
 PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois plus grande que le corps
 PAIR_SETTINGS = {
-        "XAU_USD": {"min_atr": 0.5, "rsi_overbought": 70, "rsi_oversold": 30},
+        "XAU_USD": {"min_atr": 0.8, "rsi_overbought": 65, "rsi_oversold": 35, "pin_bar_ratio": 2.5,  # Moins strict pour détecter plus de pin bars
+        "required_confirmations": 2},
         "XAG_USD": {"min_atr": 0.3, "rsi_overbought": 65, "rsi_oversold": 35},
         "EUR_USD": {"min_atr": 0.0005, "rsi_overbought": 65, "rsi_oversold": 35},
         "GBP_JPY": {"min_atr": 0.05, "rsi_overbought": 70, "rsi_oversold": 30},
@@ -307,48 +310,169 @@ PAIR_SETTINGS = {
         "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35}
     }
     
-def detect_pin_bars(candles):
-    """Détecte des pin bars dans une série de bougies"""
+def detect_pin_bars(candles, pair):
+    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
     pin_bars = []
-    for candle in candles:
+    
+    for candle in candles[-3:]:  # Seulement les 3 dernières bougies
         try:
-            # Extraction des données de la bougie
-            open_price = float(candle['mid']['o'])
-            high_price = float(candle['mid']['h'])
-            low_price = float(candle['mid']['l'])
-            close_price = float(candle['mid']['c'])
-
-            # Calcul du corps et des mèches
-            body_size = abs(close_price - open_price)
-            upper_wick = high_price - max(open_price, close_price)
-            lower_wick = min(open_price, close_price) - low_price
-
-            # Validation pour éviter les divisions par zéro
-            if body_size == 0:
-                logger.warning("Bougie avec body_size=0 détectée (doji ou données invalides). Ignorée.")
-                return
-
-            # Calcul du ratio entre les mèches et le corps
-            ratio = round(max(upper_wick, lower_wick) / body_size, 1)
-
-            # Critère pour une pin bar
-            if ratio >= PIN_BAR_RATIO_THRESHOLD:
-                pin_bar_type = "Bullish" if close_price > open_price else "Bearish"
+            o = float(candle['mid']['o'])
+            h = float(candle['mid']['h'])
+            l = float(candle['mid']['l'])
+            c = float(candle['mid']['c'])
+            
+            body = abs(c - o)
+            upper_wick = h - max(o, c)
+            lower_wick = min(o, c) - l
+            total_range = h - l
+            
+            # Détection plus sensible des pin bars
+            if (upper_wick > body * settings["pin_bar_ratio"] or 
+                lower_wick > body * settings["pin_bar_ratio"]):
+                direction = "bearish" if c < o else "bullish"
                 pin_bars.append({
-                    "type": pin_bar_type,
-                    "ratio": ratio,
-                    "open": open_price,
-                    "high": high_price,
-                    "low": low_price,
-                    "close": close_price,
-                    "size": body_size  # Ajout de la clé 'size'
+                    "type": direction,
+                    "ratio": round(max(upper_wick, lower_wick) / body, 1),
+                    "price": c
                 })
-
+                
         except Exception as e:
-            logger.error(f"Erreur lors de la détection des pin bars : {e}")
-            return
-
+            logger.error(f"Error detecting pin bar: {e}")
+    
     return pin_bars
+
+def is_strong_trend(pair, direction):
+    """Vérifie l'alignement sur M15/H1/H4 avec force"""
+    timeframes = ['M15', 'H1', 'H4']
+    alignments = 0
+    
+    for tf in timeframes:
+        try:
+            params = {"granularity": tf, "count": 50}
+            candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+            closes = [float(c['mid']['c']) for c in candles if c['complete']]
+            
+            # Vérifie la pente des EMAs
+            ema20 = pd.Series(closes).ewm(span=20).mean()
+            ema50 = pd.Series(closes).ewm(span=50).mean()
+            
+            if direction == "sell":
+                if closes[-1] < ema20.iloc[-1] < ema50.iloc[-1]:
+                    alignments += 1
+            else:
+                if closes[-1] > ema20.iloc[-1] > ema50.iloc[-1]:
+                    alignments += 1
+                    
+        except Exception as e:
+            logger.error(f"Error checking trend on {tf}: {e}")
+    
+    return alignments >= 2  # Au moins 2/3 timeframes alignés
+
+def analyze_gold():
+    pair = "XAU_USD"
+    logger.info(f"Analyse approfondie de {pair}...")
+    
+    # 1. Récupérer les données
+    params = {"granularity": "H1", "count": 100, "price": "M"}
+    candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+    
+    # 2. Calculer les indicateurs
+    closes = [float(c['mid']['c']) for c in candles if c['complete']]
+    highs = [float(c['mid']['h']) for c in candles if c['complete']]
+    lows = [float(c['mid']['l']) for c in candles if c['complete']]
+    
+    rsi = calculate_rsi(closes[-14:])
+    atr = calculate_atr(highs[-14:], lows[-14:], closes[-14:])
+    pin_bars = detect_pin_bars(candles[-6:], pair)  # Dernières 6 bouches
+    
+    # 3. Vérifier les conditions de votre trade gagnant
+    sell_conditions = (
+        rsi > 60 and  # RSI élevé
+        any(p['type'] == 'bearish' and p['ratio'] > 2 for p in pin_bars) and  # Pin bar baissière
+        is_strong_trend(pair, "sell") and  # Tendance baissière
+        closes[-1] < max(highs[-5:-1])  # Sous le récent high
+    )
+    
+    if sell_conditions:
+        stop_loss = max(highs[-5:]) + atr * 0.5
+        take_profit = closes[-1] - atr * 2
+        target_zone = (take_profit + closes[-1]) / 2
+        
+        signal_details = {
+            "direction": "sell",
+            "current_price": closes[-1],
+            "target_zone": target_zone,
+            "stop_loss": stop_loss,
+            "rsi": rsi,
+            "atr": atr,
+            "momentum": True,
+            "pattern": "Pin Bar Baissière + RSI Élevé"
+        }
+        
+        send_gold_alert(pair, signal_details)
+
+def send_gold_alert(pair, signal_details):
+    """Envoie une alerte détaillée pour l'or"""
+    subject = f"🚨 ALERTE OR - Signal {signal_details['direction'].upper()} détecté"
+    
+    body = f"""
+🔥 Signal de trading confirmé pour {pair} 🔥
+
+📊 Direction: {signal_details['direction'].upper()}
+💰 Prix actuel: {signal_details['current_price']:.2f}
+🎯 Zone cible: {signal_details['target_zone']:.2f}
+📉 Stop Loss: {signal_details['stop_loss']:.2f}
+
+📈 Indicateurs:
+- RSI: {signal_details['rsi']:.2f}
+- ATR: {signal_details['atr']:.2f}
+- Momentum: {'Fort' if signal_details['momentum'] else 'Faible'}
+
+📌 Pattern détecté: {signal_details['pattern']}
+📆 Heure du signal: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+⚠️ Ceci est une alerte basée sur votre stratégie gagnante récente.
+"""
+    send_email(subject, body)
+
+def check_rsi_conditions(pair):
+    """Vérifie les conditions RSI sur H1 et M15"""
+    try:
+        # Récupère RSI H1
+        params_h1 = {"granularity": "H1", "count": 14, "price": "M"}
+        candles_h1 = client.request(instruments.InstrumentsCandles(instrument=pair, params=params_h1))["candles"]
+        closes_h1 = [float(c["mid"]["c"]) for c in candles_h1 if c["complete"]]
+        rsi_h1 = calculate_rsi(closes_h1[-14:]) if len(closes_h1) >= 14 else 50
+
+        # Récupère RSI M15
+        params_m15 = {"granularity": "M15", "count": 14, "price": "M"}
+        candles_m15 = client.request(instruments.InstrumentsCandles(instrument=pair, params=params_m15))["candles"]
+        closes_m15 = [float(c["mid"]["c"]) for c in candles_m15 if c["complete"]]
+        rsi_m15 = calculate_rsi(closes_m15[-14:]) if len(closes_m15) >= 14 else 50
+
+        return {
+            "h1": rsi_h1,
+            "m15": rsi_m15,
+            "buy_signal": rsi_h1 > 40 and rsi_m15 > 50,
+            "sell_signal": rsi_h1 < 60 and rsi_m15 < 50
+        }
+    except Exception as e:
+        logger.error(f"Erreur calcul RSI multi-TF: {e}")
+        return {"h1": 50, "m15": 50, "buy_signal": False, "sell_signal": False}
+
+def calculate_atr_for_pair(pair, period=14):
+    """Calcule l'ATR pour une paire donnée"""
+    try:
+        params = {"granularity": "H1", "count": period*2, "price": "M"}
+        candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))["candles"]
+        highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
+        lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
+        closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
+        return calculate_atr(highs, lows, closes, period)
+    except Exception as e:
+        logger.error(f"Erreur calcul ATR: {e}")
+        return 0
+
 def detect_engulfing_patterns(candles):
     """Détecte des engulfing patterns dans une série de bougies"""
     engulfing_patterns = []
@@ -1115,16 +1239,22 @@ if __name__ == "__main__":
             check_active_trades()
             update_closed_trades()
             
-            # Analyser chaque paire
+            # Analyser chaque paire avec priorité sur XAU_USD
             for pair in PAIRS:
                 try:
-                    analyze_pair(pair)
+                    if pair == "XAU_USD":
+                        # Analyse spécialisée pour l'or
+                        analyze_gold()  
+                    else:
+                        # Analyse standard pour les autres paires
+                        analyze_pair(pair)
+                        
                 except Exception as e:
                     logger.error(f"Erreur critique avec {pair}: {e}")
-                    continue  # Continue to next pair if error occurs
+                    continue
             
-            # Mettre à jour le SL pour chaque paire active
-            for pair in list(active_trades):  # Use list() for a copy
+            # Gestion des positions actives
+            for pair in list(active_trades):
                 try:
                     # Récupérer le prix actuel
                     params = {"granularity": "M5", "count": 1, "price": "M"}
@@ -1136,7 +1266,7 @@ if __name__ == "__main__":
                     r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
                     response = client.request(r)
                     
-                    # Déterminer la direction et les prix
+                    # Vérifier la direction du trade
                     if float(response['position']['long']['units']) > 0:
                         trade_data = response['position']['long']
                         direction = "buy"
@@ -1150,28 +1280,31 @@ if __name__ == "__main__":
                         current_sl = float(trade_data['stopLossOrder']['price'])
                         trade_id = trade_data['tradeIDs'][0]
                     else:
-                        logger.warning(f"Position neutre pour {pair}")
-                        continue  # Skip to next pair
+                        continue
 
-                    # Mettre à jour le trailing stop
-                    if direction == "buy" and current_price > current_sl + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
-                        new_sl = current_price - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
-                        update_stop_loss(trade_id, new_sl)
-                        logger.info(f"Trailing stop mis à jour pour {pair}: {current_sl} -> {new_sl}")
-                    elif direction == "sell" and current_price < current_sl - TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
-                        new_sl = current_price + TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
-                        update_stop_loss(trade_id, new_sl)
-                        logger.info(f"Trailing stop mis à jour pour {pair}: {current_sl} -> {new_sl}")
-                        
+                    # Gestion du trailing stop avec vérification de tendance
+                    if pair == "XAU_USD":
+                        trend_confirmation = is_strong_trend(pair, direction)
+                    else:
+                        trend_confirmation = is_trend_aligned(pair, direction)
+                    
+                    if trend_confirmation:
+                        price_diff = current_price - entry_price if direction == "buy" else entry_price - current_price
+                        if price_diff > TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
+                            new_sl = entry_price + (0.0001 if direction == "buy" else -0.0001)  # Break-even
+                            update_stop_loss(trade_id, new_sl)
+                            logger.info(f"Trailing stop ajusté à breakeven pour {pair}")
+
                 except Exception as e:
-                    logger.error(f"Erreur position pour {pair}: {str(e)}")
-                    continue  # Skip to next pair if error occurs
+                    logger.error(f"Erreur gestion position {pair}: {e}")
+                    continue
 
-            # Attente avec vérification plus fréquente des trades
-            for _ in range(12):  # 12 x 5 secondes = 1 minute
+            # Vérification rapide toutes les 15 secondes
+            for _ in range(4):  # 4 x 15 secondes = 1 minute
                 check_active_trades()
                 update_closed_trades()
-                time.sleep(5)
+                time.sleep(15)
+                
         else:
             logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
             time.sleep(300)
