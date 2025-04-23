@@ -310,11 +310,12 @@ PAIR_SETTINGS = {
         "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35}
     }
     
-def detect_pin_bars(candles, pair):
-    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+def detect_pin_bars(candles, pair=None):  # Ajoutez pair comme paramètre optionnel
+    """Détecte des pin bars dans une série de bougies"""
+    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"]) if pair else PAIR_SETTINGS["DEFAULT"]
     pin_bars = []
     
-    for candle in candles[-3:]:  # Seulement les 3 dernières bougies
+    for candle in candles:
         try:
             o = float(candle['mid']['o'])
             h = float(candle['mid']['h'])
@@ -324,12 +325,13 @@ def detect_pin_bars(candles, pair):
             body = abs(c - o)
             upper_wick = h - max(o, c)
             lower_wick = min(o, c) - l
-            total_range = h - l
             
-            # Détection plus sensible des pin bars
-            if (upper_wick > body * settings["pin_bar_ratio"] or 
-                lower_wick > body * settings["pin_bar_ratio"]):
-                direction = "bearish" if c < o else "bullish"
+            # Utilisez le ratio spécifique à la paire si disponible
+            ratio_threshold = settings.get("pin_bar_ratio", PIN_BAR_RATIO_THRESHOLD)
+            
+            if (upper_wick > body * ratio_threshold or 
+                lower_wick > body * ratio_threshold):
+                direction = "bullish" if c > o else "bearish"
                 pin_bars.append({
                     "type": direction,
                     "ratio": round(max(upper_wick, lower_wick) / body, 1),
@@ -340,6 +342,7 @@ def detect_pin_bars(candles, pair):
             logger.error(f"Error detecting pin bar: {e}")
     
     return pin_bars
+
 
 def is_strong_trend(pair, direction):
     """Vérifie l'alignement sur M15/H1/H4 avec force"""
@@ -558,6 +561,11 @@ def detect_ltf_patterns(candles):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
     patterns_detected = []
 
+    # Détection des pin bars avec le paramètre pair
+    pin_bars = detect_pin_bars(candles, pair)
+    if pin_bars:
+        patterns_detected.extend(("Pin Bar", i) for i in range(len(candles)) if i < len(pin_bars))    
+
     # Pin bar detection
     for i in range(1, len(candles)):
         body = abs(float(candles[i]['mid']['c']) - float(candles[i]['mid']['o']))
@@ -680,6 +688,13 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         "breakout": False,
         "zone": False
     }
+try:
+        # 1. Vérifier les RSI sur H1 et M15
+        rsi_conditions = check_rsi_conditions(pair)
+        
+        # 2. Détection des patterns - Passez maintenant le paramètre pair
+        pin_bars = detect_pin_bars(candles[-3:], pair)  # Ajout de l'argument pair
+        engulfing = detect_engulfing_patterns(candles[-2:])
 
     # 1. Validations de base
     if any(v is None for v in [rsi, macd, macd_signal]):
@@ -1144,7 +1159,7 @@ def analyze_pair(pair):
         breakout_detected = breakout_up or breakout_down
         
         # 7. Détecter les patterns
-        ltf_patterns = detect_ltf_patterns(candles)
+        ltf_patterns = detect_ltf_patterns(candles, pair)
         logger.info(f"Patterns LTF détectés pour {pair}: {ltf_patterns}")
         
         # 8. Log des indicateurs
