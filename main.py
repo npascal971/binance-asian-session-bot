@@ -110,34 +110,37 @@ def is_ranging(pair, timeframe="H1", threshold=0.5):
         return False  # Default to False if error occurs
 
 def calculate_atr(highs, lows, closes, period=14):
-    """Calculate the Average True Range (ATR)"""
+    """Version améliorée avec gestion des arrondis"""
     try:
         if len(highs) < period or len(lows) < period or len(closes) < period:
-            logger.warning(f"Not enough data to calculate ATR (need {period} periods)")
+            logger.warning(f"Données insuffisantes pour ATR ({len(highs)}/{period})")
             return 0.0
 
         true_ranges = []
         for i in range(1, len(closes)):
-            high = highs[i]
-            low = lows[i]
-            prev_close = closes[i-1]
-            
-            tr1 = high - low
-            tr2 = abs(high - prev_close)
-            tr3 = abs(low - prev_close)
-            true_range = max(tr1, tr2, tr3)
-            true_ranges.append(true_range)
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i-1]),
+                abs(lows[i] - closes[i-1])
+            )
+            true_ranges.append(tr)
 
-        # Calculate initial ATR as simple average of first 'period' TR values
         atr = sum(true_ranges[:period]) / period
         
-        # Calculate subsequent ATR values using Wilder's smoothing method
+        # Smoothing avec Wilder
         for i in range(period, len(true_ranges)):
             atr = (atr * (period - 1) + true_ranges[i]) / period
-            
-        return atr
+
+        # Arrondi adaptatif selon le type de paire
+        if any(p in highs[0] for p in ['XAU', 'XAG']):  # Métaux précieux
+            return round(atr, 3)
+        elif any(p in highs[0] for p in ['JPY']):  # Paires JPY
+            return round(atr, 4)
+        else:  # Majors
+            return round(atr, 5)
+
     except Exception as e:
-        logger.error(f"Error calculating ATR: {str(e)}")
+        logger.error(f"Erreur calcul ATR: {str(e)}")
         return 0.0
 
 def send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons):
