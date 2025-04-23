@@ -678,107 +678,114 @@ def update_stop_loss(trade_id, new_stop_loss):
 
 def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones, atr, candles):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
-    # Initialisations
-    direction = None
-    reasons = []
-    signals = {
-        "rsi": False,
-        "macd": False,
-        "price_action": False,
-        "breakout": False,
-        "zone": False
-    }
-try:
-        # 1. Vérifier les RSI sur H1 et M15
-        rsi_conditions = check_rsi_conditions(pair)
+    try:
+        # Initialisations
+        direction = None
+        reasons = []
+        signals = {
+            "rsi": False,
+            "macd": False,
+            "price_action": False,
+            "breakout": False,
+            "zone": False
+        }
+
+        # 1. Validations de base
+        if any(v is None for v in [rsi, macd, macd_signal]):
+            logger.error(f"Indicateurs manquants pour {pair}")
+            return False
+
+        settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+        if atr < settings["min_atr"]:
+            logger.info(f"Volatilité trop faible pour {pair} (ATR={atr:.2f})")
+            return False
+
+        # 2. Vérification des RSI multi-timeframe (uniquement pour XAU_USD)
+        if pair == "XAU_USD":
+            rsi_conditions = check_rsi_conditions(pair)
+            reasons.append(f"RSI H1: {rsi_conditions['h1']:.1f}, M15: {rsi_conditions['m15']:.1f}")
+
+        # 3. Détection des signaux
+        # Vérification des zones clés
+        for zone in key_zones:
+            if abs(price - zone[0]) <= RETEST_ZONE_RANGE or abs(price - zone[1]) <= RETEST_ZONE_RANGE:
+                signals["zone"] = True
+                reasons.append("Prix dans zone clé")
+                break
         
-        # 2. Détection des patterns - Passez maintenant le paramètre pair
-        pin_bars = detect_pin_bars(candles[-3:], pair)  # Ajout de l'argument pair
-        engulfing = detect_engulfing_patterns(candles[-2:])
+        # RSI
+        if rsi < settings["rsi_oversold"]:
+            signals["rsi"] = True
+            reasons.append(f"RSI {rsi:.1f} < {settings['rsi_oversold']} (suracheté)")
+        elif rsi > settings["rsi_overbought"]:
+            signals["rsi"] = True
+            reasons.append(f"RSI {rsi:.1f} > {settings['rsi_overbought']} (survendu)")
 
-    # 1. Validations de base
-    if any(v is None for v in [rsi, macd, macd_signal]):
-        logger.error(f"Indicateurs manquants pour {pair}")
+        # MACD
+        macd_crossover = (macd > macd_signal and macd_signal > 0) or (macd < macd_signal and macd_signal < 0)
+        if macd_crossover:
+            signals["macd"] = True
+            reasons.append("Croisement MACD confirmé")
+
+        # Breakout
+        if breakout_detected and atr > settings["min_atr"] * 1.5:
+            signals["breakout"] = True
+            reasons.append("Breakout fort détecté")
+
+        # Price Action
+        pin_bars = detect_pin_bars(candles, pair)  # Ajout du paramètre pair
+        engulfing_patterns = detect_engulfing_patterns(candles)
+        
+        if pin_bars:
+            signals["price_action"] = True
+            reasons.append(f"Pin Bar détectée (ratio: {pin_bars[-1]['ratio']}x)")
+        if engulfing_patterns:
+            signals["price_action"] = True
+            reasons.append("Engulfing Pattern détecté")
+
+        # 4. Validation des signaux
+        required = CONFIRMATION_REQUIRED.get(pair, 2)
+        if sum(signals.values()) < required:
+            logger.info(f"Signaux insuffisants ({sum(signals.values())}/{required})")
+            return False
+
+        # 5. Détermination de la direction
+        bullish_signals = sum([
+            signals["rsi"] and rsi < settings["rsi_oversold"],
+            signals["macd"] and macd > macd_signal,
+            signals["price_action"]
+        ])
+        
+        bearish_signals = sum([
+            signals["rsi"] and rsi > settings["rsi_overbought"],
+            signals["macd"] and macd <= macd_signal,
+            signals["price_action"]
+        ])
+
+        if bullish_signals >= bearish_signals:
+            direction = "buy"
+        else:
+            direction = "sell"
+
+        # 6. Validations finales
+        if is_ranging(pair) and not breakout_detected:
+            logger.warning("Marché en range")
+            return False
+
+        if direction and not is_trend_aligned(pair, direction):
+            logger.warning("Désalignement des tendances HTF")
+            return False
+
+        if direction and any([signals["breakout"], signals["price_action"], signals["zone"]]):
+            logger.info(f"✅ Signal {direction.upper()} confirmé - Raisons: {', '.join(reasons)}")
+            return direction
+
+        logger.info("❌ Signaux contradictoires")
         return False
 
-    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
-    if atr < settings["min_atr"]:
-        logger.info(f"Volatilité trop faible pour {pair} (ATR={atr:.2f})")
+    except Exception as e:
+        logger.error(f"Erreur dans should_open_trade pour {pair}: {str(e)}")
         return False
-
-    # 2. Détection des signaux
-    # Vérification des zones clés
-    for zone in key_zones:
-        if abs(price - zone[0]) <= RETEST_ZONE_RANGE or abs(price - zone[1]) <= RETEST_ZONE_RANGE:
-            signals["zone"] = True
-            reasons.append("Prix dans zone clé")
-            break
-    
-    # RSI
-    if rsi < settings["rsi_oversold"]:
-        signals["rsi"] = True
-        reasons.append(f"RSI {rsi:.1f} < {settings['rsi_oversold']} (suracheté)")
-    elif rsi > settings["rsi_overbought"]:
-        signals["rsi"] = True
-        reasons.append(f"RSI {rsi:.1f} > {settings['rsi_overbought']} (survendu)")
-
-    # MACD
-    macd_crossover = (macd > macd_signal and macd_signal > 0) or (macd < macd_signal and macd_signal < 0)
-    if macd_crossover:
-        signals["macd"] = True
-        reasons.append("Croisement MACD confirmé")
-
-    # Breakout
-    if breakout_detected and atr > settings["min_atr"] * 1.5:
-        signals["breakout"] = True
-        reasons.append("Breakout fort détecté")
-
-    # Price Action
-    pin_bars = detect_pin_bars(candles)
-    engulfing_patterns = detect_engulfing_patterns(candles)
-    if pin_bars:
-        signals["price_action"] = True
-        reasons.append(f"Pin Bar détectée (ratio: {pin_bars[-1]['ratio']}x)")
-    if engulfing_patterns:
-        signals["price_action"] = True
-        reasons.append("Engulfing Pattern détecté")
-
-    # 3. Validation des signaux
-    required = CONFIRMATION_REQUIRED.get(pair, 2)
-    if sum(signals.values()) < required:
-        logger.info(f"Signaux insuffisants ({sum(signals.values())}/{required})")
-        return False
-
-    # 4. Détermination de la direction
-    bullish_signals = sum([
-        signals["rsi"] and rsi < settings["rsi_oversold"],
-        signals["macd"] and macd > macd_signal
-    ])
-    bearish_signals = sum([
-        signals["rsi"] and rsi > settings["rsi_overbought"],
-        signals["macd"] and macd <= macd_signal
-    ])
-
-    if bullish_signals >= bearish_signals:
-        direction = "buy"
-    else:
-        direction = "sell"
-
-    # 5. Validations finales
-    if is_ranging(pair) and not breakout_detected:
-        logger.warning("Marché en range")
-        return False
-
-    if direction and not is_trend_aligned(pair, direction):
-        logger.warning("Désalignement des tendances HTF")
-        return False
-
-    if direction and any([signals["breakout"], signals["price_action"], signals["zone"]]):
-        logger.info(f"✅ Signal {direction.upper()} confirmé - Raisons: {', '.join(reasons)}")
-        return direction
-
-    logger.info("❌ Signaux contradictoires")
-    return False
 
 def detect_reversal_patterns(candles):
     """Détecte des patterns de retournement (pin bars, engulfings)"""
