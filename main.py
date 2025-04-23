@@ -1252,7 +1252,7 @@ class LiquidityHunter:
             
             # Conditions de confirmation
             if zone_type in ['fvg', 'ob']:
-                return (any(p[0] in ['Pin Bar', 'Engulfing'] for p in patterns) and rsi > 40
+                return (any(p[0] in ['Pin Bar', 'Engulfing'] for p in patterns)) and rsi > 40
             else:  # Session levels
                 return len(pin_bars) > 0 and atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5)
                 
