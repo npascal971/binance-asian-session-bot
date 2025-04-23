@@ -132,17 +132,17 @@ def calculate_atr(highs, lows, closes, period=14):
             atr = (atr * (period - 1) + true_ranges[i]) / period
 
         # Arrondi adaptatif selon le type de paire
-        if any(p in highs[0] for p in ['XAU', 'XAG']):  # Métaux précieux
+        # Supprimer la vérification incorrecte et utiliser un paramètre supplémentaire
+        if pair.endswith('_USD'):  # Pour toutes les paires USD
+            return round(atr, 5)
+        elif '_JPY' in pair:  # Paires JPY
             return round(atr, 3)
-        elif any(p in highs[0] for p in ['JPY']):  # Paires JPY
-            return round(atr, 4)
-        else:  # Majors
+        else:  # Valeur par défaut
             return round(atr, 5)
 
     except Exception as e:
         logger.error(f"Erreur calcul ATR: {str(e)}")
         return 0.0
-
 def send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons):
     """Envoie une alerte par email au lieu d'exécuter un trade"""
     subject = f"🚨 Signal {direction.upper()} détecté sur {pair}"
@@ -238,15 +238,13 @@ def get_asian_session_range(pair):
 
     # Calculer la date de début et de fin de la session asiatique
     if now.time() < asian_end_time:
-        # Si avant 07:00 UTC, la session asiatique est la veille 23h à maintenant
-        asian_start_date = (now - timedelta(days=1)).date()
+        # Si nous sommes avant 07:00 UTC, la session asiatique correspond à la veille
+        asian_start_date =  (now - timedelta(days=1)).date()
         asian_end_date = now.date()
-        asian_end = now.isoformat() + "Z"
     else:
-    # Sinon, c'est aujourd'hui 23h à aujourd'hui 07h
-        asian_start_date = now.date()
+        # Sinon, la session asiatique correspond à aujourd'hui  *********** faire l'inverse juste en dessous ligne 96 pour 97 et 97 pour 96
+        asian_start_date = (now + timedelta(days=-1)).date()
         asian_end_date = now.date()
-        asian_end = datetime.combine(asian_end_date, asian_end_time).isoformat() + "Z"
 
     # Créer les objets datetime complets pour le début et la fin
     asian_start = datetime.combine(asian_start_date, asian_start_time).isoformat() + "Z"
@@ -302,7 +300,6 @@ def get_asian_session_range(pair):
         # Logs en cas d'erreur lors de la récupération des données
         logger.error(f"Erreur lors de la récupération du range asiatique pour {pair}: {e}")
         return None, None
-
 # Définir le seuil de ratio pour les pin bars
 PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois plus grande que le corps
 PAIR_SETTINGS = {
