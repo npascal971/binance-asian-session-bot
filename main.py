@@ -109,16 +109,38 @@ def is_ranging(pair, timeframe="H1", threshold=0.5):
         logger.error(f"Error checking ranging market for {pair}: {e}")
         return False  # Default to False if error occurs
 
-def get_current_price(pair):
-    """Récupère le prix actuel d'une paire avec gestion des erreurs"""
-    try:
-        params = {"granularity": "M1", "count": 1, "price": "M"}
-        r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        candle = client.request(r)['candles'][0]
-        return float(candle['mid']['c'])
-    except Exception as e:
-        logger.error(f"Erreur récupération prix {pair}: {str(e)}")
-        return None
+def get_current_price(pair, max_retries=3):
+    """
+    Récupère le prix actuel avec gestion des erreurs et réessais
+    Args:
+        pair: Paire de devises
+        max_retries: Nombre maximum de tentatives
+    Returns:
+        float: Prix actuel ou None si échec
+    """
+    for attempt in range(max_retries):
+        try:
+            params = {
+                "granularity": "S5",
+                "count": 1,
+                "price": "M"
+            }
+            r = instruments.InstrumentsCandles(instrument=pair, params=params)
+            response = client.request(r)
+            
+            if not response.get('candles'):
+                raise ValueError("Aucune donnée de prix disponible")
+                
+            candle = response['candles'][0]
+            return float(candle['mid']['c'])
+            
+        except Exception as e:
+            logger.warning(f"Tentative {attempt + 1} échouée pour {pair}: {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(1)  # Attente avant réessai
+                
+    logger.error(f"Échec après {max_retries} tentatives pour {pair}")
+    return None
 
 def calculate_atr(highs, lows, closes, period=14):
     """Version améliorée avec gestion des arrondis"""
@@ -1191,18 +1213,43 @@ class LiquidityHunter:
     def __init__(self):
         self.liquidity_zones = {}
         self.session_ranges = {}
+        self.price_cache = {}  # Initialisation du cache des prix
+        self.last_update = {}  # Initialisation du suivi des timestamps
+        self.pair_settings = {  # Paramètres par paire
+            "XAU_USD": {"pip_value": 0.1, "threshold_pips": 30},
+            "CAD_JPY": {"pip_value": 0.01, "threshold_pips": 15},
+            # Ajoutez d'autres paires selon les besoins
+        }
     
-    def get_cached_price(self, pair):
-        """Version avec cache pour éviter les requêtes répétées"""
-        if pair in self.price_cache:
-            price, timestamp = self.price_cache[pair]
-            if time.time() - timestamp < 10:  # 10 secondes de cache
-                return price
+    def get_cached_price(self, pair, cache_duration=5):
+    """
+    Récupère le prix avec système de cache
+    Args:
+        pair: Paire de devises (ex: 'CAD_JPY')
+        cache_duration: Durée de validité du cache en secondes
+    Returns:
+        float: Prix actuel ou None en cas d'erreur
+    """
+    try:
+        current_time = time.time()
         
+        # Vérifie si le prix est en cache et encore valide
+        if (pair in self.price_cache and 
+            pair in self.last_update and
+            current_time - self.last_update[pair] < cache_duration):
+            return self.price_cache[pair]
+            
+        # Récupère le prix actuel via l'API
         price = get_current_price(pair)
         if price is not None:
-            self.price_cache[pair] = (price, time.time())
+            self.price_cache[pair] = price
+            self.last_update[pair] = current_time
+            
         return price
+        
+    except Exception as e:
+        logger.error(f"Erreur get_cached_price pour {pair}: {str(e)}")
+        return None
 
     def update_asian_range(self, pair):
         """Met à jour le range asiatique avec une gestion plus robuste"""
