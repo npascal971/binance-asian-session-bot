@@ -310,39 +310,57 @@ PAIR_SETTINGS = {
         "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35}
     }
     
-def detect_pin_bars(candles, pair=None):  # Ajoutez pair comme paramètre optionnel
-    """Détecte des pin bars dans une série de bougies"""
-    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"]) if pair else PAIR_SETTINGS["DEFAULT"]
+def detect_pin_bars(candles, pair=None):
+    """Détecte des pin bars dans une série de bougies avec gestion des dojis"""
+    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
     pin_bars = []
     
     for candle in candles:
         try:
+            if not candle['complete']:
+                continue
+                
             o = float(candle['mid']['o'])
             h = float(candle['mid']['h'])
             l = float(candle['mid']['l'])
             c = float(candle['mid']['c'])
             
-            body = abs(c - o)
+            body_size = abs(c - o)
             upper_wick = h - max(o, c)
             lower_wick = min(o, c) - l
+            total_range = h - l
             
-            # Utilisez le ratio spécifique à la paire si disponible
+            # Gestion spéciale des dojis (body_size = 0)
+            if body_size == 0:
+                # On considère le range total comme la mèche
+                if total_range > 0:
+                    ratio = 99  # Valeur arbitraire élevée pour doji significatif
+                else:
+                    continue  # Bougie plate, on ignore
+            else:
+                ratio = max(upper_wick, lower_wick) / body_size
+                
+            # Seuil dynamique selon la paire
             ratio_threshold = settings.get("pin_bar_ratio", PIN_BAR_RATIO_THRESHOLD)
             
-            if (upper_wick > body * ratio_threshold or 
-                lower_wick > body * ratio_threshold):
+            if ratio >= ratio_threshold:
                 direction = "bullish" if c > o else "bearish"
                 pin_bars.append({
                     "type": direction,
-                    "ratio": round(max(upper_wick, lower_wick) / body, 1),
-                    "price": c
+                    "ratio": round(ratio, 1),
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "body_size": body_size,
+                    "is_doji": (body_size == 0)
                 })
                 
         except Exception as e:
-            logger.error(f"Error detecting pin bar: {e}")
+            logger.error(f"Erreur analyse bougie {pair}: {str(e)}")
+            continue
     
     return pin_bars
-
 
 def is_strong_trend(pair, direction):
     """Vérifie l'alignement sur M15/H1/H4 avec force"""
