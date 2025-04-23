@@ -154,6 +154,7 @@ def calculate_atr(highs, lows, closes, period=14):
     except Exception as e:
         logger.error(f"Erreur calcul ATR: {str(e)}")
         return 0.0
+
 def send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons):
     """Envoie une alerte par email au lieu d'exécuter un trade"""
     subject = f"🚨 Signal {direction.upper()} détecté sur {pair}"
@@ -201,7 +202,33 @@ def is_trend_aligned(pair, direction):
     
     return all(trends)
 
-
+def is_price_approaching(price, zone, pair, threshold_pips=None):
+    """
+    Version améliorée avec gestion automatique des pips selon le type de paire
+    """
+    try:
+        # Détermine le seuil en pips
+        if threshold_pips is None:
+            if "_JPY" in pair:
+                threshold_pips = 15  # Seuil plus large pour les paires JPY
+            elif pair in ["XAU_USD", "XAG_USD"]:
+                threshold_pips = 30  # Métaux avec plus de volatilité
+            else:
+                threshold_pips = 10  # Valeur par défaut
+        
+        # Conversion pips en valeur de prix
+        pip_value = 0.01 if "_JPY" in pair else 0.0001
+        threshold = threshold_pips * pip_value
+        
+        if isinstance(zone, (tuple, list)):
+            zone_min, zone_max = min(zone), max(zone)
+            return (zone_min - threshold) <= price <= (zone_max + threshold)
+        else:
+            return abs(price - zone) <= threshold
+            
+    except Exception as e:
+        logger.error(f"Erreur is_price_approaching pour {pair}: {str(e)}")
+        return False
 
 def dynamic_sl_tp(atr, direction, risk_reward=1.5, min_sl_multiplier=1.8):
     """Gestion dynamique avec filet de sécurité"""
@@ -1217,21 +1244,33 @@ class LiquidityHunter:
             logger.error(f"Erreur analyse liquidité HTF {pair}: {e}")
             return False
     
-    def find_best_opportunity(self, pair):
-        """Trouve la meilleure opportunité de trading basée sur les liquidités"""
-        if pair not in self.liquidity_zones or pair not in self.session_ranges:
-            return None
+def _is_price_near_zone(self, price, zone, pair):
+        """Méthode interne avec logique avancée"""
+        # 1. Détermine le seuil dynamique
+        atr = calculate_atr_for_pair(pair)
+        base_pips = 15 if "_JPY" in pair else 10
+        dynamic_threshold = min(base_pips, atr * 0.33)  # Max 1/3 de l'ATR
         
-        current_price = get_current_price(pair)
+        # 2. Conversion en valeur absolue
+        pip_value = 0.01 if "_JPY" in pair else 0.0001
+        threshold = dynamic_threshold * pip_value
+        
+        # 3. Vérification de la zone
+        if isinstance(zone, (tuple, list)):
+            return (min(zone) - threshold) <= price <= (max(zone) + threshold)
+        return abs(price - zone) <= threshold
+
+    def find_best_opportunity(self, pair):
+        current_price = self.get_cached_price(pair)
         if current_price is None:
-            logger.warning(f"Impossible de récupérer le prix pour {pair}")
             return None
+            
         zones = self.liquidity_zones[pair]
         session = self.session_ranges[pair]
         
-        # Priorité 1: FVG près du range asiatique
+        # Priorité 1: FVG
         for fvg in zones['fvg']:
-            if is_price_approaching(current_price, fvg, threshold=0.001):
+            if self._is_price_near_zone(current_price, fvg, pair):
                 if self._confirm_zone(pair, fvg, 'fvg'):
                     return self._prepare_trade(pair, current_price, fvg, 'fvg')
         
