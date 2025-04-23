@@ -557,7 +557,7 @@ def analyze_htf(pair):
         logger.error(f"Erreur lors de l'analyse HTF pour {pair}: {e}")
         return [], []
 
-def detect_ltf_patterns(candles):
+def detect_ltf_patterns(candles, pairs):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
     patterns_detected = []
 
