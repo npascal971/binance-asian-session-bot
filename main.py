@@ -1260,7 +1260,7 @@ def _is_price_near_zone(self, price, zone, pair):
             return (min(zone) - threshold) <= price <= (max(zone) + threshold)
         return abs(price - zone) <= threshold
 
-    def find_best_opportunity(self, pair):
+def find_best_opportunity(self, pair):
         current_price = self.get_cached_price(pair)
         if current_price is None:
             return None
