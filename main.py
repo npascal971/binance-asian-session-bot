@@ -1211,45 +1211,49 @@ def calculate_rsi(prices, window=14):
 
 class LiquidityHunter:
     def __init__(self):
-        self.liquidity_zones = {}
-        self.session_ranges = {}
-        self.price_cache = {}  # Initialisation du cache des prix
-        self.last_update = {}  # Initialisation du suivi des timestamps
-        self.pair_settings = {  # Paramètres par paire
-            "XAU_USD": {"pip_value": 0.1, "threshold_pips": 30},
-            "CAD_JPY": {"pip_value": 0.01, "threshold_pips": 15},
-            # Ajoutez d'autres paires selon les besoins
+        """Initialisation avec valeurs par défaut"""
+        self.liquidity_zones = {}  # Stocke les zones de liquidité par paire
+        self.session_ranges = {}   # Stocke les ranges de session
+        self.price_cache = {}      # Cache des derniers prix
+        self.last_update = {}      # Timestamp de dernière mise à jour
+        self.pip_values = {        # Valeur d'un pip par paire
+            "XAU_USD": 0.1,
+            "XAG_USD": 0.1,
+            "CAD_JPY": 0.01,
+            "USD_JPY": 0.01,
+            "DEFAULT": 0.0001
         }
-    
+
+    def get_pip_value(self, pair):
+        """Retourne la valeur d'un pip pour la paire"""
+        return self.pip_values.get(pair, self.pip_values["DEFAULT"])
+
     def get_cached_price(self, pair, cache_duration=5):
-    """
-    Récupère le prix avec système de cache
-    Args:
-        pair: Paire de devises (ex: 'CAD_JPY')
-        cache_duration: Durée de validité du cache en secondes
-    Returns:
-        float: Prix actuel ou None en cas d'erreur
-    """
-    try:
-        current_time = time.time()
-        
-        # Vérifie si le prix est en cache et encore valide
-        if (pair in self.price_cache and 
-            pair in self.last_update and
-            current_time - self.last_update[pair] < cache_duration):
-            return self.price_cache[pair]
+        """Version optimisée avec gestion des paires spécifiques"""
+        try:
+            # Vérification du cache
+            current_time = time.time()
+            cached_data_valid = (
+                pair in self.price_cache and 
+                pair in self.last_update and
+                current_time - self.last_update[pair] < cache_duration
+            )
             
-        # Récupère le prix actuel via l'API
-        price = get_current_price(pair)
-        if price is not None:
-            self.price_cache[pair] = price
-            self.last_update[pair] = current_time
+            if cached_data_valid:
+                return self.price_cache[pair]
+                
+            # Récupération du prix
+            price = get_current_price(pair)
+            if price is not None:
+                self.price_cache[pair] = price
+                self.last_update[pair] = current_time
+                logger.debug(f"Cache mis à jour pour {pair}: {price}")
+                
+            return price
             
-        return price
-        
-    except Exception as e:
-        logger.error(f"Erreur get_cached_price pour {pair}: {str(e)}")
-        return None
+        except Exception as e:
+            logger.error(f"Erreur critique get_cached_price {pair}: {str(e)}")
+            return None
 
     def update_asian_range(self, pair):
         """Met à jour le range asiatique avec une gestion plus robuste"""
