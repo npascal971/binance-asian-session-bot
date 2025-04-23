@@ -1288,7 +1288,7 @@ def find_best_opportunity(self, pair):
         
         return None
     
-    def _confirm_zone(self, pair, zone, zone_type):
+def _confirm_zone(self, pair, zone, zone_type):
         """Confirme la validité d'une zone avec analyse LTF"""
         try:
             # Récupère les données M5
@@ -1313,7 +1313,7 @@ def find_best_opportunity(self, pair):
             logger.error(f"Erreur confirmation zone {pair}: {e}")
             return False
     
-    def _prepare_trade(self, pair, price, zone, zone_type):
+def _prepare_trade(self, pair, price, zone, zone_type):
         """Prépare les détails du trade"""
         atr = calculate_atr_for_pair(pair)
         direction = 'buy' if price < zone[0] else 'sell' if isinstance(zone, (list, tuple)) else 'buy' if price < zone else 'sell'
@@ -1336,7 +1336,7 @@ def find_best_opportunity(self, pair):
             'confidence': self._calculate_confidence(pair, price, zone_type)
         }
     
-    def _calculate_confidence(self, pair, price, zone_type):
+def _calculate_confidence(self, pair, price, zone_type):
         """Calcule un score de confiance pour le trade"""
         # Basé sur la confluence des facteurs
         score = 0
