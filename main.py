@@ -1244,7 +1244,7 @@ class LiquidityHunter:
             logger.error(f"Erreur analyse liquidité HTF {pair}: {e}")
             return False
     
-def _is_price_near_zone(self, price, zone, pair):
+    def _is_price_near_zone(self, price, zone, pair):
         """Méthode interne avec logique avancée"""
         # 1. Détermine le seuil dynamique
         atr = calculate_atr_for_pair(pair)
@@ -1260,7 +1260,7 @@ def _is_price_near_zone(self, price, zone, pair):
             return (min(zone) - threshold) <= price <= (max(zone) + threshold)
         return abs(price - zone) <= threshold
 
-def find_best_opportunity(self, pair):
+    def find_best_opportunity(self, pair):
         current_price = self.get_cached_price(pair)
         if current_price is None:
             return None
@@ -1288,7 +1288,7 @@ def find_best_opportunity(self, pair):
         
         return None
     
-def _confirm_zone(self, pair, zone, zone_type):
+    def _confirm_zone(self, pair, zone, zone_type):
         """Confirme la validité d'une zone avec analyse LTF"""
         try:
             # Récupère les données M5
@@ -1313,7 +1313,7 @@ def _confirm_zone(self, pair, zone, zone_type):
             logger.error(f"Erreur confirmation zone {pair}: {e}")
             return False
     
-def _prepare_trade(self, pair, price, zone, zone_type):
+    def _prepare_trade(self, pair, price, zone, zone_type):
         """Prépare les détails du trade"""
         atr = calculate_atr_for_pair(pair)
         direction = 'buy' if price < zone[0] else 'sell' if isinstance(zone, (list, tuple)) else 'buy' if price < zone else 'sell'
@@ -1336,7 +1336,7 @@ def _prepare_trade(self, pair, price, zone, zone_type):
             'confidence': self._calculate_confidence(pair, price, zone_type)
         }
     
-def _calculate_confidence(self, pair, price, zone_type):
+    def _calculate_confidence(self, pair, price, zone_type):
         """Calcule un score de confiance pour le trade"""
         # Basé sur la confluence des facteurs
         score = 0
