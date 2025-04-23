@@ -109,6 +109,17 @@ def is_ranging(pair, timeframe="H1", threshold=0.5):
         logger.error(f"Error checking ranging market for {pair}: {e}")
         return False  # Default to False if error occurs
 
+def get_current_price(pair):
+    """Récupère le prix actuel d'une paire avec gestion des erreurs"""
+    try:
+        params = {"granularity": "M1", "count": 1, "price": "M"}
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        candle = client.request(r)['candles'][0]
+        return float(candle['mid']['c'])
+    except Exception as e:
+        logger.error(f"Erreur récupération prix {pair}: {str(e)}")
+        return None
+
 def calculate_atr(highs, lows, closes, period=14):
     """Version améliorée avec gestion des arrondis"""
     try:
@@ -1212,6 +1223,9 @@ class LiquidityHunter:
             return None
         
         current_price = get_current_price(pair)
+        if current_price is None:
+            logger.warning(f"Impossible de récupérer le prix pour {pair}")
+            return None
         zones = self.liquidity_zones[pair]
         session = self.session_ranges[pair]
         
