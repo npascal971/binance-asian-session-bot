@@ -1147,147 +1147,221 @@ def calculate_rsi(prices, window=14):
     return rsi
 
 
-def analyze_pair(pair):
-    """Analyse une paire de trading et exécute les trades si conditions remplies"""
-    logger.info(f"🔍 Analyse de la paire {pair}...")
-    try:
-        # 1. Récupérer le range asiatique
+# ... (conservons les imports et configurations existants)
+
+class LiquidityHunter:
+    def __init__(self):
+        self.liquidity_zones = {}
+        self.session_ranges = {}
+    
+    def update_asian_range(self, pair):
+        """Met à jour le range asiatique avec une gestion plus robuste"""
         asian_high, asian_low = get_asian_session_range(pair)
-        if asian_high is None or asian_low is None:
-            logger.warning(f"Impossible de récupérer le range asiatique pour {pair}.")
-            return
-        
-        logger.info(f"Range asiatique pour {pair}: High={asian_high}, Low={asian_low}")
-        
-        # 2. Analyser les timeframes élevés (HTF)
-        fvg_zones, ob_zones = analyze_htf(pair)
-        logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
-        
-        # 3. Récupérer les données M5
-        params = {"granularity": "M5", "count": 50, "price": "M"}
-        r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        client.request(r)
-        candles = r.response['candles']
-        
-        # 4. Extraire les séries de prix AVANT les calculs
-        closes = [float(c['mid']['c']) for c in candles if c['complete']]
-        highs = [float(c['mid']['h']) for c in candles if c['complete']]
-        lows = [float(c['mid']['l']) for c in candles if c['complete']]
-        volumes = [c['volume'] for c in candles if c['complete']]
-
-        # Vérifier que les données sont valides
-        if len(closes) < 20 or not highs or not lows:
-            logger.warning("Données de prix insuffisantes")
-            return
-
-        # 5. Calculer les indicateurs TECHNIQUES ICI
-        adx_value = calculate_adx(highs, lows, closes)
-        vwap_value = calculate_vwap(closes, volumes)
-        
+        if asian_high and asian_low:
+            self.session_ranges[pair] = {
+                'high': asian_high,
+                'low': asian_low,
+                'mid': (asian_high + asian_low) / 2
+            }
+            return True
+        return False
     
-        # 5. Calculer les indicateurs techniques
-        close_series = pd.Series(closes)
-    
-        # RSI robuste
+    def analyze_htf_liquidity(self, pair):
+        """Analyse approfondie des zones de liquidité HTF"""
         try:
-            latest_rsi = calculate_rsi(np.array(closes))
-            if np.isnan(latest_rsi):
-                latest_rsi = 50.0
-                logger.warning(f"RSI invalide pour {pair}, utilisation de 50.0")
+            # Analyse des FVG et Order Blocks
+            fvg_zones, ob_zones = analyze_htf(pair)
+            
+            # Détection des pics de volume comme zones de liquidité
+            params = {"granularity": "H4", "count": 100, "price": "M"}
+            candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+            volumes = [float(c['volume']) for c in candles if c['complete']]
+            closes = [float(c['mid']['c']) for c in candles if c['complete']]
+            
+            # Détection des zones de volume élevé
+            high_volume_zones = []
+            avg_volume = np.mean(volumes)
+            for i in range(len(volumes)):
+                if volumes[i] > avg_volume * 2:  # Volume 2x supérieur à la moyenne
+                    high_volume_zones.append(closes[i])
+            
+            # Utilisation de KDE pour trouver des clusters de liquidité
+            if len(closes) > 10:
+                liquidity_pools = detect_liquidity_zones(closes)
+            else:
+                liquidity_pools = []
+            
+            # Enregistrement des zones
+            self.liquidity_zones[pair] = {
+                'fvg': fvg_zones,
+                'ob': ob_zones,
+                'volume': high_volume_zones,
+                'kde': liquidity_pools,
+                'last_update': datetime.utcnow()
+            }
+            
+            return True
+            
         except Exception as e:
-            logger.error(f"Erreur calcul RSI pour {pair}: {str(e)}")
-            latest_rsi = 50.0
+            logger.error(f"Erreur analyse liquidité HTF {pair}: {e}")
+            return False
+    
+    def find_best_opportunity(self, pair):
+        """Trouve la meilleure opportunité de trading basée sur les liquidités"""
+        if pair not in self.liquidity_zones or pair not in self.session_ranges:
+            return None
         
-        # MACD
-        ema12 = close_series.ewm(span=12, adjust=False).mean()
-        ema26 = close_series.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        latest_macd = macd_line.iloc[-1]
-        latest_signal = signal_line.iloc[-1]
+        current_price = get_current_price(pair)
+        zones = self.liquidity_zones[pair]
+        session = self.session_ranges[pair]
         
-        # ATR
+        # Priorité 1: FVG près du range asiatique
+        for fvg in zones['fvg']:
+            if is_price_approaching(current_price, fvg, threshold=0.001):
+                if self._confirm_zone(pair, fvg, 'fvg'):
+                    return self._prepare_trade(pair, current_price, fvg, 'fvg')
+        
+        # Priorité 2: Order Blocks avec volume élevé
+        for ob in zones['ob']:
+            if is_price_approaching(current_price, ob, threshold=0.001):
+                if self._confirm_zone(pair, ob, 'ob'):
+                    return self._prepare_trade(pair, current_price, ob, 'ob')
+        
+        # Priorité 3: Niveaux clés du range asiatique
+        for level in ['high', 'low', 'mid']:
+            if abs(current_price - session[level]) < 0.001:
+                if self._confirm_zone(pair, session[level], 'session'):
+                    return self._prepare_trade(pair, current_price, session[level], 'session')
+        
+        return None
+    
+    def _confirm_zone(self, pair, zone, zone_type):
+        """Confirme la validité d'une zone avec analyse LTF"""
+        try:
+            # Récupère les données M5
+            params = {"granularity": "M5", "count": 20, "price": "M"}
+            candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+            
+            # Vérifie les patterns de prix
+            patterns = detect_ltf_patterns(candles)
+            pin_bars = detect_pin_bars(candles, pair)
+            
+            # Vérifie le momentum
+            rsi = calculate_rsi([float(c['mid']['c']) for c in candles if c['complete']])
+            atr = calculate_atr_for_pair(pair)
+            
+            # Conditions de confirmation
+            if zone_type in ['fvg', 'ob']:
+                return (any(p[0] in ['Pin Bar', 'Engulfing'] for p in patterns) and rsi > 40
+            else:  # Session levels
+                return len(pin_bars) > 0 and atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5)
+                
+        except Exception as e:
+            logger.error(f"Erreur confirmation zone {pair}: {e}")
+            return False
+    
+    def _prepare_trade(self, pair, price, zone, zone_type):
+        """Prépare les détails du trade"""
         atr = calculate_atr_for_pair(pair)
-        logger.debug(f"ATR calculé pour {pair}: {atr:.5f} (14 périodes)")
+        direction = 'buy' if price < zone[0] else 'sell' if isinstance(zone, (list, tuple)) else 'buy' if price < zone else 'sell'
         
-        # 6. Détection de breakout
-        breakout_up = any(float(c['mid']['h']) > asian_high for c in candles[-5:] if c['complete'])
-        breakout_down = closes[-1] < min(closes[-11:-1])
-        breakout_detected = breakout_up or breakout_down
-        
-        # 7. Détecter les patterns
-        ltf_patterns = detect_ltf_patterns(candles, pair)
-        logger.info(f"Patterns LTF détectés pour {pair}: {ltf_patterns}")
-        
-        # 8. Log des indicateurs
-        logger.info(f"📊 Indicateurs {pair}: "
-                   f"RSI={latest_rsi:.2f}, "
-                   f"MACD={latest_macd:.5f}, "
-                   f"Signal={latest_signal:.5f}, "
-                   f"ADX: {adx_value} (force de tendance), "
-                   f"VWAP: {vwap_value:.5f}, "
-                   f"ATR={atr:.5f}")
-        logger.info(f"Breakout: {'UP' if breakout_up else 'DOWN' if breakout_down else 'NONE'}")
-
-        # Initialisation des variables
-        entry_price = stop_price = direction = None
-        
-        # 9. Vérifier les conditions de trading
-        key_zones = fvg_zones + ob_zones + [(asian_low, asian_high)]
-        trade_signal = should_open_trade(pair, latest_rsi, latest_macd, latest_signal, 
-                                      breakout_detected, closes[-1], key_zones, atr, candles)
-
-        if trade_signal in ("buy", "sell"):
-                # Récupérer l'ATR H1
-            atr_h1 = get_atr(pair, "H1")
-            if atr_h1 <= 0:
-                logger.warning(f"Invalid ATR value for {pair}, skipping trade")
-                return  # Exit the function instead of using continue
-    
-            # Calcul dynamique du SL/TP
-            sl_pips, tp_pips = dynamic_sl_tp(atr_h1, trade_signal)
-
-            entry_price = closes[-1]
-            direction = trade_signal
-            stop_price = entry_price - sl_pips if direction == "buy" else entry_price + sl_pips
-            take_profit = entry_price + tp_pips if direction == "buy" else entry_price - tp_pips
-    
-            # Nouveau log détaillé
-            logger.info(f"""
-            \n📈 SIGNAL DÉTECTÉ 📉
-            Paire: {pair}
-            Direction: {direction.upper()}
-            Entrée: {entry_price:.5f}
-            Stop Loss: {stop_price:.5f}
-            Take Profit: {take_profit:.5f}
-            Ratio R/R: {(take_profit-entry_price)/(entry_price-stop_price):.1f}
-            ATR utilisé: {atr:.5f}""")
-
-            # Récupérer les motifs détectés
-            raw_patterns = detect_ltf_patterns(candles)
-            patterns = []
-            for p in raw_patterns:
-                if isinstance(p, tuple):
-                    patterns.append(p[0].split()[0])
-                else:
-                    patterns.append(str(p))
-            reasons = [
-                f"RSI: {latest_rsi:.2f}",
-                f"MACD: {latest_macd:.5f}",
-                f"ATR: {atr:.5f}",
-                f"Patterns: {', '.join(patterns) if patterns else 'Aucun'}"
-            ]
-
-            # Envoyer l'email d'alerte
-            send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons)
-    
+        # Calcul des niveaux SL/TP
+        if direction == 'buy':
+            stop_loss = price - 1.5 * atr
+            take_profit = price + 3 * atr
         else:
-            logger.info("📉 Pas de signal de trading valide")
-            
-    except Exception as e:
-        logger.error(f"Erreur analyse {pair}: {str(e)}", exc_info=True)
+            stop_loss = price + 1.5 * atr
+            take_profit = price - 3 * atr
+        
+        return {
+            'pair': pair,
+            'direction': direction,
+            'entry': price,
+            'sl': stop_loss,
+            'tp': take_profit,
+            'zone_type': zone_type,
+            'confidence': self._calculate_confidence(pair, price, zone_type)
+        }
+    
+    def _calculate_confidence(self, pair, price, zone_type):
+        """Calcule un score de confiance pour le trade"""
+        # Basé sur la confluence des facteurs
+        score = 0
+        
+        # 1. Alignement avec la tendance HTF
+        if is_trend_aligned(pair, 'buy' if price < zone[0] else 'sell' if isinstance(zone, (list, tuple)) else 'buy' if price < zone else 'sell'):
+            score += 30
+        
+        # 2. Force de la zone
+        if zone_type == 'fvg':
+            score += 25
+        elif zone_type == 'ob':
+            score += 20
+        else:  # Session levels
+            score += 15
+        
+        # 3. Momentum
+        rsi = check_rsi_conditions(pair)
+        if (rsi['buy_signal'] and direction == 'buy') or (rsi['sell_signal'] and direction == 'sell'):
+            score += 20
+        
+        # 4. Volatilité
+        atr = calculate_atr_for_pair(pair)
+        if atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5):
+            score += 15
+        
+        # 5. Volume récent
+        params = {"granularity": "M15", "count": 5, "price": "M"}
+        candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+        last_volume = float(candles[-1]['volume']) if candles else 0
+        avg_volume = np.mean([float(c['volume']) for c in candles[:-1] if c['complete']]) if len(candles) > 1 else 0
+        
+        if last_volume > avg_volume * 1.5:
+            score += 10
+        
+        return min(100, score)  # Limite à 100%
 
-            
+# ... (adaptation des fonctions existantes pour utiliser LiquidityHunter)
+
+def analyze_pair(pair):
+    """Nouvelle version focalisée sur les liquidités"""
+    hunter = LiquidityHunter()
+    
+    # 1. Mise à jour des données
+    if not hunter.update_asian_range(pair):
+        return
+    
+    if not hunter.analyze_htf_liquidity(pair):
+        return
+    
+    # 2. Recherche d'opportunités
+    opportunity = hunter.find_best_opportunity(pair)
+    if not opportunity:
+        return
+    
+    # 3. Vérification finale des conditions
+    if opportunity['confidence'] < 70:  # Seuil de confiance minimum
+        logger.info(f"Opportunité faible confiance ({opportunity['confidence']}%) pour {pair}")
+        return
+    
+    # 4. Envoi de l'alerte
+    reasons = [
+        f"Zone: {opportunity['zone_type'].upper()}",
+        f"Confiance: {opportunity['confidence']}%",
+        f"Direction: {opportunity['direction'].upper()}",
+        f"ATR: {calculate_atr_for_pair(pair):.5f}"
+    ]
+    
+    send_trade_alert(
+        pair=opportunity['pair'],
+        direction=opportunity['direction'],
+        entry_price=opportunity['entry'],
+        stop_price=opportunity['sl'],
+        take_profit=opportunity['tp'],
+        reasons=reasons
+    )
+
+# ... (le reste du code main reste similaire mais utilise la nouvelle analyse_pair)
 
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du bot de trading OANDA - Mode Sniper Liquidités...")
