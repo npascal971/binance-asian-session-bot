@@ -1290,7 +1290,10 @@ def analyze_pair(pair):
             
 
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du bot de trading OANDA...")
+    logger.info("🚀 Démarrage du bot de trading OANDA - Mode Sniper Liquidités...")
+    
+    # Initialisation du chasseur de liquidités
+    liquidity_hunter = LiquidityHunter()
     
     # Vérification initiale de la connexion
     try:
@@ -1305,78 +1308,147 @@ if __name__ == "__main__":
     while True:
         now = datetime.utcnow().time()
         if SESSION_START <= now <= SESSION_END:
-            logger.info("⏱ Session active - Analyse des paires...")
+            logger.info("⏱ Session active - Chasse aux liquidités en cours...")
             
-            # Vérifier les trades ouverts et fermés
-            check_active_trades()
-            update_closed_trades()
-            
-            # Analyser chaque paire avec priorité sur XAU_USD
-            for pair in PAIRS:
-                try:
-                    if pair == "XAU_USD":
-                        # Analyse spécialisée pour l'or
-                        analyze_gold()  
-                    else:
-                        # Analyse standard pour les autres paires
-                        analyze_pair(pair)
+            # 1. Mise à jour des données de marché
+            try:
+                # Pour toutes les paires, priorité à XAU_USD
+                for pair in sorted(PAIRS, key=lambda x: 0 if x == "XAU_USD" else 1):
+                    try:
+                        # Mise à jour des ranges et zones de liquidité
+                        liquidity_hunter.update_asian_range(pair)
+                        liquidity_hunter.analyze_htf_liquidity(pair)
                         
-                except Exception as e:
-                    logger.error(f"Erreur critique avec {pair}: {e}")
-                    continue
-            
-            # Gestion des positions actives
-            for pair in list(active_trades):
-                try:
-                    # Récupérer le prix actuel
-                    params = {"granularity": "M5", "count": 1, "price": "M"}
-                    r = instruments.InstrumentsCandles(instrument=pair, params=params)
-                    client.request(r)
-                    current_price = float(r.response['candles'][0]['mid']['c'])
-
-                    # Récupérer les détails de la position
-                    r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
-                    response = client.request(r)
+                        # Analyse spécifique pour l'or
+                        if pair == "XAU_USD":
+                            analyze_gold()  # Conserve votre analyse spécialisée
+                        else:
+                            # Recherche d'opportunités de trading
+                            opportunity = liquidity_hunter.find_best_opportunity(pair)
+                            
+                            if opportunity and opportunity['confidence'] >= 70:
+                                # Préparation des détails du trade
+                                reasons = [
+                                    f"Zone: {opportunity['zone_type'].upper()}",
+                                    f"Confiance: {opportunity['confidence']}%",
+                                    f"ATR: {calculate_atr_for_pair(pair):.5f}",
+                                    f"Alignement HTF: {'OUI' if is_trend_aligned(pair, opportunity['direction']) else 'NON'}"
+                                ]
+                                
+                                # Envoi de l'alerte
+                                send_trade_alert(
+                                    pair=opportunity['pair'],
+                                    direction=opportunity['direction'],
+                                    entry_price=opportunity['entry'],
+                                    stop_price=opportunity['sl'],
+                                    take_profit=opportunity['tp'],
+                                    reasons=reasons
+                                )
+                                
+                                # Exécution réelle en mode live
+                                if not SIMULATION_MODE and opportunity['confidence'] > 80:
+                                    place_trade(
+                                        pair=opportunity['pair'],
+                                        direction=opportunity['direction'],
+                                        entry_price=opportunity['entry'],
+                                        stop_loss_price=opportunity['sl'],
+                                        take_profit_price=opportunity['tp'],
+                                        atr=calculate_atr_for_pair(pair),
+                                        account_balance=get_account_balance()
+                                    )
                     
-                    # Vérifier la direction du trade
-                    if float(response['position']['long']['units']) > 0:
-                        trade_data = response['position']['long']
-                        direction = "buy"
-                        entry_price = float(trade_data['averagePrice'])
-                        current_sl = float(trade_data['stopLossOrder']['price'])
-                        trade_id = trade_data['tradeIDs'][0]
-                    elif float(response['position']['short']['units']) < 0:
-                        trade_data = response['position']['short']
-                        direction = "sell"
-                        entry_price = float(trade_data['averagePrice'])
-                        current_sl = float(trade_data['stopLossOrder']['price'])
-                        trade_id = trade_data['tradeIDs'][0]
-                    else:
+                    except Exception as e:
+                        logger.error(f"Erreur analyse {pair}: {str(e)}")
                         continue
-
-                    # Gestion du trailing stop avec vérification de tendance
-                    if pair == "XAU_USD":
-                        trend_confirmation = is_strong_trend(pair, direction)
-                    else:
-                        trend_confirmation = is_trend_aligned(pair, direction)
-                    
-                    if trend_confirmation:
-                        price_diff = current_price - entry_price if direction == "buy" else entry_price - current_price
-                        if price_diff > TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
-                            new_sl = entry_price + (0.0001 if direction == "buy" else -0.0001)  # Break-even
-                            update_stop_loss(trade_id, new_sl)
-                            logger.info(f"Trailing stop ajusté à breakeven pour {pair}")
-
-                except Exception as e:
-                    logger.error(f"Erreur gestion position {pair}: {e}")
-                    continue
-
-            # Vérification rapide toutes les 15 secondes
-            for _ in range(4):  # 4 x 15 secondes = 1 minute
-                check_active_trades()
+                
+                # 2. Gestion des trades existants
                 update_closed_trades()
-                time.sleep(15)
+                for pair in list(active_trades):
+                    try:
+                        manage_open_trade(pair)  # Nouvelle fonction de gestion
+                    except Exception as e:
+                        logger.error(f"Erreur gestion trade {pair}: {e}")
+                
+            except Exception as e:
+                logger.error(f"Erreur majeure: {str(e)}")
+            
+            # Pause entre les analyses (15 secondes)
+            time.sleep(15)
                 
         else:
             logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
             time.sleep(300)
+
+def manage_open_trade(pair):
+    """Gère les trades ouverts avec trailing stop et prise de profits partiels"""
+    try:
+        # Récupération du prix actuel
+        params = {"granularity": "M5", "count": 1, "price": "M"}
+        candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+        current_price = float(candles[0]['mid']['c'])
+        
+        # Récupération des détails de la position
+        r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
+        position = client.request(r)
+        
+        # Vérification de la direction
+        if float(position['position']['long']['units']) > 0:
+            direction = 'buy'
+            entry_price = float(position['position']['long']['averagePrice'])
+            current_sl = float(position['position']['long']['stopLossOrder']['price'])
+        elif float(position['position']['short']['units']) < 0:
+            direction = 'sell'
+            entry_price = float(position['position']['short']['averagePrice'])
+            current_sl = float(position['position']['short']['stopLossOrder']['price'])
+        else:
+            return
+        
+        # Calcul du profit actuel
+        profit_pips = (current_price - entry_price) * (1 if direction == 'buy' else -1)
+        
+        # Gestion du trailing stop
+        if profit_pips > TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
+            new_sl = entry_price + (0.0001 if direction == 'buy' else -0.0001)  # Break-even
+            if (direction == 'buy' and new_sl > current_sl) or (direction == 'sell' and new_sl < current_sl):
+                update_stop_loss(position['position'][direction]['tradeIDs'][0], new_sl)
+        
+        # Prise de profit partielle (pour les trades très profitants)
+        if profit_pips > 50 * 0.0001:  # +50 pips
+            close_partial_position(pair, direction, percentage=0.5)  # Ferme 50% de la position
+    
+    except Exception as e:
+        logger.error(f"Erreur gestion trade {pair}: {e}")
+        raise
+
+def close_partial_position(pair, direction, percentage):
+    """Ferme un pourcentage de la position"""
+    try:
+        units = int(float(get_position_size(pair)) * percentage)
+        if direction == 'sell':
+            units = -units  # Inversion pour les positions short
+        
+        data = {
+            "order": {
+                "units": str(units),
+                "instrument": pair,
+                "type": "MARKET",
+                "positionFill": "REDUCE_ONLY"
+            }
+        }
+        
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=data)
+        response = client.request(r)
+        logger.info(f"Prise de profit partielle sur {pair}: {units} unités")
+    
+    except Exception as e:
+        logger.error(f"Échec prise de profit partielle {pair}: {e}")
+
+def get_position_size(pair):
+    """Récupère la taille de la position ouverte"""
+    r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
+    position = client.request(r)
+    if float(position['position']['long']['units']) > 0:
+        return position['position']['long']['units']
+    elif float(position['position']['short']['units']) < 0:
+        return position['position']['short']['units']
+    return 0
