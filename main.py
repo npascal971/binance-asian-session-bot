@@ -1352,26 +1352,38 @@ class LiquidityHunter:
         return None
     
     def _confirm_zone(self, pair, zone, zone_type):
-        """Confirme la validité d'une zone avec analyse LTF"""
         try:
             # Récupère les données M5
             params = {"granularity": "M5", "count": 20, "price": "M"}
             candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
-            
+        
             # Vérifie les patterns de prix
-            patterns = detect_ltf_patterns(candles, pair)
+            patterns = detect_ltf_patterns(candles, pair)  # Ajout du paramètre pair
             pin_bars = detect_pin_bars(candles, pair)
-            
+        
             # Vérifie le momentum
             rsi = calculate_rsi([float(c['mid']['c']) for c in candles if c['complete']])
             atr = calculate_atr_for_pair(pair)
-            
+        
             # Conditions de confirmation
             if zone_type in ['fvg', 'ob']:
                 return (any(p[0] in ['Pin Bar', 'Engulfing'] for p in patterns)) and rsi > 40
             else:  # Session levels
-                return len(pin_bars) > 0 and atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5)
+                # Correction ici - utilisation explicite de zone
+                current_price = get_current_price(pair)
+                if current_price is None:
+                    return False
                 
+            # Vérification de proximité avec la zone
+                if isinstance(zone, (list, tuple)):
+                    zone_min, zone_max = min(zone), max(zone)
+                    return (len(pin_bars) > 0 and 
+                            atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5) and
+                            zone_min <= current_price <= zone_max)
+                else:
+                    return (len(pin_bars) > 0 and 
+                            atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5) and
+                            abs(current_price - zone) < RETEST_ZONE_RANGE)
         except Exception as e:
             logger.error(f"Erreur confirmation zone {pair}: {e}")
             return False
