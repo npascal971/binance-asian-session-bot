@@ -1369,23 +1369,43 @@ class LiquidityHunter:
             if zone_type in ['fvg', 'ob']:
                 return (any(p[0] in ['Pin Bar', 'Engulfing'] for p in patterns)) and rsi > 40
             else:  # Session levels
-                # Correction ici - utilisation explicite de zone
-                current_price = get_current_price(pair)
-                if current_price is None:
-                    return False                
-            # Vérification de proximité avec la zone
-                if isinstance(zone, (list, tuple)):
-                    zone_min, zone_max = min(zone), max(zone)
-                    return (len(pin_bars) > 0 and 
-                            atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5) and
-                            zone_min <= current_price <= zone_max)
-                else:
+                try:
+                    current_price = get_current_price(pair)
+                    if current_price is None:
+                        return False
+            
+                    # Vérification de proximité avec la zone de session
+                    session_range = self.session_ranges.get(pair)
+                    if not session_range:
+                        logger.warning(f"Range de session non disponible pour {pair}")
+                        return False
+            
+                    # Définir explicitement les niveaux de la zone de session
+                    high_level = session_range.get('high')
+                    low_level = session_range.get('low')
+                    mid_level = session_range.get('mid')
+        
+                    # Vérification par rapport aux niveaux de session
+                    if abs(current_price - high_level) < RETEST_ZONE_RANGE:
+                        zone = high_level
+                    elif abs(current_price - low_level) < RETEST_ZONE_RANGE:
+                        zone = low_level
+                    elif abs(current_price - mid_level) < RETEST_ZONE_RANGE:
+                        zone = mid_level
+                    else:
+                        return False
+            
+                    # Maintenant que 'zone' est défini, continuer avec les vérifications
+                    pin_bars = detect_pin_bars(candles, pair)
+                    atr = calculate_atr_for_pair(pair)
+        
                     return (len(pin_bars) > 0 and 
                             atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5) and
                             abs(current_price - zone) < RETEST_ZONE_RANGE)
-        except Exception as e:
-            logger.error(f"Erreur confirmation zone {pair}: {e}")
-            return False
+                
+                except Exception as e:
+                    logger.error(f"Erreur confirmation zone session {pair}: {e}")
+                    return False
     
     def _prepare_trade(self, pair, price, zone, zone_type):
         """Prépare les détails du trade"""
