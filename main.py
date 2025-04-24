@@ -1359,7 +1359,7 @@ class LiquidityHunter:
             candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
             
             # Vérifie les patterns de prix
-            patterns = detect_ltf_patterns(candles)
+            patterns = detect_ltf_patterns(candles, pair)
             pin_bars = detect_pin_bars(candles, pair)
             
             # Vérifie le momentum
