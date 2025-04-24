@@ -1563,7 +1563,11 @@ if __name__ == "__main__":
                             # Recherche d'opportunités de trading
                             opportunity = liquidity_hunter.find_best_opportunity(pair)
                             
-                            if opportunity and opportunity['confidence'] >= 70:
+                            if opportunity:
+                                logger.info(f"Opportunité détectée pour {pair}, confiance: {opportunity['confidence']}%")
+                                if opportunity['confidence'] >= 70:
+
+
                                 # Préparation des détails du trade
                                 reasons = [
                                     f"Zone: {opportunity['zone_type'].upper()}",
