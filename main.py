@@ -1408,9 +1408,7 @@ class LiquidityHunter:
                     logger.error(f"Erreur confirmation zone session {pair}: {e}")
                     return False
     
-        except Exception as e:
-            logger.error(f"Erreur confirmation zone {pair}: {e}")
-            return False
+      
     
     def _prepare_trade(self, pair, price, zone, zone_type):
         """Prépare les détails du trade"""
