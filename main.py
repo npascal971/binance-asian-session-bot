@@ -1352,20 +1352,20 @@ class LiquidityHunter:
         return None
     
     def _confirm_zone(self, pair, zone, zone_type):
-    	try:
-        # Récupère les données M5
+        try:
+            # Récupère les données M5
             params = {"granularity": "M5", "count": 20, "price": "M"}
             candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
         
-        # Vérifie les patterns de prix
+            # Vérifie les patterns de prix
             patterns = detect_ltf_patterns(candles, pair)  # Ajout du paramètre pair
             pin_bars = detect_pin_bars(candles, pair)
         
-        # Vérifie le momentum
+            # Vérifie le momentum
             rsi = calculate_rsi([float(c['mid']['c']) for c in candles if c['complete']])
             atr = calculate_atr_for_pair(pair)
         
-        # Conditions de confirmation selon le type de zone
+            # Conditions de confirmation selon le type de zone
             if zone_type in ['fvg', 'ob']:
                 return (any(p[0] in ['Pin Bar', 'Engulfing'] for p in patterns)) and rsi > 40
         
@@ -1407,6 +1407,10 @@ class LiquidityHunter:
                 except Exception as e:
                     logger.error(f"Erreur confirmation zone session {pair}: {e}")
                     return False
+    
+        except Exception as e:
+            logger.error(f"Erreur confirmation zone {pair}: {e}")
+            return False
     
       
     
