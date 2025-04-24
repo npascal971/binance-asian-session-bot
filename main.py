@@ -1352,7 +1352,7 @@ class LiquidityHunter:
         return None
     
     def _confirm_zone(self, pair, zone, zone_type):
-    try:
+        try:
         # Récupère les données M5
         params = {"granularity": "M5", "count": 20, "price": "M"}
         candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
