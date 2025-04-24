@@ -1372,8 +1372,7 @@ class LiquidityHunter:
                 # Correction ici - utilisation explicite de zone
                 current_price = get_current_price(pair)
                 if current_price is None:
-                    return False
-                
+                    return False                
             # Vérification de proximité avec la zone
                 if isinstance(zone, (list, tuple)):
                     zone_min, zone_max = min(zone), max(zone)
