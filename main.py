@@ -1568,23 +1568,23 @@ if __name__ == "__main__":
                                 if opportunity['confidence'] >= 70:
 
 
-                                # Préparation des détails du trade
-                                reasons = [
-                                    f"Zone: {opportunity['zone_type'].upper()}",
-                                    f"Confiance: {opportunity['confidence']}%",
-                                    f"ATR: {calculate_atr_for_pair(pair):.5f}",
-                                    f"Alignement HTF: {'OUI' if is_trend_aligned(pair, opportunity['direction']) else 'NON'}"
-                                ]
+                                    # Préparation des détails du trade
+                                    reasons = [
+                                        f"Zone: {opportunity['zone_type'].upper()}",
+                                        f"Confiance: {opportunity['confidence']}%",
+                                        f"ATR: {calculate_atr_for_pair(pair):.5f}",
+                                        f"Alignement HTF: {'OUI' if is_trend_aligned(pair, opportunity['direction']) else 'NON'}"
+                                    ]
                                 
                                 # Envoi de l'alerte
-                                send_trade_alert(
-                                    pair=opportunity['pair'],
-                                    direction=opportunity['direction'],
-                                    entry_price=opportunity['entry'],
-                                    stop_price=opportunity['sl'],
-                                    take_profit=opportunity['tp'],
-                                    reasons=reasons
-                                )
+                                    send_trade_alert(
+                                        pair=opportunity['pair'],
+                                        direction=opportunity['direction'],
+                                        entry_price=opportunity['entry'],
+                                        stop_price=opportunity['sl'],
+                                        take_profit=opportunity['tp'],
+                                        reasons=reasons
+                                    )
                                 
                                 # Exécution réelle en mode live
                                 if not SIMULATION_MODE and opportunity['confidence'] > 80:
