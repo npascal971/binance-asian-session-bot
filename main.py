@@ -1339,7 +1339,7 @@ class LiquidityHunter:
         
         # Priorité 2: Order Blocks avec volume élevé
         for ob in zones['ob']:
-            if is_price_approaching(current_price, ob, threshold_pips=0.001):
+            if is_price_approaching(current_price, ob, pair, threshold_pips=0.001):
                 if self._confirm_zone(pair, ob, 'ob'):
                     return self._prepare_trade(pair, current_price, ob, 'ob')
         
