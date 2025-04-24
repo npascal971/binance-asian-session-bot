@@ -1385,6 +1385,9 @@ class LiquidityHunter:
                     high_level = session_range.get('high')
                     low_level = session_range.get('low')
                     mid_level = session_range.get('mid')
+
+                    # Initialisation de zone
+                    zone = None
                 
                 # Vérification par rapport aux niveaux de session
                     if abs(current_price - high_level) < RETEST_ZONE_RANGE:
@@ -1393,9 +1396,9 @@ class LiquidityHunter:
                         zone = low_level
                     elif abs(current_price - mid_level) < RETEST_ZONE_RANGE:
                         zone = mid_level
-                    else:
+                    if zone is None:
+                        logger.warning(f"Aucune zone de session valide trouvée pour {pair}")
                         return False
-                
                 # Maintenant que 'zone' est défini, continuer avec les vérifications
                     pin_bars = detect_pin_bars(candles, pair)
                     atr = calculate_atr_for_pair(pair)
