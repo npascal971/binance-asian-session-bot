@@ -1437,10 +1437,11 @@ class LiquidityHunter:
             'sl': stop_loss,
             'tp': take_profit,
             'zone_type': zone_type,
-            'confidence': self._calculate_confidence(pair, price, zone_type)
+            'confidence': self._calculate_confidence(pair, price, zone_type, zone)
         }
     
-    def _calculate_confidence(self, pair, price, zone_type):
+    def _calculate_confidence(self, pair, price, zone_type, zone):
+
         """Calcule un score de confiance pour le trade"""
         # Basé sur la confluence des facteurs
         score = 0
