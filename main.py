@@ -491,7 +491,9 @@ def analyze_gold():
             "momentum": True,
             "pattern": "Pin Bar Baissière + RSI Élevé"
         }
-        
+    else:
+        logger.info(f"❌ Aucune condition de vente remplie pour {pair}.")
+        logger.info(f"→ RSI: {rsi:.2f}, Pin bars: {len(pin_bars)}, Strong trend: {is_strong_trend(pair, 'sell')}, Clôture: {closes[-1]:.2f}, Max high (derniers 5): {max(highs[-5:-1]):.2f}")
         send_gold_alert(pair, signal_details)
 
 def send_gold_alert(pair, signal_details):
