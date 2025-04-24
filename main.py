@@ -477,24 +477,21 @@ def analyze_gold():
     )
     
     if sell_conditions:
-        stop_loss = max(highs[-5:]) + atr * 0.5
-        take_profit = closes[-1] - atr * 2
-        target_zone = (take_profit + closes[-1]) / 2
-        
         signal_details = {
             "direction": "sell",
             "current_price": closes[-1],
-            "target_zone": target_zone,
+            "target_zone": (take_profit + closes[-1]) / 2,
             "stop_loss": stop_loss,
             "rsi": rsi,
             "atr": atr,
             "momentum": True,
             "pattern": "Pin Bar Baissière + RSI Élevé"
         }
-    else:
-        logger.info(f"❌ Aucune condition de vente remplie pour {pair}.")
-        logger.info(f"→ RSI: {rsi:.2f}, Pin bars: {len(pin_bars)}, Strong trend: {is_strong_trend(pair, 'sell')}, Clôture: {closes[-1]:.2f}, Max high (derniers 5): {max(highs[-5:-1]):.2f}")
         send_gold_alert(pair, signal_details)
+    else:
+        logger.info(f"❌ Aucun signal pour {pair}")
+        logger.info(f"→ RSI: {rsi:.2f}, Pin bars: {len(pin_bars)}, Strong trend: {is_strong_trend(pair, 'sell')}, Clôture: {closes[-1]:.2f}, Max high: {max(highs[-5:-1]):.2f}")
+
 
 def send_gold_alert(pair, signal_details):
     """Envoie une alerte détaillée pour l'or"""
