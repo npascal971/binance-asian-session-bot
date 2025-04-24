@@ -1447,7 +1447,12 @@ class LiquidityHunter:
         score = 0
         
         # 1. Alignement avec la tendance HTF
-        if is_trend_aligned(pair, 'buy' if price < zone[0] else 'sell' if isinstance(zone, (list, tuple)) else 'buy' if price < zone else 'sell'):
+        if isinstance(zone, (list, tuple)):
+            direction = 'buy' if price < zone[0] else 'sell'
+        else:
+            direction = 'buy' if price < zone else 'sell'
+
+        if is_trend_aligned(pair, direction):
             score += 30
         
         # 2. Force de la zone
