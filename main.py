@@ -1443,6 +1443,20 @@ class LiquidityHunter:
 
 def analyze_pair(pair):
     """Nouvelle version focalisée sur les liquidités"""
+    logger.info(f"\n=== Analyse détaillée pour {pair} ===")
+    
+    # 1. Vérifiez les prix
+    price = get_current_price(pair)
+    logger.info(f"Prix actuel: {price}")
+    
+    # 2. Vérifiez les indicateurs
+    atr = calculate_atr_for_pair(pair)
+    logger.info(f"ATR: {atr}")
+    
+    # 3. Vérifiez les tendances
+    logger.info(f"Tendance H1 alignée BUY: {is_trend_aligned(pair, 'buy')}")
+    logger.info(f"Tendance H1 alignée SELL: {is_trend_aligned(pair, 'sell')}")    
+    
     hunter = LiquidityHunter()
     candles = client.request(instruments.InstrumentsCandles(instrument=pair, params={"granularity":"H1","count":50}))
     logger.info(f"Données reçues pour {pair}: {len(candles['candles'])} bougies")
