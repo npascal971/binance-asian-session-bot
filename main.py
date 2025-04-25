@@ -110,35 +110,26 @@ def is_ranging(pair, timeframe="H1", threshold=0.5):
         return False  # Default to False if error occurs
 
 def get_current_price(pair, max_retries=3):
-    """
-    Récupère le prix actuel avec gestion des erreurs et réessais
-    Args:
-        pair: Paire de devises
-        max_retries: Nombre maximum de tentatives
-    Returns:
-        float: Prix actuel ou None si échec
-    """
     for attempt in range(max_retries):
         try:
-            params = {
-                "granularity": "S5",
-                "count": 1,
-                "price": "M"
-            }
+            params = {"granularity": "S5", "count": 1, "price": "M"}
             r = instruments.InstrumentsCandles(instrument=pair, params=params)
             response = client.request(r)
-            
             if not response.get('candles'):
                 raise ValueError("Aucune donnée de prix disponible")
-                
             candle = response['candles'][0]
-            return float(candle['mid']['c'])
-            
+            return {
+                'mid': {
+                    'c': float(candle['mid']['c']),
+                    'h': float(candle['mid']['h']),
+                    'l': float(candle['mid']['l']),
+                    'o': float(candle['mid']['o'])
+                }
+            }  # Retourne un dictionnaire
         except Exception as e:
             logger.warning(f"Tentative {attempt + 1} échouée pour {pair}: {str(e)}")
             if attempt < max_retries - 1:
-                time.sleep(1)  # Attente avant réessai
-                
+                time.sleep(1)
     logger.error(f"Échec après {max_retries} tentatives pour {pair}")
     return None
 
@@ -373,38 +364,25 @@ PAIR_SETTINGS = {
     }
     
 def detect_pin_bars(candles, pair=None):
-    """Détecte des pin bars dans une série de bougies avec gestion des dojis"""
     settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
     pin_bars = []
-    
     for candle in candles:
         try:
+            if not isinstance(candle, dict):  # Vérification du type
+                logger.error(f"Bougie invalide détectée: {candle}")
+                continue
             if not candle['complete']:
                 continue
-                
             o = float(candle['mid']['o'])
             h = float(candle['mid']['h'])
             l = float(candle['mid']['l'])
             c = float(candle['mid']['c'])
-            
             body_size = abs(c - o)
             upper_wick = h - max(o, c)
             lower_wick = min(o, c) - l
             total_range = h - l
-            
-            # Gestion spéciale des dojis (body_size = 0)
-            if body_size == 0:
-                # On considère le range total comme la mèche
-                if total_range > 0:
-                    ratio = 99  # Valeur arbitraire élevée pour doji significatif
-                else:
-                    continue  # Bougie plate, on ignore
-            else:
-                ratio = max(upper_wick, lower_wick) / body_size
-                
-            # Seuil dynamique selon la paire
+            ratio = max(upper_wick, lower_wick) / body_size
             ratio_threshold = settings.get("pin_bar_ratio", PIN_BAR_RATIO_THRESHOLD)
-            
             if ratio >= ratio_threshold:
                 direction = "bullish" if c > o else "bearish"
                 pin_bars.append({
@@ -417,11 +395,9 @@ def detect_pin_bars(candles, pair=None):
                     "body_size": body_size,
                     "is_doji": (body_size == 0)
                 })
-                
         except Exception as e:
             logger.error(f"Erreur analyse bougie {pair}: {str(e)}")
             continue
-    
     return pin_bars
 
 def is_strong_trend(pair, direction):
