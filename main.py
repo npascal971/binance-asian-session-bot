@@ -217,9 +217,23 @@ def is_trend_aligned(pair, direction):
 
 def is_price_approaching(price, zone, pair, threshold_pips=None):
     """
-    Version corrigée avec gestion des types incorrects pour zone
+    Version améliorée avec gestion des types et des erreurs
     """
     try:
+        # Vérification du type de zone
+        if zone is None:
+            return False
+            
+        if isinstance(zone, dict):
+            logger.warning(f"Zone est un dictionnaire pour {pair}, tentative d'extraction des valeurs")
+            if 'high' in zone and 'low' in zone:
+                zone = (zone['low'], zone['high'])
+            elif 'price' in zone:
+                zone = zone['price']
+            else:
+                logger.error(f"Format de zone non reconnu pour {pair}: {zone}")
+                return False
+
         # Détermine le seuil en pips
         if threshold_pips is None:
             if "_JPY" in pair:
@@ -228,17 +242,24 @@ def is_price_approaching(price, zone, pair, threshold_pips=None):
                 threshold_pips = 30  # Métaux avec plus de volatilité
             else:
                 threshold_pips = 10  # Valeur par défaut
+        
         # Conversion pips en valeur de prix
         pip_value = 0.01 if "_JPY" in pair else 0.0001
         threshold = threshold_pips * pip_value
-        # Gestion des types incorrects pour zone
-        if isinstance(zone, dict):
-            zone = float(zone.get("mid", {}).get("c", 0))  # Extraction du prix "close"
+        
         if isinstance(zone, (tuple, list)):
+            if len(zone) < 2:
+                logger.error(f"Zone range invalide pour {pair}: {zone}")
+                return False
+                
             zone_min, zone_max = min(zone), max(zone)
             return (zone_min - threshold) <= price <= (zone_max + threshold)
-        else:
+        elif isinstance(zone, (int, float)):
             return abs(price - zone) <= threshold
+        else:
+            logger.error(f"Type de zone non géré pour {pair}: {type(zone)}")
+            return False
+            
     except Exception as e:
         logger.error(f"Erreur is_price_approaching pour {pair}: {str(e)}")
         return False
