@@ -243,6 +243,7 @@ def is_price_approaching(price, zone, pair, threshold_pips=None):
         logger.error(f"Erreur is_price_approaching pour {pair}: {str(e)}")
         return False
 
+
 def dynamic_sl_tp(atr, direction, risk_reward=1.5, min_sl_multiplier=1.8):
     """Gestion dynamique avec filet de sécurité"""
     base_sl = max(atr * 1.5, atr * min_sl_multiplier)  # Le plus grand des deux
