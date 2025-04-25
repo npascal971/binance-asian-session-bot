@@ -1516,68 +1516,36 @@ if __name__ == "__main__":
     now = datetime.utcnow().time()
     if SESSION_START <= now <= SESSION_END:
         logger.info("⏱ Session active - Chasse aux liquidités en cours...")
-        # 1. Mise à jour des données de marché
         try:
-            # Pour toutes les paires, priorité à XAU_USD
             for pair in sorted(PAIRS, key=lambda x: 0 if x == "XAU_USD" else 1):
                 try:
-                    # Mise à jour des ranges et zones de liquidité
+                    # Mise à jour des données de base
                     liquidity_hunter.update_asian_range(pair)
                     liquidity_hunter.analyze_htf_liquidity(pair)
-                    # Analyse spécifique pour l'or
+                    
                     if pair == "XAU_USD":
-                        analyze_gold()  # Conserve votre analyse spécialisée
+                        analyze_gold()  # Analyse spécifique pour l'or
                     else:
-                        # Recherche d'opportunités de trading
-                        opportunity = liquidity_hunter.find_best_opportunity(pair)
-                        if opportunity:
-                            logger.info(f"Opportunité détectée pour {pair}, confiance: {opportunity['confidence']}%")
-                            if opportunity['confidence'] >= 70:
-                                # Préparation des détails du trade
-                                reasons = [
-                                    f"Zone: {opportunity['zone_type'].upper()}",
-                                    f"Confiance: {opportunity['confidence']}%",
-                                    f"ATR: {calculate_atr_for_pair(pair):.5f}",
-                                    f"Alignement HTF: {'OUI' if is_trend_aligned(pair, opportunity['direction']) else 'NON'}"
-                                ]
-                            # Envoi de l'alerte
-                                send_trade_alert(
-                                    pair=opportunity['pair'],
-                                    direction=opportunity['direction'],
-                                    entry_price=opportunity['entry'],
-                                    stop_price=opportunity['sl'],
-                                    take_profit=opportunity['tp'],
-                                    reasons=reasons
-                                )
-                            # Exécution réelle en mode live
-                            if not SIMULATION_MODE and opportunity['confidence'] > 80:
-                                place_trade(
-                                    pair=opportunity['pair'],
-                                    direction=opportunity['direction'],
-                                    entry_price=opportunity['entry'],
-                                    stop_loss_price=opportunity['sl'],
-                                    take_profit_price=opportunity['tp'],
-                                    atr=calculate_atr_for_pair(pair),
-                                    account_balance=get_account_balance()
-                                )
+                        # Utilisation de analyze_pair() qui intègre déjà find_best_opportunity()
+                        analyze_pair(pair)
                 except Exception as e:
                     logger.error(f"Erreur analyse {pair}: {str(e)}")
                     continue
-            # 2. Gestion des trades existants
+            
+            # Gestion des trades existants
             update_closed_trades()
             for pair in list(active_trades):
                 try:
-                    manage_open_trade(pair)  # Nouvelle fonction de gestion
+                    manage_open_trade(pair)
                 except Exception as e:
                     logger.error(f"Erreur gestion trade {pair}: {e}")
         except Exception as e:
             logger.error(f"Erreur majeure: {str(e)}")
-        # Pause entre les analyses (15 secondes)
+        
         time.sleep(15)
     else:
-        logger.info("🛑 Session de trading inactive. Prochaine vérification dans 5 minutes...")
+        logger.info("🛑 Session inactive. Prochaine vérification dans 5 minutes...")
         time.sleep(300)
-
 def manage_open_trade(pair):
     """Gère les trades ouverts avec trailing stop et prise de profits partiels"""
     try:
