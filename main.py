@@ -678,9 +678,12 @@ def analyze_htf(pair):
                 ob_zones.append((lows[i], highs[i + 1]))
         
         logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
+        fvg_zones = [tuple(map(float, zone)) for zone in fvg_zones]
+        ob_zones = [tuple(map(float, zone)) for zone in ob_zones]
+        
         return fvg_zones, ob_zones
     except Exception as e:
-        logger.error(f"Erreur lors de l'analyse HTF pour {pair}: {e}")
+        logger.error(f"Erreur analyse HTF: {e}")
         return [], []
 
 def detect_ltf_patterns(candles, pairs):
