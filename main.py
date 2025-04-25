@@ -217,7 +217,7 @@ def is_trend_aligned(pair, direction):
 
 def is_price_approaching(price, zone, pair, threshold_pips=None):
     """
-    Version améliorée avec gestion automatique des pips selon le type de paire
+    Version corrigée avec gestion des types incorrects pour zone
     """
     try:
         # Détermine le seuil en pips
@@ -228,17 +228,17 @@ def is_price_approaching(price, zone, pair, threshold_pips=None):
                 threshold_pips = 30  # Métaux avec plus de volatilité
             else:
                 threshold_pips = 10  # Valeur par défaut
-        
         # Conversion pips en valeur de prix
         pip_value = 0.01 if "_JPY" in pair else 0.0001
         threshold = threshold_pips * pip_value
-        
+        # Gestion des types incorrects pour zone
+        if isinstance(zone, dict):
+            zone = float(zone.get("mid", {}).get("c", 0))  # Extraction du prix "close"
         if isinstance(zone, (tuple, list)):
             zone_min, zone_max = min(zone), max(zone)
             return (zone_min - threshold) <= price <= (zone_max + threshold)
         else:
             return abs(price - zone) <= threshold
-            
     except Exception as e:
         logger.error(f"Erreur is_price_approaching pour {pair}: {str(e)}")
         return False
