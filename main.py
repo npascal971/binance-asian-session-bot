@@ -825,7 +825,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
             reasons.append("Engulfing Pattern détecté")
 
         # 4. Validation des signaux
-        required = CONFIRMATION_REQUIRED.get(pair, 2)
+        required = CONFIRMATION_REQUIRED.get(pair, 1)
         if sum(signals.values()) < required:
             logger.info(f"Signaux insuffisants ({sum(signals.values())}/{required})")
             return False
@@ -862,7 +862,10 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
             return direction
 
         logger.info("❌ Signaux contradictoires")
+        logger.info(f"Analyse {pair} - RSI: {rsi}, ATR: {atr}, Trend aligned: {is_trend_aligned(pair, direction)}")
+        logger.info(f"Signaux détectés: {signals}")
         return False
+        
 
     except Exception as e:
         logger.error(f"Erreur dans should_open_trade pour {pair}: {str(e)}")
@@ -1441,7 +1444,8 @@ class LiquidityHunter:
 def analyze_pair(pair):
     """Nouvelle version focalisée sur les liquidités"""
     hunter = LiquidityHunter()
-    
+    candles = client.request(instruments.InstrumentsCandles(instrument=pair, params={"granularity":"H1","count":50}))
+    logger.info(f"Données reçues pour {pair}: {len(candles['candles'])} bougies")
     # 1. Mise à jour des données
     if not hunter.update_asian_range(pair):
         return
