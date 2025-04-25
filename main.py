@@ -220,12 +220,21 @@ def is_price_approaching(price, zone, pair, threshold_pips=None):
     Version robuste avec gestion complète des types et erreurs
     """
     try:
-        # 1. Validation des paramètres d'entrée
-        if price is None or zone is None:
-            logger.warning(f"Paramètre manquant pour {pair}: price={price}, zone={zone}")
+        # 1. Extraction du prix si c'est un dictionnaire
+        if isinstance(price, dict) and 'mid' in price and 'c' in price['mid']:
+            current_price = float(price['mid']['c'])
+        elif isinstance(price, (int, float)):
+            current_price = float(price)
+        else:
+            logger.error(f"Format de prix invalide pour {pair}: {price}")
             return False
             
-        # 2. Normalisation de la zone (gestion des différents formats)
+        # 2. Validation des paramètres d'entrée
+        if zone is None:
+            logger.warning(f"Zone manquante pour {pair}")
+            return False
+            
+        # 3. Normalisation de la zone (gestion des différents formats)
         normalized_zone = None
         
         # Cas 1: Zone est un tuple/liste (high, low)
@@ -254,7 +263,7 @@ def is_price_approaching(price, zone, pair, threshold_pips=None):
             logger.error(f"Type de zone non géré pour {pair}: {type(zone)}")
             return False
 
-        # 3. Détermination du seuil dynamique
+        # 4. Détermination du seuil dynamique
         if threshold_pips is None:
             if "_JPY" in pair:
                 threshold_pips = 15  # Seuil plus large pour les paires JPY
@@ -267,19 +276,18 @@ def is_price_approaching(price, zone, pair, threshold_pips=None):
         pip_value = 0.01 if "_JPY" in pair else 0.0001
         threshold = threshold_pips * pip_value
         
-        # 4. Vérification de la proximité selon le type de zone
+        # 5. Vérification de la proximité selon le type de zone
         if isinstance(normalized_zone, (tuple, list)):
             zone_min = min(normalized_zone)
             zone_max = max(normalized_zone)
-            return (zone_min - threshold) <= price <= (zone_max + threshold)
+            return (zone_min - threshold) <= current_price <= (zone_max + threshold)
         else:  # Nombre seul
-            return abs(price - normalized_zone) <= threshold
+            return abs(current_price - normalized_zone) <= threshold
             
     except Exception as e:
         logger.error(f"ERREUR CRITIQUE is_price_approaching pour {pair}: {str(e)}")
         logger.error(f"Détails - price: {price}, zone: {zone}, type_zone: {type(zone)}")
         return False
-
 def dynamic_sl_tp(atr, direction, risk_reward=1.5, min_sl_multiplier=1.8):
     """Gestion dynamique avec filet de sécurité"""
     base_sl = max(atr * 1.5, atr * min_sl_multiplier)  # Le plus grand des deux
