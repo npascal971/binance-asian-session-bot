@@ -375,21 +375,25 @@ def detect_pin_bars(candles, pair=None):
     pin_bars = []
     for candle in candles:
         try:
-            if not isinstance(candle, dict):  # Vérification du type
-                logger.error(f"Bougie invalide détectée: {candle}")
-                continue
             if not candle['complete']:
                 continue
+                
             o = float(candle['mid']['o'])
             h = float(candle['mid']['h'])
             l = float(candle['mid']['l'])
             c = float(candle['mid']['c'])
+            
             body_size = abs(c - o)
             upper_wick = h - max(o, c)
             lower_wick = min(o, c) - l
-            total_range = h - l
+            
+            # Avoid division by zero for doji candles
+            if body_size == 0:
+                continue  # Skip doji candles
+                
             ratio = max(upper_wick, lower_wick) / body_size
             ratio_threshold = settings.get("pin_bar_ratio", PIN_BAR_RATIO_THRESHOLD)
+            
             if ratio >= ratio_threshold:
                 direction = "bullish" if c > o else "bearish"
                 pin_bars.append({
@@ -398,9 +402,7 @@ def detect_pin_bars(candles, pair=None):
                     "open": o,
                     "high": h,
                     "low": l,
-                    "close": c,
-                    "body_size": body_size,
-                    "is_doji": (body_size == 0)
+                    "close": c
                 })
         except Exception as e:
             logger.error(f"Erreur analyse bougie {pair}: {str(e)}")
@@ -686,42 +688,26 @@ def detect_ltf_patterns(candles, pairs):
 MIN_DISTANCE = 0.0001  # Distance minimale acceptable
 
 def calculate_position_size(account_balance, entry_price, stop_loss_price, pair):
-    """Version corrigée pour GBP_JPY et autres paires JPY"""
+    """Version with zero division protection"""
     try:
-        # Validation des paramètres
         if None in [account_balance, entry_price, stop_loss_price]:
-            logger.error("Paramètres manquants pour le calcul des unités")
             return 0
-
-        # Calcul du montant de risque
+            
         risk_amount = min(account_balance * (RISK_PERCENTAGE / 100), RISK_AMOUNT_CAP)
         risk_per_unit = abs(entry_price - stop_loss_price)
-
-        logger.debug(f"Paramètres calcul: RiskAmount={risk_amount:.2f} "
-                    f"RiskPerUnit={risk_per_unit:.5f} "
-                    f"Pair={pair}")
-
-        if risk_per_unit <= 0:
-            logger.error("Distance SL nulle ou négative")
-            return 0
-
-        # Conversion spéciale pour les paires JPY
-        if "_JPY" in pair:
-            units = (risk_amount / risk_per_unit)  # Pas de division supplémentaire pour JPY
-            units = round(units)  # Unités entières
-        elif pair in ["XAU_USD", "XAG_USD"]:
-            units = risk_amount / risk_per_unit
-            units = round(units, 2)
-        else:  # Forex standard
-            units = (risk_amount / risk_per_unit) / 10000
-            units = round(units)
-
-        logger.info(f"Unités calculées: {units} (Type: {'JPY' if '_JPY' in pair else 'Standard'})")
         
-        return units if units > 0 else 0
-
+        if risk_per_unit <= 0:
+            logger.error(f"Risk per unit too small for {pair}: {risk_per_unit}")
+            return 0
+            
+        if "_JPY" in pair:
+            return round(risk_amount / risk_per_unit)
+        elif pair in ["XAU_USD", "XAG_USD"]:
+            return round(risk_amount / risk_per_unit, 2)
+        else:
+            return round((risk_amount / risk_per_unit) / 10000)
     except Exception as e:
-        logger.error(f"Erreur calcul position: {str(e)}")
+        logger.error(f"Erreur calcul position {pair}: {str(e)}")
         return 0
 
 def process_pin_bar(pin_bar_data):
@@ -1156,41 +1142,22 @@ def update_trailing_stop(*args, **kwargs):
 
 # RSI robuste avec gestion des divisions par zéro
 def calculate_rsi(prices, window=14):
+    """RSI calculation with zero division protection"""
+    if len(prices) < window + 1:
+        return 50  # Default neutral value
+    
     deltas = np.diff(prices)
     seed = deltas[:window]
     
+    # Handle division by zero cases
     up = seed[seed >= 0].sum()/window
     down = -seed[seed < 0].sum()/window
     
-    # Cas particulier initial
     if down == 0:
-        return 100.0  # Si aucune perte, RSI = 100
+        return 100.0 if up != 0 else 50.0
     
     rs = up/down
-    rsi = 100.0 - (100.0/(1.0 + rs))
-    
-    # Calcul pour les valeurs suivantes
-    for i in range(window, len(deltas)):
-        delta = deltas[i]
-        
-        if delta > 0:
-            upval = delta
-            downval = 0.0
-        else:
-            upval = 0.0
-            downval = -delta
-            
-        up = (up*(window-1) + upval)/window
-        down = (down*(window-1) + downval)/window
-        
-        if down == 0:
-            rsi = 100.0  # Évite la division par zéro
-        else:
-            rs = up/down
-            rsi = 100.0 - (100.0/(1.0 + rs))
-    
-    return rsi
-
+    return 100.0 - (100.0/(1.0 + rs))
 
 # ... (conservons les imports et configurations existants)
 
