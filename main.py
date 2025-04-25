@@ -217,24 +217,44 @@ def is_trend_aligned(pair, direction):
 
 def is_price_approaching(price, zone, pair, threshold_pips=None):
     """
-    Version améliorée avec gestion des types et des erreurs
+    Version robuste avec gestion complète des types et erreurs
     """
     try:
-        # Vérification du type de zone
-        if zone is None:
+        # 1. Validation des paramètres d'entrée
+        if price is None or zone is None:
+            logger.warning(f"Paramètre manquant pour {pair}: price={price}, zone={zone}")
             return False
             
-        if isinstance(zone, dict):
-            logger.warning(f"Zone est un dictionnaire pour {pair}, tentative d'extraction des valeurs")
-            if 'high' in zone and 'low' in zone:
-                zone = (zone['low'], zone['high'])
-            elif 'price' in zone:
-                zone = zone['price']
+        # 2. Normalisation de la zone (gestion des différents formats)
+        normalized_zone = None
+        
+        # Cas 1: Zone est un tuple/liste (high, low)
+        if isinstance(zone, (tuple, list)):
+            if len(zone) == 2:
+                normalized_zone = (float(zone[0]), float(zone[1]))
             else:
-                logger.error(f"Format de zone non reconnu pour {pair}: {zone}")
+                logger.error(f"Format de zone invalide (longueur) pour {pair}: {zone}")
                 return False
+                
+        # Cas 2: Zone est un dictionnaire (session range)
+        elif isinstance(zone, dict):
+            if 'high' in zone and 'low' in zone:
+                normalized_zone = (float(zone['low']), float(zone['high']))
+            elif 'price' in zone:
+                normalized_zone = float(zone['price'])
+            else:
+                logger.error(f"Format de dictionnaire non reconnu pour {pair}: {zone}")
+                return False
+                
+        # Cas 3: Zone est un nombre seul
+        elif isinstance(zone, (int, float)):
+            normalized_zone = float(zone)
+            
+        else:
+            logger.error(f"Type de zone non géré pour {pair}: {type(zone)}")
+            return False
 
-        # Détermine le seuil en pips
+        # 3. Détermination du seuil dynamique
         if threshold_pips is None:
             if "_JPY" in pair:
                 threshold_pips = 15  # Seuil plus large pour les paires JPY
@@ -247,23 +267,18 @@ def is_price_approaching(price, zone, pair, threshold_pips=None):
         pip_value = 0.01 if "_JPY" in pair else 0.0001
         threshold = threshold_pips * pip_value
         
-        if isinstance(zone, (tuple, list)):
-            if len(zone) < 2:
-                logger.error(f"Zone range invalide pour {pair}: {zone}")
-                return False
-                
-            zone_min, zone_max = min(zone), max(zone)
+        # 4. Vérification de la proximité selon le type de zone
+        if isinstance(normalized_zone, (tuple, list)):
+            zone_min = min(normalized_zone)
+            zone_max = max(normalized_zone)
             return (zone_min - threshold) <= price <= (zone_max + threshold)
-        elif isinstance(zone, (int, float)):
-            return abs(price - zone) <= threshold
-        else:
-            logger.error(f"Type de zone non géré pour {pair}: {type(zone)}")
-            return False
+        else:  # Nombre seul
+            return abs(price - normalized_zone) <= threshold
             
     except Exception as e:
-        logger.error(f"Erreur is_price_approaching pour {pair}: {str(e)}")
+        logger.error(f"ERREUR CRITIQUE is_price_approaching pour {pair}: {str(e)}")
+        logger.error(f"Détails - price: {price}, zone: {zone}, type_zone: {type(zone)}")
         return False
-
 
 def dynamic_sl_tp(atr, direction, risk_reward=1.5, min_sl_multiplier=1.8):
     """Gestion dynamique avec filet de sécurité"""
@@ -369,6 +384,10 @@ def get_asian_session_range(pair):
         # Logs du range asiatique calculé
         logger.info(f"Range asiatique pour {pair}: High={asian_high}, Low={asian_low}")
         return asian_high, asian_low
+        if asian_high is not None and asian_low is not None:
+            return (asian_high, asian_low)  # Toujours retourner un tuple
+        return None, None
+
     except Exception as e:
         # Logs en cas d'erreur lors de la récupération des données
         logger.error(f"Erreur lors de la récupération du range asiatique pour {pair}: {e}")
