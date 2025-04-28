@@ -1589,7 +1589,7 @@ class LiquidityHunter:
             candles = response['candles']
             logger.info(f"Données reçues pour {pair}: {len(candles)} bougies")
         
-            except Exception as e:
+        except Exception as e:
                 logger.error(f"ERREUR CRITIQUE lors de la récupération des bougies: {str(e)}")
                 logger.exception(e)
                 return
@@ -1641,8 +1641,8 @@ class LiquidityHunter:
         
         except KeyError as ke:
             logger.error(f"Clé manquante dans l'opportunité: {ke}")
-        except Exception as e:
-            logger.error(f"Erreur lors de l'envoi de l'alerte: {e}")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi de l'alerte: {e}")
 # ... (le reste du code main reste similaire mais utilise la nouvelle analyse_pair)
 
 if __name__ == "__main__":
