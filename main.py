@@ -28,7 +28,9 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
 client = oandapyV20.API(access_token=OANDA_API_KEY)
-
+# Ajouter dans les paramètres globaux
+CACHE_TTL = 300  # 5 minutes
+MAX_ZONES = 5
 # Paramètres de trading
 PAIRS = [
     "XAU_USD", "XAG_USD",  # Métaux précieux
@@ -69,6 +71,27 @@ CONFIRMATION_REQUIRED = {
 }
 trade_history = []
 active_trades = set()
+
+
+class DataCache:
+    def __init__(self, ttl=300):
+        self.cache = {}
+        self.ttl = ttl  # Cache de 5 minutes par défaut
+
+    def get(self, key):
+        item = self.cache.get(key)
+        if item and (time.time() - item['timestamp']) < self.ttl:
+            return item['data']
+        return None
+
+    def set(self, key, data):
+        self.cache[key] = {
+            'timestamp': time.time(),
+            'data': data
+        }
+# Initialisation globale du cache
+cache = DataCache()
+
 
 def check_active_trades():
     """Désactivée"""
@@ -669,7 +692,21 @@ def detect_engulfing_patterns(candles):
     
     return engulfing_patterns
 
-
+def fetch_candles(pair, params):
+    """Récupère les bougies avec gestion du cache"""
+    cache_key = f"{pair}_{params['granularity']}_{params['count']}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+    
+    try:
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        candles = client.request(r)['candles']
+        cache.set(cache_key, candles)
+        return candles
+    except Exception as e:
+        logger.error(f"Erreur fetch_candles: {str(e)}")
+        return []
 
 def update_closed_trades():
     try:
@@ -687,27 +724,36 @@ def update_closed_trades():
         logger.error(f"Erreur lors de la mise à jour des trades fermés: {e}")
 
 def analyze_htf(pair):
+    """Version corrigée avec gestion des FVG et OB"""
     try:
         params = {"granularity": "H4", "count": 50}
-        candles = cache.get(pair, "HTF") or fetch_candles(pair, params)
+        candles = fetch_candles(pair, params)
         
-        # Filtrage des faux order blocks
-        valid_ob = []
+        fvg_zones = []
+        ob_zones = []
+        
+        # Détection des FVG (Fair Value Gaps)
         for i in range(1, len(candles)-1):
-            prev_close = candles[i-1]['mid']['c']
-            current_high = candles[i]['mid']['h']
-            current_low = candles[i]['mid']['l']
+            prev_high = float(candles[i-1]['mid']['h'])
+            prev_low = float(candles[i-1]['mid']['l'])
+            current_low = float(candles[i]['mid']['l'])
             
-            # Validité OB : prix doit revenir dans la zone
-            if (current_high > prev_close and 
-                any(c['mid']['c'] < prev_close for c in candles[i+1:i+3])):
-                valid_ob.append((current_low, current_high))
+            # FVG haussier
+            if current_low > prev_high:
+                fvg_zones.append((prev_high, current_low))
                 
-        return valid_ob[:10]  # Limite à 10 zones max
-        
+            # Détection des Order Blocks
+            if float(candles[i]['mid']['c']) > float(candles[i-1]['mid']['h']):
+                ob_zones.append((
+                    float(candles[i]['mid']['l']),
+                    float(candles[i]['mid']['h'])
+                ))
+
+        return fvg_zones[:5], ob_zones[:5]  # Limite à 5 zones de chaque type
+
     except Exception as e:
-        logger.error(f"HTF Analysis Error: {str(e)}")
-        return []
+        logger.error(f"Erreur analyse_htf: {str(e)}")
+        return [], []
 
 def detect_ltf_patterns(candles, pairs):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
@@ -1284,44 +1330,34 @@ class LiquidityHunter:
             return True
         return False
     
-    def analyze_htf_liquidity(self, pair):
-        """Analyse approfondie des zones de liquidité HTF"""
+   def analyze_htf_liquidity(self, pair):
+        """Version corrigée de l'analyse des liquidités"""
         try:
-            # Analyse des FVG et Order Blocks
             fvg_zones, ob_zones = analyze_htf(pair)
-            
-            # Détection des pics de volume comme zones de liquidité
-            params = {"granularity": "H4", "count": 100, "price": "M"}
-            candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+        
+            # Récupération des données de volume
+            params = {"granularity": "H4", "count": 100}
+            candles = fetch_candles(pair, params)
             volumes = [float(c['volume']) for c in candles if c['complete']]
-            closes = [float(c['mid']['c']) for c in candles if c['complete']]
-            
-            # Détection des zones de volume élevé
-            high_volume_zones = []
+        
+            # Calcul des zones de volume
             avg_volume = np.mean(volumes)
-            for i in range(len(volumes)):
-                if volumes[i] > avg_volume * 2:  # Volume 2x supérieur à la moyenne
-                    high_volume_zones.append(closes[i])
-            
-            # Utilisation de KDE pour trouver des clusters de liquidité
-            if len(closes) > 10:
-                liquidity_pools = detect_liquidity_zones(closes)
-            else:
-                liquidity_pools = []
-            
-            # Enregistrement des zones
+            high_volume_zones = [
+                float(c['mid']['c']) 
+                for c in candles 
+                if float(c['volume']) > avg_volume * 1.5
+            ]
+        
             self.liquidity_zones[pair] = {
                 'fvg': fvg_zones,
                 'ob': ob_zones,
                 'volume': high_volume_zones,
-                'kde': liquidity_pools,
                 'last_update': datetime.utcnow()
             }
-            
             return True
-            
+        
         except Exception as e:
-            logger.error(f"Erreur analyse liquidité HTF {pair}: {e}")
+            logger.error(f"Erreur analyze_htf_liquidity: {str(e)}")
             return False
     
     def _is_price_near_zone(self, price, zone, pair):
