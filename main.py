@@ -1549,12 +1549,36 @@ class LiquidityHunter:
             if distance < 2 * pip_value:  # Within 2 pips
                 score += 15
 
+        # Add other scoring conditions...
 
             return min(100, score)
-            
-        except (TypeError, ValueError, KeyError) as e:
-            logger.error(f"Erreur confiance {pair}: {str(e)}")
+
+        except Exception as e:
+            logger.error(f"Confidence error {pair}: {str(e)}")
             return 0
+
+    def _get_volume_data(self, pair):
+        """Get last 20 volumes from H1 timeframe"""
+        try:
+            params = {"granularity": "H1", "count": 20}
+            candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))["candles"]
+            volumes = [float(c["volume"]) for c in candles if c["complete"]]
+            return {
+                "last": volumes[-1] if volumes else 0,
+                "average": np.mean(volumes) if volumes else 0
+            }
+        except Exception as e:
+            logger.error(f"Volume data error {pair}: {str(e)}")
+            return {"last": 0, "average": 0}
+
+    def _get_zone_price(self, zone, zone_type):
+        """Extract relevant price from zone data"""
+        if zone_type == "fvg":
+            return (zone[0] + zone[1])/2  # FVG midpoint
+        elif zone_type == "ob":
+            return zone["price"]  # Assuming OB has price key
+        else:
+            return zone  # Single value
 
 
 
