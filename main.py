@@ -127,7 +127,6 @@ def get_current_price(pair, max_retries=3):
     return None
 
 def calculate_atr(highs, lows, closes, period=14):
-    """Version améliorée avec gestion des arrondis"""
     try:
         if len(highs) < period or len(lows) < period or len(closes) < period:
             logger.warning(f"Données insuffisantes pour ATR ({len(highs)}/{period})")
@@ -144,22 +143,14 @@ def calculate_atr(highs, lows, closes, period=14):
 
         atr = sum(true_ranges[:period]) / period
         
-        # Smoothing avec Wilder
         for i in range(period, len(true_ranges)):
             atr = (atr * (period - 1) + true_ranges[i]) / period
 
-        # Arrondi adaptatif selon le type de paire
-        # Supprimer la vérification incorrecte et utiliser un paramètre supplémentaire
-        if pair.endswith('_USD'):  # Pour toutes les paires USD
-            return round(atr, 5)
-        elif '_JPY' in pair:  # Paires JPY
-            return round(atr, 3)
-        else:  # Valeur par défaut
-            return round(atr, 5)
-
+        return round(atr, 5)  # ➔ toujours 5 décimales par défaut
     except Exception as e:
         logger.error(f"Erreur calcul ATR: {str(e)}")
         return 0.0
+
 
 def send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons):
     """Envoie une alerte par email au lieu d'exécuter un trade"""
