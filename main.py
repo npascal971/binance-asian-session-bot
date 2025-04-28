@@ -1519,51 +1519,36 @@ class LiquidityHunter:
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         score = 0
         try:
-
-             # 1. Calcul de l'ATR
-            current_atr = calculate_atr_for_pair(pair)  # Ligne ajoutée
+            # Get ATR and validate
+            current_atr = calculate_atr_for_pair(pair)
             if current_atr is None or current_atr <= 0:
                 return 0
-            # 2. Vérification de la volatilité
-            if current_atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5):
+
+            # Get settings safely
+            pair_settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+
+            # 1. Get volume data
+            volume_data = self._get_volume_data(pair)
+            last_volume = volume_data["last"]
+            avg_volume = volume_data["average"]
+
+            # 2. Calculate distance to zone
+            zone_price = self._get_zone_price(zone, zone_type)
+            distance = abs(price - zone_price) if zone_price else 0
+
+            # 3. Volatility check
+            if current_atr > pair_settings.get("min_atr", 0.5):
                 score += 20
-            
-            # 1. Récupération des données RSI
-            rsi_data = check_rsi_conditions(pair)
-            if not isinstance(rsi_data, dict):
-                return 0
-            
-            # 2. Vérification condition RSI selon direction
-            if direction == "buy" and rsi_data.get("buy_signal", False):
-                score += 15
-            elif direction == "sell" and rsi_data.get("sell_signal", False):
+
+            # 4. Volume condition
+            if last_volume > avg_volume * 1.1:
+                score += 10
+
+            # 5. Distance condition
+            pip_value = self.get_pip_value(pair)
+            if distance < 2 * pip_value:  # Within 2 pips
                 score += 15
 
-            # 3. Alignement tendance 
-            if is_trend_aligned(pair, direction):
-                score += 25
-
-            # 2. Type de zone (25% → 30%)
-            if zone_type == 'fvg':
-                score += 30  # Augmenté de 30 à 35
-            elif zone_type == 'ob':
-                score += 25   # Augmenté de 20 à 25
-            else:
-                score += 20   # Augmenté de 15 à 20
-
-          
-
-            # 4. Volatilité ATR (15% → 20%)
-            if current_atr > PAIR_SETTINGS[pair].get('min_atr', 0.3):  # Seuil réduit
-                score += 20  # Augmenté de 15 à 20
-
-            # 5. Volume (15% → 10%)
-            if last_volume > avg_volume * 1.1:  # Seuil volume réduit
-                score += 10  # Réduit de 15 à 10
-
-            # 6. Distance à la zone (20% → 15%)
-            if distance < 0.0002:  # Seuil élargi
-                score += 15  # Réduit de 20 à 15
 
             return min(100, score)
             
