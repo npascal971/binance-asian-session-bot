@@ -1513,39 +1513,41 @@ if __name__ == "__main__":
         exit(1)
     
     while True:
-    now = datetime.utcnow().time()
-    if SESSION_START <= now <= SESSION_END:
-        logger.info("⏱ Session active - Chasse aux liquidités en cours...")
-        try:
-            for pair in sorted(PAIRS, key=lambda x: 0 if x == "XAU_USD" else 1):
-                try:
-                    # Mise à jour des données de base
-                    liquidity_hunter.update_asian_range(pair)
-                    liquidity_hunter.analyze_htf_liquidity(pair)
-                    
-                    if pair == "XAU_USD":
-                        analyze_gold()  # Analyse spécifique pour l'or
-                    else:
-                        # Utilisation de analyze_pair() qui intègre déjà find_best_opportunity()
-                        analyze_pair(pair)
-                except Exception as e:
-                    logger.error(f"Erreur analyse {pair}: {str(e)}")
-                    continue
+        now = datetime.utcnow().time()
+        if SESSION_START <= now <= SESSION_END:
+            logger.info("⏱ Session active - Chasse aux liquidités en cours...")
+            try:
+                for pair in sorted(PAIRS, key=lambda x: 0 if x == "XAU_USD" else 1):
+                    try:
+                        # Mise à jour des données de base
+                        liquidity_hunter.update_asian_range(pair)
+                        liquidity_hunter.analyze_htf_liquidity(pair)
+                        
+                        if pair == "XAU_USD":
+                            analyze_gold()  # Analyse spécifique pour l'or
+                        else:
+                            # Utilisation de analyze_pair() qui intègre déjà find_best_opportunity()
+                            analyze_pair(pair)
+                    except Exception as e:
+                        logger.error(f"Erreur analyse {pair}: {str(e)}")
+                        continue
+                
+                # Gestion des trades existants
+                update_closed_trades()
+                for pair in list(active_trades):
+                    try:
+                        manage_open_trade(pair)
+                    except Exception as e:
+                        logger.error(f"Erreur gestion trade {pair}: {e}")
+            except Exception as e:
+                logger.error(f"Erreur majeure: {str(e)}")
             
-            # Gestion des trades existants
-            update_closed_trades()
-            for pair in list(active_trades):
-                try:
-                    manage_open_trade(pair)
-                except Exception as e:
-                    logger.error(f"Erreur gestion trade {pair}: {e}")
-        except Exception as e:
-            logger.error(f"Erreur majeure: {str(e)}")
-        
-        time.sleep(15)
-    else:
-        logger.info("🛑 Session inactive. Prochaine vérification dans 5 minutes...")
-        time.sleep(300)
+            time.sleep(15)
+        else:
+            logger.info("🛑 Session inactive. Prochaine vérification dans 5 minutes...")
+            time.sleep(300)
+
+
 def manage_open_trade(pair):
     """Gère les trades ouverts avec trailing stop et prise de profits partiels"""
     try:
