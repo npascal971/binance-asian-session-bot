@@ -1538,43 +1538,48 @@ class LiquidityHunter:
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         score = 0
         try:
-            # Get essential data with validation
+            # 1. Configuration essentielle
             current_atr = calculate_atr_for_pair(pair)
             pair_settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
-            zone_price = self._get_zone_price(zone, zone_type)
-        
-            if None in [current_atr, zone_price] or current_atr <= 0:
-                return 0
+            required_confidence = 65  # Seuil réduit de 70 à 65
 
-            # 1. Volatility check (20%)
-            if current_atr > pair_settings.get("min_atr", 0.5):
-                score += 20
-
-            # 2. Volume check (15%)
-            volume_data = self._get_volume_data(pair)
-            if volume_data["last"] > volume_data["average"] * 1.2:
-                score += 15
-
-            # 3. Distance check (15%)
-            pip_value = self.get_pip_value(pair)
-            distance_pips = abs(price - zone_price) / pip_value
-            if distance_pips < 5:  # Within 5 pips
-                score += 15
-
-            # 4. Trend alignment (25%)
-            if is_trend_aligned(pair, direction):
-                score += 25
-
-            # 5. Zone type weighting (25%)
-            zone_weights = {"fvg": 25, "ob": 20, "session": 15}
+            # 2. Score de base selon le type de zone
+            zone_weights = {
+                "fvg": 30,  # Augmenté de 25 à 30
+                "ob": 25,   # Augmenté de 20 à 25
+                "session": 20
+            }
             score += zone_weights.get(zone_type, 0)
 
-            return min(100, score)
+            # 3. Alignement de la tendance (valeur augmentée)
+            if is_trend_aligned(pair, direction):
+                score += 30  # Augmenté de 25 à 30
+
+            # 4. Volatilité (seuil ajusté)
+            if current_atr > pair_settings.get("min_atr", 0.5) * 0.8:  # Seuil réduit
+                score += 25  # Augmenté de 20 à 25
+
+            # 5. Momentum additionnel (nouveau facteur)
+            rsi_conditions = check_rsi_conditions(pair)
+            if direction == "buy" and rsi_conditions["m15"] < 40:
+                score += 15
+            elif direction == "sell" and rsi_conditions["m15"] > 60:
+                score += 15
+
+            # 6. Gestion du volume (seuil assoupli)
+            volume_data = self._get_volume_data(pair)
+            if volume_data["last"] > volume_data["average"] * 1.1:  # Seuil réduit
+                score += 15
+
+            # 7. Validation finale
+            final_score = min(100, score)
+        
+            logger.info(f"Confiance totale {pair}: {final_score}%")
+            return final_score if final_score >= required_confidence else 0
 
         except Exception as e:
-            logger.error(f"Confidence error {pair}: {str(e)}")
+            logger.error(f"Erreur confiance {pair}: {str(e)}")
             return 0
-
     def _get_volume_data(self, pair):
         """Get last 20 volumes from H1 timeframe"""
         try:
