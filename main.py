@@ -1499,11 +1499,11 @@ class LiquidityHunter:
             direction = 'buy' if price < zone else 'sell'
 
         if is_trend_aligned(pair, direction):
-            score += 30
+            score += 40
         
         # 2. Force de la zone
         if zone_type == 'fvg':
-            score += 25
+            score += 30
         elif zone_type == 'ob':
             score += 20
         else:  # Session levels
@@ -1525,10 +1525,14 @@ class LiquidityHunter:
         last_volume = float(candles[-1]['volume']) if candles else 0
         avg_volume = np.mean([float(c['volume']) for c in candles[:-1] if c['complete']]) if len(candles) > 1 else 0
         
-        if last_volume > avg_volume * 1.5:
-            score += 10
+        if last_volume > avg_volume * 1.2:
+            score += 15
+
+        distance = abs(price - zone)
+        if distance < 0.00015:
+            score += 20
         
-        return min(100, score)  # Limite à 100%
+        return min(120, score)  # Limite à 100%
 
 # ... (adaptation des fonctions existantes pour utiliser LiquidityHunter)
 
