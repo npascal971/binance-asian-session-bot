@@ -41,14 +41,14 @@ RISK_PERCENTAGE = 1
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
 ATR_MULTIPLIER_TP = 3.0
-SESSION_START = dtime(7, 0) #7
+SESSION_START = dtime(1, 0) #7
 SESSION_END = dtime(23, 0)
-RETEST_TOLERANCE_PIPS = 10
+RETEST_TOLERANCE_PIPS = 15
 RETEST_ZONE_RANGE = RETEST_TOLERANCE_PIPS * 0.0001
 RISK_AMOUNT_CAP = 100
 CRYPTO_PAIRS = ["BTC_USD", "ETH_USD"]
 # Seuil pour détecter une pin bar (ratio entre la taille des mèches et le corps)
-PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois plus grande que le corps
+PIN_BAR_RATIO_THRESHOLD = 2.5  # Exemple : une mèche doit être au moins 3 fois plus grande que le corps
 
 # Configuration logs
 logging.basicConfig(
@@ -361,11 +361,11 @@ def get_asian_session_range(pair):
 # Définir le seuil de ratio pour les pin bars
 PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois plus grande que le corps
 PAIR_SETTINGS = {
-        "XAU_USD": {"min_atr": 0.8, "rsi_overbought": 65, "rsi_oversold": 35, "pin_bar_ratio": 2.5,  # Moins strict pour détecter plus de pin bars
+        "XAU_USD": {"min_atr": 0.8, "rsi_overbought": 65, "rsi_oversold": 35, "pin_bar_ratio": 2.0,  # Moins strict pour détecter plus de pin bars
         "required_confirmations": 2},
         "XAG_USD": {"min_atr": 0.3, "rsi_overbought": 65, "rsi_oversold": 35},
         "EUR_USD": {"min_atr": 0.0005, "rsi_overbought": 65, "rsi_oversold": 35},
-        "GBP_JPY": {"min_atr": 0.05, "rsi_overbought": 70, "rsi_oversold": 30},
+        "GBP_JPY": {"min_atr": 0.03, "rsi_overbought": 70, "rsi_oversold": 30, "pin_bar_ratio": 2.5},
         "USD_JPY": {"min_atr": 0.05, "rsi_overbought": 70, "rsi_oversold": 30},
         "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35}
     }
@@ -1514,7 +1514,7 @@ if __name__ == "__main__":
     
     while True:
         now = datetime.utcnow().time()
-        if SESSION_START >= now >= SESSION_END:
+        if SESSION_START <= now <= SESSION_END:
             logger.info("⏱ Session active - Chasse aux liquidités en cours...")
             try:
                 for pair in sorted(PAIRS, key=lambda x: 0 if x == "XAU_USD" else 1):
