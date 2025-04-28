@@ -1564,6 +1564,7 @@ def analyze_pair(pair):
                 f"Alignement tendance: {is_trend_aligned(pair, opportunity['direction'])}"
             ]
         )
+        logger.info(f"✅ Signal envoyé pour {pair} ({opportunity['direction'].upper()}) à {opportunity['entry']:.5f}")
         
     except KeyError as ke:
         logger.error(f"Clé manquante dans l'opportunité: {ke}")
