@@ -1522,7 +1522,8 @@ class LiquidityHunter:
 
              # 1. Calcul de l'ATR
             current_atr = calculate_atr_for_pair(pair)  # Ligne ajoutée
-        
+            if current_atr is None or current_atr <= 0:
+                return 0
             # 2. Vérification de la volatilité
             if current_atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5):
                 score += 20
