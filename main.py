@@ -1542,9 +1542,7 @@ class LiquidityHunter:
             else:
                 score += 20   # Augmenté de 15 à 20
 
-            # 3. Momentum RSI (20% → 15%)
-            if (rsi_conditions):  # Seuil assoupli
-                score += 15  # Réduit de 20 à 15
+          
 
             # 4. Volatilité ATR (15% → 20%)
             if atr > PAIR_SETTINGS[pair].get('min_atr', 0.3):  # Seuil réduit
