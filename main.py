@@ -431,12 +431,32 @@ PAIR_SETTINGS = {
         "rsi_oversold": 30,
         "pin_bar_ratio": 3.0
     },
+      "EUR_JPY": {
+        "min_atr": 0.05,
+        "rsi_overbought": 70,
+        "rsi_oversold": 30,
+        "pin_bar_ratio": 2.5
+    },
+    "AUD_JPY": {
+        "min_atr": 0.04,
+        "rsi_overbought": 70,
+        "rsi_oversold": 30,
+        "pin_bar_ratio": 2.5
+    },
+    "CAD_JPY": {
+        "min_atr": 0.03,
+        "rsi_overbought": 70,
+        "rsi_oversold": 30,
+        "pin_bar_ratio": 2.5
+    },
+    # Add other missing pairs similarly
     "DEFAULT": {
         "min_atr": 0.5,
         "rsi_overbought": 65,
         "rsi_oversold": 35,
         "pin_bar_ratio": 3.0
     }
+}
 }
 
     
