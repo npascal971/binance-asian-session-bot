@@ -363,11 +363,11 @@ PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois
 PAIR_SETTINGS = {
         "XAU_USD": {"min_atr": 0.8, "rsi_overbought": 65, "rsi_oversold": 35, "pin_bar_ratio": 2.0,  # Moins strict pour détecter plus de pin bars
         "required_confirmations": 2},
-        "XAG_USD": {"min_atr": 0.3, "rsi_overbought": 65, "rsi_oversold": 35},
-        "EUR_USD": {"min_atr": 0.0005, "rsi_overbought": 65, "rsi_oversold": 35},
+        "XAG_USD": {"min_atr": 0.3, "rsi_overbought": 65, "rsi_oversold": 35, "pin_bar_ratio": 3.0}},
+        "EUR_USD": {"min_atr": 0.0005, "rsi_overbought": 65, "rsi_oversold": 35, "pin_bar_ratio": 3.0}},
         "GBP_JPY": {"min_atr": 0.03, "rsi_overbought": 70, "rsi_oversold": 30, "pin_bar_ratio": 2.5},
-        "USD_JPY": {"min_atr": 0.05, "rsi_overbought": 70, "rsi_oversold": 30},
-        "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35}
+        "USD_JPY": {"min_atr": 0.05, "rsi_overbought": 70, "rsi_oversold": 30, "pin_bar_ratio": 3.0}},
+        "DEFAULT": {"min_atr": 0.5, "rsi_overbought": 65, "rsi_oversold": 35, "pin_bar_ratio": 3.0}}
     }
     
 def detect_pin_bars(candles, pair=None):
