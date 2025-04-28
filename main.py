@@ -1508,7 +1508,7 @@ class LiquidityHunter:
                 'sl': float(stop_loss),
                 'tp': float(take_profit),
                 'zone_type': zone_type,
-                'confidence': self._calculate_confidence(pair, price, zone_type, zone)
+                'confidence': self._calculate_confidence(pair, price, zone_type, zone, direction)
             }
 
         except (TypeError, ValueError, IndexError) as e:
@@ -1516,7 +1516,7 @@ class LiquidityHunter:
             logger.debug(f"Détails erreur: price={price} | zone={zone} | type={type(zone)}")
             return None
     
-    def _calculate_confidence(self, pair, price, zone_type, zone):
+    def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         score = 0
         try:
             # 1. Alignement tendance (30% → 25%)
