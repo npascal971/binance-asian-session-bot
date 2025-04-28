@@ -1408,7 +1408,11 @@ class LiquidityHunter:
     def _prepare_trade(self, pair, price, zone, zone_type):
         """Prépare les détails du trade"""
         atr = calculate_atr_for_pair(pair)
-        direction = 'buy' if price < zone[0] else 'sell' if isinstance(zone, (list, tuple)) else 'buy' if price < zone else 'sell'
+        if isinstance(zone, (list, tuple)):
+            direction = 'buy' if price < zone[0] else 'sell'
+        else:
+            direction = 'buy' if price < zone else 'sell'
+
         
         # Calcul des niveaux SL/TP
         if direction == 'buy':
