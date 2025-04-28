@@ -1519,6 +1519,14 @@ class LiquidityHunter:
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         score = 0
         try:
+            # 1. Calcul des conditions RSI
+            rsi_data = check_rsi_conditions(pair)  # Nouveau code
+        
+            # 2. Vérification en fonction de la direction
+            if direction == "buy" and rsi_data["buy_signal"]:
+                score += 15
+            elif direction == "sell" and rsi_data["sell_signal"]:
+                score += 15
             # 1. Alignement tendance (30% → 25%)
             if is_trend_aligned(pair, direction):
                 score += 25  # Réduit de 40 à 25
