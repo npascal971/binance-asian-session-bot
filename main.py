@@ -1468,7 +1468,9 @@ class LiquidityHunter:
     
         try:
             # Gestion explicite des types de zones
+            price = float(price)
             if isinstance(zone, (list, tuple)):
+                zone = [float(z) for z in zone]
                 # Pour les FVG (zone de type [high, low])
                 zone_high = float(zone[0])
                 zone_low = float(zone[1])
@@ -1516,15 +1518,20 @@ class LiquidityHunter:
     
     def _calculate_confidence(self, pair, price, zone_type, zone):
 
-        """Calcule un score de confiance pour le trade"""
-        # Basé sur la confluence des facteurs
-        score = 0
-        
-        # 1. Alignement avec la tendance HTF
+        try:
+        # Conversion forcée des zones en float
         if isinstance(zone, (list, tuple)):
-            direction = 'buy' if price < zone[0] else 'sell'
+            # Prend le milieu de la zone pour les FVG
+            zone_value = (float(zone[0]) + float(zone[1])) / 2
+        elif isinstance(zone, dict):
+            # Extraction depuis les Order Blocks
+            zone_value = float(zone['price'])
         else:
-            direction = 'buy' if price < zone else 'sell'
+            # Conversion standard
+            zone_value = float(zone)
+
+        # Nouveau calcul de distance sécurisé
+        distance = abs(float(price) - zone_value)
 
         if is_trend_aligned(pair, direction):
             score += 40
@@ -1562,7 +1569,7 @@ class LiquidityHunter:
         
         return min(120, score)  # Limite à 100%
 
-# ... (adaptation des fonctions existantes pour utiliser LiquidityHunter)
+
 
 def analyze_pair(pair):
     """Nouvelle version focalisée sur les liquidités"""
