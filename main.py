@@ -1460,31 +1460,54 @@ class LiquidityHunter:
       
     
     def _prepare_trade(self, pair, price, zone, zone_type):
-        """Prépare les détails du trade"""
-        atr = calculate_atr_for_pair(pair)
+    """Version corrigée avec gestion des types"""
+    try:
+        # Gestion explicite des types de zones
         if isinstance(zone, (list, tuple)):
-            direction = 'buy' if price < zone[0] else 'sell'
+            # Pour les FVG (zone de type [high, low])
+            zone_high = float(zone[0])
+            zone_low = float(zone[1])
+            direction = 'buy' if price < zone_low else 'sell'  # Stratégie de breakout
+        elif isinstance(zone, dict):
+            # Pour les Order Blocks (structure complexe)
+            zone_value = float(zone['price'])
+            direction = 'buy' if price > zone_value else 'sell'
         else:
-            direction = 'buy' if price < zone else 'sell'
+            # Pour les niveaux simples
+            zone_value = float(zone)
+            direction = 'buy' if price < zone_value else 'sell'
 
+        # Calculs sécurisés
+        atr = float(calculate_atr_for_pair(pair))
         
-        # Calcul des niveaux SL/TP
-        if direction == 'buy':
-            stop_loss = price - 1.5 * atr
-            take_profit = price + 3 * atr
-        else:
-            stop_loss = price + 1.5 * atr
-            take_profit = price - 3 * atr
-        
+        # Validation finale des valeurs
+        if None in [price, atr] or atr <= 0:
+            raise ValueError("Données invalides pour le calcul")
+
+        # Calcul SL/TP avec vérification de type
+        stop_loss = (
+            price - 1.5 * atr if direction == 'buy' 
+            else price + 1.5 * atr
+        )
+        take_profit = (
+            price + 3 * atr if direction == 'buy'
+            else price - 3 * atr
+        )
+
         return {
             'pair': pair,
             'direction': direction,
-            'entry': price,
-            'sl': stop_loss,
-            'tp': take_profit,
+            'entry': float(price),
+            'sl': float(stop_loss),
+            'tp': float(take_profit),
             'zone_type': zone_type,
             'confidence': self._calculate_confidence(pair, price, zone_type, zone)
         }
+
+    except (TypeError, ValueError, IndexError) as e:
+        logger.error(f"Erreur préparation trade {pair}: {str(e)}")
+        logger.debug(f"Détails erreur: price={price} | zone={zone} | type={type(zone)}")
+        return None
     
     def _calculate_confidence(self, pair, price, zone_type, zone):
 
