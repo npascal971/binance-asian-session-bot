@@ -1550,100 +1550,87 @@ class LiquidityHunter:
             return min(100, score)
 
 
-
-    def analyze_pair(pair):
-        """Nouvelle version focalisée sur les liquidités"""
-        logger.info(f"\n=== Analyse détaillée pour {pair} ===")
+def analyze_pair(pair):
+    """Nouvelle version focalisée sur les liquidités"""
+    logger.info(f"\n=== Analyse détaillée pour {pair} ===")
     
+    try:
         # 1. Vérifiez les prix
         price = get_current_price(pair)
         if price is None:
             logger.error(f"Impossible de récupérer le prix pour {pair}")
             return
         logger.info(f"Prix actuel: {price}")
-    
+
         # 2. Vérifiez les indicateurs
         atr = calculate_atr_for_pair(pair)
         logger.info(f"ATR: {atr if atr else 'Erreur de calcul'}")
-    
+
         # 3. Vérifiez les tendances
         logger.info(f"Tendance H1 alignée BUY: {is_trend_aligned(pair, 'buy')}")
         logger.info(f"Tendance H1 alignée SELL: {is_trend_aligned(pair, 'sell')}")    
-    
+
         hunter = LiquidityHunter()
-    
+
+        # 4. Récupération des données brutes
         try:
-            # 4. Récupération des données brutes
             r = instruments.InstrumentsCandles(
                 instrument=pair,
                 params={"granularity": "H1", "count": 50}
             )
             response = client.request(r)
-        
-            # Validation de la structure de réponse
-            if not isinstance(response, dict) or 'candles' not in response:
-                logger.error(f"Réponse API invalide pour {pair}: {type(response)}")
-                logger.debug(f"Contenu de la réponse: {response}")
-                return
-            
             candles = response['candles']
             logger.info(f"Données reçues pour {pair}: {len(candles)} bougies")
-        
-        except Exception as e:
-                logger.error(f"ERREUR CRITIQUE lors de la récupération des bougies: {str(e)}")
-                logger.exception(e)
-                return
 
-            # 5. Mise à jour des données de base
-            if not hunter.update_asian_range(pair):
-                logger.warning(f"Échec mise à jour range asiatique pour {pair}")
-                return
-    
-            if not hunter.analyze_htf_liquidity(pair):
-                logger.warning(f"Échec analyse liquidité HTF pour {pair}")
-                return
-    
-            # 6. Recherche d'opportunités
-            try:
-                opportunity = hunter.find_best_opportunity(pair)
-            except KeyError as ke:
-                logger.error(f"Erreur de structure dans les données: {ke}")
-                return
-            except Exception as e:
-                logger.error(f"Erreur générique dans find_best_opportunity: {e}")
+        except Exception as e:
+            logger.error(f"ERREUR récupération bougies: {str(e)}")
             return
-    
+
+        # 5. Mise à jour des données de base
+        if not hunter.update_asian_range(pair):
+            logger.warning(f"Échec mise à jour range asiatique pour {pair}")
+            return
+
+        if not hunter.analyze_htf_liquidity(pair):
+            logger.warning(f"Échec analyse liquidité HTF pour {pair}")
+            return
+
+        # 6. Recherche d'opportunités
+        try:
+            opportunity = hunter.find_best_opportunity(pair)
+        except Exception as e:
+            logger.error(f"Erreur recherche opportunité: {e}")
+            return
+
         if not opportunity:
             logger.info(f"Aucune opportunité trouvée pour {pair}")
             return
-    
-        # 7. Validation finale
+
+        # 7. Validation finale et alerte
         try:
-            if opportunity['confidence'] < 70:
+            if opportunity['confidence'] >= 55:  # Seuil ajusté
+                send_trade_alert(
+                    pair=opportunity['pair'],
+                    direction=opportunity['direction'],
+                    entry_price=opportunity['entry'],
+                    stop_price=opportunity['sl'],
+                    take_profit=opportunity['tp'],
+                    reasons=[
+                        f"Type: {opportunity['zone_type'].upper()}",
+                        f"Confiance: {opportunity['confidence']}%",
+                        f"ATR: {atr:.5f}",
+                        f"Alignement tendance: {is_trend_aligned(pair, opportunity['direction'])}"
+                    ]
+                )
+                logger.info(f"Signal envoyé pour {pair}")
+            else:
                 logger.info(f"Confiance insuffisante ({opportunity['confidence']}%)")
-                return
-            
-            # 8. Envoi d'alerte
-            send_trade_alert(
-                pair=opportunity['pair'],
-                direction=opportunity['direction'],
-                entry_price=opportunity['entry'],
-                stop_price=opportunity['sl'],
-                take_profit=opportunity['tp'],
-                reasons=[
-                    f"Type: {opportunity['zone_type'].upper()}",
-                    f"Confiance: {opportunity['confidence']}%",
-                    f"ATR: {atr:.5f}",
-                    f"Alignement tendance: {is_trend_aligned(pair, opportunity['direction'])}"
-                ]
-            )
-            logger.info(f"✅ Signal envoyé pour {pair} ({opportunity['direction'].upper()}) à {opportunity['entry']:.5f}")
-        
-        except KeyError as ke:
-            logger.error(f"Clé manquante dans l'opportunité: {ke}")
+
+        except KeyError as e:
+            logger.error(f"Clé manquante: {e}")
+
     except Exception as e:
-        logger.error(f"Erreur lors de l'envoi de l'alerte: {e}")
-# ... (le reste du code main reste similaire mais utilise la nouvelle analyse_pair)
+        logger.error(f"Erreur majeure dans analyze_pair: {e}")
 
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du bot de trading OANDA - Mode Sniper Liquidités...")
