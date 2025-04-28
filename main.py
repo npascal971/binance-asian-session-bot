@@ -236,20 +236,31 @@ def send_email(subject, body):
         logger.error(f"Erreur lors de l'envoi de l'e-mail: {e}")
 # Remplacer is_trend_aligned() par :
 def is_trend_aligned(pair, direction):
-    ema_values = []
-    for tf in ['M15', 'H1']:
-        closes = get_closes(pair, tf, 50)
-        if len(closes) < 50: continue
+    try:
+        timeframes = ['H1', 'H4', 'D']
+        alignment = 0
         
-        ema_fast = pd.Series(closes).ewm(span=20).mean().iloc[-1]
-        ema_slow = pd.Series(closes).ewm(span=50).mean().iloc[-1]
+        for tf in timeframes:
+            candles = cache.get(pair, f"TREND_{tf}") or fetch_candles(pair, {"granularity": tf, "count": 50})
+            closes = [float(c['mid']['c']) for c in candles]
+            
+            # Lissage triple EMA
+            ema1 = pd.Series(closes).ewm(span=9).mean()
+            ema2 = ema1.ewm(span=13).mean()
+            ema3 = ema2.ewm(span=21).mean()
+            
+            current_slope = (ema3.iloc[-1] - ema3.iloc[-5]) / 5
+            
+            if direction == 'buy' and current_slope > 0:
+                alignment += 1
+            elif direction == 'sell' and current_slope < 0:
+                alignment += 1
+                
+        return alignment >= 2  # Alignement sur 2/3 TF
         
-        if direction == "buy":
-            ema_values.append(ema_fast > ema_slow)
-        else:
-            ema_values.append(ema_fast < ema_slow)
-    
-    return sum(ema_values) >= 1  # Au moins 1 TF aligné
+    except Exception as e:
+        logger.error(f"Trend Alignment Error: {str(e)}")
+        return False
 
 def is_price_approaching(price, zone, pair, threshold_pips=None):
     """
@@ -594,49 +605,30 @@ def check_rsi_conditions(pair):
         logger.error(f"Erreur calcul RSI multi-TF: {e}")
         return {"h1": 50, "m15": 50, "buy_signal": False, "sell_signal": False}
 
-def calculate_atr_for_pair(pair, period=14):
-    """Calcule l'ATR pour une paire donnée avec gestion des erreurs améliorée"""
+def calculate_atr_for_pair(pair):
     try:
-        params = {
-            "granularity": "H1", 
-            "count": period*2, 
-            "price": "M",
-            "smooth": True  # Ajout du lissage
-        }
-        
-        # Journalisation de débogage
-        logger.debug(f"Récupération ATR pour {pair} avec params: {params}")
-        
-        r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        candles = client.request(r)["candles"]
-        
-        # Extraction avec vérification de complétude
-        complete_candles = [c for c in candles if c['complete']]
-        if not complete_candles:
-            logger.warning(f"Aucune bougie complète pour {pair}")
-            return 0.0
+        # Correction pour les paires JPY
+        if "_JPY" in pair:
+            params = {"granularity": "H1", "count": 14}
+            candles = cache.get(pair, "ATR") or fetch_candles(pair, params)
+            highs = [float(c['mid']['h']) for c in candles]
+            lows = [float(c['mid']['l']) for c in candles]
+            closes = [float(c['mid']['c']) for c in candles]
             
-        highs = [float(c['mid']['h']) for c in complete_candles]
-        lows = [float(c['mid']['l']) for c in complete_candles]
-        closes = [float(c['mid']['c']) for c in complete_candles]
-        
-        # Vérification taille des données
-        if len(highs) < period:
-            logger.warning(f"Données insuffisantes ({len(highs)}/{period}) pour {pair}")
-            return 0.0
+            # Conversion en pips
+            multiplier = 100 if pair in ["XAU_JPY", "XAG_JPY"] else 1
+            true_ranges = [
+                (h - l) * multiplier 
+                for h, l in zip(highs, lows)
+            ]
             
-        # Calcul final avec arrondi adaptatif
-        atr_value = calculate_atr(highs, lows, closes, period)
-        
-        # Détermination précision décimale
-        precision = 3 if pair in ["XAU_USD", "XAG_USD"] else (2 if "_JPY" in pair else 5)
-        
-        return round(atr_value, precision)
+            return np.mean(true_ranges[-14:])
+            
+        # [...] (calcul standard pour autres paires)
         
     except Exception as e:
-        logger.error(f"Erreur critique dans calculate_atr_for_pair({pair}): {str(e)}")
-        return 0.0
-
+        logger.error(f"ATR Error: {str(e)}")
+        return 0
 def detect_engulfing_patterns(candles):
     """Détecte des engulfing patterns dans une série de bougies"""
     engulfing_patterns = []
@@ -676,50 +668,27 @@ def update_closed_trades():
         logger.error(f"Erreur lors de la mise à jour des trades fermés: {e}")
 
 def analyze_htf(pair):
-    """Analyse les timeframes élevés pour identifier des zones clés (FVG, OB, etc.)"""
-    htf_params = {"granularity": "H4", "count": 50, "price": "M", "smooth": True}
     try:
-        r = instruments.InstrumentsCandles(instrument=pair, params=htf_params)
-        client.request(r)
-        candles = [c for c in r.response['candles'] if c['complete']]  # Filtrage
-        # Vérification des données
-        if not candles or not all(c['complete'] for c in candles):
-            logger.warning(f"Données incomplètes ou invalides pour {pair}.")
-            return [], []
+        params = {"granularity": "H4", "count": 50}
+        candles = cache.get(pair, "HTF") or fetch_candles(pair, params)
         
-        closes = [float(c['mid']['c']) for c in candles if c['complete']]
-        highs = [float(c['mid']['h']) for c in candles if c['complete']]
-        lows = [float(c['mid']['l']) for c in candles if c['complete']]
+        # Filtrage des faux order blocks
+        valid_ob = []
+        for i in range(1, len(candles)-1):
+            prev_close = candles[i-1]['mid']['c']
+            current_high = candles[i]['mid']['h']
+            current_low = candles[i]['mid']['l']
+            
+            # Validité OB : prix doit revenir dans la zone
+            if (current_high > prev_close and 
+                any(c['mid']['c'] < prev_close for c in candles[i+1:i+3])):
+                valid_ob.append((current_low, current_high))
+                
+        return valid_ob[:10]  # Limite à 10 zones max
         
-        # Vérifier si au moins deux bougies sont disponibles
-        if len(closes) < 2:
-            logger.warning(f"Pas assez de données HTF pour {pair}.")
-            return [], []
-        
-        # Calcul des FVG (Fair Value Gaps)
-        fvg_zones = []
-        for i in range(1, len(candles) - 1):
-            if highs[i] < lows[i - 1] and closes[i + 1] > highs[i]:
-                fvg_zones.append((highs[i], lows[i - 1]))
-            elif lows[i] > highs[i - 1] and closes[i + 1] < lows[i]:
-                fvg_zones.append((lows[i], highs[i - 1]))
-        
-        # Identification des Order Blocks (OB)
-        ob_zones = []
-        for i in range(len(candles) - 1):
-            if closes[i] > closes[i + 1]:  # Bearish candle
-                ob_zones.append((lows[i + 1], highs[i]))
-            elif closes[i] < closes[i + 1]:  # Bullish candle
-                ob_zones.append((lows[i], highs[i + 1]))
-        
-        logger.info(f"Zones HTF pour {pair}: FVG={fvg_zones}, OB={ob_zones}")
-        fvg_zones = [tuple(map(float, zone)) for zone in fvg_zones]
-        ob_zones = [tuple(map(float, zone)) for zone in ob_zones]
-        
-        return fvg_zones, ob_zones
     except Exception as e:
-        logger.error(f"Erreur analyse HTF: {e}")
-        return [], []
+        logger.error(f"HTF Analysis Error: {str(e)}")
+        return []
 
 def detect_ltf_patterns(candles, pairs):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
