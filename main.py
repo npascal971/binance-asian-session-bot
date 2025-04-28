@@ -471,33 +471,39 @@ def is_strong_trend(pair, direction):
 def analyze_gold():
     pair = "XAU_USD"
     logger.info(f"Analyse approfondie de {pair}...")
-    
-    # 1. Récupérer les données
+
+    # Récupération des données
     params = {"granularity": "H1", "count": 100, "price": "M"}
     candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
-    
-    # 2. Calculer les indicateurs
+
+    # Calcul des indicateurs
     closes = [float(c['mid']['c']) for c in candles if c['complete']]
     highs = [float(c['mid']['h']) for c in candles if c['complete']]
     lows = [float(c['mid']['l']) for c in candles if c['complete']]
-    
+
     rsi = calculate_rsi(closes[-14:])
     atr = calculate_atr(highs[-14:], lows[-14:], closes[-14:])
-    pin_bars = detect_pin_bars(candles[-6:], pair)  # Dernières 6 bouches
-    
-    # 3. Vérifier les conditions de votre trade gagnant
+    pin_bars = detect_pin_bars(candles[-6:], pair)
+
+    strong_trend = is_strong_trend(pair, "sell")
+
+    # Conditions de vente
     sell_conditions = (
-        rsi > 60 and  # RSI élevé
-        any(p['type'] == 'bearish' and p['ratio'] > 2 for p in pin_bars) and  # Pin bar baissière
-        is_strong_trend(pair, "sell") and  # Tendance baissière
-        closes[-1] < max(highs[-5:-1])  # Sous le récent high
+        rsi > 60 and
+        any(p['type'] == 'bearish' and p['ratio'] > 2 for p in pin_bars) and
+        strong_trend and
+        closes[-1] < max(highs[-5:-1])
     )
-    
+
     if sell_conditions:
+        current_price = closes[-1]
+        take_profit = current_price - (atr * 2)  # Exemple de calcul dynamique
+        stop_loss = current_price + (atr * 1.5)
+
         signal_details = {
             "direction": "sell",
-            "current_price": closes[-1],
-            "target_zone": (take_profit + closes[-1]) / 2,
+            "current_price": current_price,
+            "target_zone": (take_profit + current_price) / 2,
             "stop_loss": stop_loss,
             "rsi": rsi,
             "atr": atr,
@@ -507,8 +513,7 @@ def analyze_gold():
         send_gold_alert(pair, signal_details)
     else:
         logger.info(f"❌ Aucun signal pour {pair}")
-        logger.info(f"→ RSI: {rsi:.2f}, Pin bars: {len(pin_bars)}, Strong trend: {is_strong_trend(pair, 'sell')}, Clôture: {closes[-1]:.2f}, Max high: {max(highs[-5:-1]):.2f}")
-
+        logger.info(f"→ RSI: {rsi:.2f}, Pin bars: {len(pin_bars)}, Strong trend: {strong_trend}, Clôture: {closes[-1]:.2f}, Max high: {max(highs[-5:-1]):.2f}")
 
 def send_gold_alert(pair, signal_details):
     """Envoie une alerte détaillée pour l'or"""
