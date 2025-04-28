@@ -1369,7 +1369,12 @@ class LiquidityHunter:
         current_price = self.get_cached_price(pair)
         if current_price is None:
             return None
-            
+          
+        # Vérification type des zones
+        if not isinstance(self.liquidity_zones.get(pair, {}), dict):
+            logger.error(f"Structure de zone invalide pour {pair}")
+            return None       
+   
         zones = self.liquidity_zones[pair]
         session = self.session_ranges[pair]
         
