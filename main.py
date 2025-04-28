@@ -449,14 +449,13 @@ PAIR_SETTINGS = {
         "rsi_oversold": 30,
         "pin_bar_ratio": 2.5
     },
-    # Add other missing pairs similarly
+   
     "DEFAULT": {
         "min_atr": 0.5,
         "rsi_overbought": 65,
         "rsi_oversold": 35,
         "pin_bar_ratio": 3.0
     }
-}
 }
 
     
