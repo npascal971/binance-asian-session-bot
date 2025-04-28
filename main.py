@@ -1330,7 +1330,7 @@ class LiquidityHunter:
             return True
         return False
     
-   def analyze_htf_liquidity(self, pair):
+    def analyze_htf_liquidity(self, pair):
         """Version corrigée de l'analyse des liquidités"""
         try:
             fvg_zones, ob_zones = analyze_htf(pair)
