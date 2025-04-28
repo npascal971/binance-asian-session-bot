@@ -1519,6 +1519,14 @@ class LiquidityHunter:
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         score = 0
         try:
+
+             # 1. Calcul de l'ATR
+            current_atr = calculate_atr_for_pair(pair)  # Ligne ajoutée
+        
+            # 2. Vérification de la volatilité
+            if current_atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5):
+                score += 20
+            
             # 1. Récupération des données RSI
             rsi_data = check_rsi_conditions(pair)
             if not isinstance(rsi_data, dict):
