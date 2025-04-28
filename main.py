@@ -1554,7 +1554,7 @@ class LiquidityHunter:
           
 
             # 4. Volatilité ATR (15% → 20%)
-            if atr > PAIR_SETTINGS[pair].get('min_atr', 0.3):  # Seuil réduit
+            if current_atr > PAIR_SETTINGS[pair].get('min_atr', 0.3):  # Seuil réduit
                 score += 20  # Augmenté de 15 à 20
 
             # 5. Volume (15% → 10%)
