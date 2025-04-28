@@ -87,6 +87,53 @@ def get_account_balance():
         logger.debug(f"Solde du compte récupéré: {balance}")
         return balance
 
+def check_momentum(self, pair, zone):
+    """Vérifie l'alignement du momentum avec la zone"""
+    closes = self.get_closes(pair, 'H1', 14)
+    if len(closes) < 14:
+        return False
+    
+    # Calcul de la pente des prix
+    trend = np.polyfit(range(len(closes)), closes, 1)[0]
+    
+    # Vérification de la cohérence directionnelle
+    if (zone > closes[-1] and trend > 0) or (zone < closes[-1] and trend < 0):
+        return True
+    return False
+
+def confirm_signal(pair, direction):
+    """Vérification finale avant exécution"""
+    try:
+        # 1. Vérification du spread
+        candles = get_candles(pair, 'M5', 1)
+        ask = float(candles[-1]['ask']['c'])
+        bid = float(candles[-1]['bid']['c'])
+        spread = ask - bid
+        
+        if spread > 0.0003:  # Spread trop élevé
+            return False
+
+        # 2. Volumes récents
+        volume_candles = get_candles(pair, 'M15', 5)
+        volumes = [float(c['volume']) for c in volume_candles]
+        if volumes[-1] < np.mean(volumes[:-1]):
+            return False
+
+        # 3. Alignment price/zone
+        price = get_current_price(pair)
+        zones = analyze_htf(pair)
+        return any(abs(price - z[0]) < 0.0002 for z in zones)
+
+    except Exception as e:
+        logger.error(f"Erreur confirmation: {e}")
+        return False
+    
+    return (
+        last_volume > avg_volume * 1.2 and 
+        spread < 0.0002 and 
+        is_price_approaching(pivot_levels[pair])
+    )
+
 def is_ranging(pair, timeframe="H1", threshold=0.5):
     """Determine if a pair is in a ranging market using ADX"""
     try:
@@ -250,32 +297,27 @@ def dynamic_sl_tp(atr, direction, risk_reward=1.5, min_sl_multiplier=1.8):
     
     return (sl, tp) if direction == "buy" else (-sl, -tp)
 
+def get_closes(pair, timeframe, count):
+    """Récupère les prix de clôture"""
+    params = {"granularity": timeframe, "count": count, "price": "M"}
+    r = instruments.InstrumentsCandles(instrument=pair, params=params)
+    return [float(c['mid']['c']) for c in client.request(r)['candles'] if c['complete']]
+
 def is_trend_aligned(pair, direction):
-    """Vérifie l'alignement sur M15/H1/H4"""
-    timeframes = ['M15', 'H1', 'H4']
-    aligned = []
+    ema_values = []
+    for tf in ['H1', 'H4']:
+        closes = get_closes(pair, tf, 50)
+        if len(closes) < 50: continue
+        
+        ema_fast = pd.Series(closes).ewm(span=20).mean().iloc[-1]
+        ema_slow = pd.Series(closes).ewm(span=50).mean().iloc[-1]
+        
+        if direction == "buy":
+            ema_values.append(ema_fast > ema_slow)
+        else:
+            ema_values.append(ema_fast < ema_slow)
     
-    for tf in timeframes:
-        try:
-            # Récupère les 50 dernières bougies
-            params = {"granularity": tf, "count": 50}
-            candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
-            closes = [float(c['mid']['c']) for c in candles if c['complete']]
-            
-            # Calcule la tendance
-            sma_50 = pd.Series(closes).rolling(50).mean().iloc[-1]
-            current_price = closes[-1]
-            
-            if direction == "buy":
-                aligned.append(current_price > sma_50)
-            else:
-                aligned.append(current_price < sma_50)
-                
-        except Exception as e:
-            logger.error(f"Erreur vérification alignement {tf} : {str(e)}")
-            aligned.append(False)  # Fail-safe
-    
-    return sum(aligned) >= 2  # Au moins 2/3 timeframes alignés
+    return sum(ema_values) >= 1  # Au moins 1 TF aligné
 
 def get_asian_session_range(pair):
     """Récupère le high et le low de la session asiatique"""
@@ -893,6 +935,13 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
 
         if direction and not is_trend_aligned(pair, direction):
             logger.warning("Désalignement des tendances HTF")
+            return False
+        if not check_momentum(pair):
+            logger.info(f"Momentum défavorable pour {pair}")
+            return False
+
+        if not confirm_signal(pair, direction):
+            logger.info(f"Confirmation échouée pour {pair}")
             return False
 
         if direction and any([signals["breakout"], signals["price_action"], signals["zone"]]):
