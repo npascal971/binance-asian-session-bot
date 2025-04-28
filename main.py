@@ -1517,67 +1517,67 @@ class LiquidityHunter:
             return None
     
     def _calculate_confidence(self, pair, price, zone_type, zone):
-    """Version corrigée avec gestion complète des types et initialisation"""
-    score = 0  # Initialisation cruciale
-    try:
-        # Conversion sécurisée de la zone
-        if isinstance(zone, (list, tuple)):
-            zone_value = (float(zone[0]) + float(zone[1])) / 2
-            direction = 'buy' if float(price) < zone_value else 'sell'
-        elif isinstance(zone, dict):
-            zone_value = float(zone['price'])
-            direction = 'buy' if float(price) > zone_value else 'sell'
-        else:
-            zone_value = float(zone)
-            direction = 'buy' if float(price) < zone_value else 'sell'
-
-        # Calculs sécurisés
-        price = float(price)
-        distance = abs(price - zone_value)  # Utilisation de zone_value
-
-        # 1. Alignement tendance
-        if is_trend_aligned(pair, direction):
-            score += 40
-
-        # 2. Type de zone
-        if zone_type == 'fvg':
-            score += 30
-        elif zone_type == 'ob':
-            score += 20
-        else:
-            score += 15
-
-        # 3. Momentum RSI
-        rsi = check_rsi_conditions(pair)
-        if (rsi.get('buy_signal', False) and direction == 'buy') or \
-           (rsi.get('sell_signal', False) and direction == 'sell'):
-            score += 20
-
-        # 4. Volatilité ATR
-        atr = calculate_atr_for_pair(pair)
-        if atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5):
-            score += 15
-
-        # 5. Analyse volume
+    
+        score = 0  # Initialisation cruciale
         try:
-            params = {"granularity": "M15", "count": 5, "price": "M"}
-            candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
-            last_volume = float(candles[-1]['volume']) if candles else 0
-            avg_volume = np.mean([float(c['volume']) for c in candles[:-1] if c.get('complete')]) if len(candles) > 1 else 0
-            if last_volume > avg_volume * 1.2:
+            # Conversion sécurisée de la zone
+            if isinstance(zone, (list, tuple)):
+                zone_value = (float(zone[0]) + float(zone[1])) / 2
+                direction = 'buy' if float(price) < zone_value else 'sell'
+            elif isinstance(zone, dict):
+                zone_value = float(zone['price'])
+                direction = 'buy' if float(price) > zone_value else 'sell'
+            else:
+                zone_value = float(zone)
+                direction = 'buy' if float(price) < zone_value else 'sell'
+
+            # Calculs sécurisés
+            price = float(price)
+            distance = abs(price - zone_value)  # Utilisation de zone_value
+
+            # 1. Alignement tendance
+            if is_trend_aligned(pair, direction):
+                score += 40
+
+            # 2. Type de zone
+            if zone_type == 'fvg':
+                score += 30
+            elif zone_type == 'ob':
+                score += 20
+            else:
                 score += 15
-        except Exception as e:
-            logger.error(f"Erreur volume {pair}: {str(e)}")
 
-        # 6. Distance à la zone
-        if distance < 0.00015:
-            score += 20
+            # 3. Momentum RSI
+            rsi = check_rsi_conditions(pair)
+            if (rsi.get('buy_signal', False) and direction == 'buy') or \
+               (rsi.get('sell_signal', False) and direction == 'sell'):
+                score += 20
 
-        return min(100, score)  # Limite à 100% comme indiqué
+            # 4. Volatilité ATR
+            atr = calculate_atr_for_pair(pair)
+            if atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5):
+                score += 15
 
-    except (TypeError, ValueError, KeyError) as e:
-        logger.error(f"Erreur confiance {pair}: {str(e)}")
-        return 0
+            # 5. Analyse volume
+            try:
+                params = {"granularity": "M15", "count": 5, "price": "M"}
+                candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+                last_volume = float(candles[-1]['volume']) if candles else 0
+                avg_volume = np.mean([float(c['volume']) for c in candles[:-1] if c.get('complete')]) if len(candles) > 1 else 0
+                if last_volume > avg_volume * 1.2:
+                    score += 15
+            except Exception as e:
+                logger.error(f"Erreur volume {pair}: {str(e)}")
+
+            # 6. Distance à la zone
+            if distance < 0.00015:
+                score += 20
+
+            return min(100, score)  # Limite à 100% comme indiqué
+
+        except (TypeError, ValueError, KeyError) as e:
+            logger.error(f"Erreur confiance {pair}: {str(e)}")
+            return 0
 
 
 
