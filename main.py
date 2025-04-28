@@ -1514,7 +1514,7 @@ if __name__ == "__main__":
     
     while True:
         now = datetime.utcnow().time()
-        if SESSION_START <= now <= SESSION_END:
+        #if SESSION_START <= now <= SESSION_END:
             logger.info("⏱ Session active - Chasse aux liquidités en cours...")
             try:
                 for pair in sorted(PAIRS, key=lambda x: 0 if x == "XAU_USD" else 1):
