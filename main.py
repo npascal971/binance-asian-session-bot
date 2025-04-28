@@ -1330,19 +1330,19 @@ class LiquidityHunter:
         
         # Priorité 1: FVG
         for fvg in zones['fvg']:
-            if self._is_price_near_zone(current_price, fvg, pair):
+            if isinstance(fvg, (list, tuple)) and self._is_price_near_zone(current_price, fvg, pair):
                 if self._confirm_zone(pair, fvg, 'fvg'):
                     return self._prepare_trade(pair, current_price, fvg, 'fvg')
         
         # Priorité 2: Order Blocks avec volume élevé
         for ob in zones['ob']:
-            if is_price_approaching(current_price, ob, pair, threshold_pips=0.001):
+            if isinstance(ob, (list, tuple)) and is_price_approaching(current_price, ob, pair, threshold_pips=0.001):
                 if self._confirm_zone(pair, ob, 'ob'):
                     return self._prepare_trade(pair, current_price, ob, 'ob')
         
         # Priorité 3: Niveaux clés du range asiatique
         for level in ['high', 'low', 'mid']:
-            if abs(current_price - session[level]) < 0.001:
+            if abs(current_price - session.get(level, current_price)) < RETEST_ZONE_RANGE:
                 if self._confirm_zone(pair, session[level], 'session'):
                     return self._prepare_trade(pair, current_price, session[level], 'session')
         
