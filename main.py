@@ -187,17 +187,22 @@ def send_email(subject, body):
         logger.info(f"E-mail envoyé avec succès: {subject}")
     except Exception as e:
         logger.error(f"Erreur lors de l'envoi de l'e-mail: {e}")
+# Remplacer is_trend_aligned() par :
 def is_trend_aligned(pair, direction):
-    timeframes = ["M15", "H1", "H4"]
-    trends = []
+    ema_values = []
+    for tf in ['M15', 'H1']:
+        closes = get_closes(pair, tf, 50)
+        if len(closes) < 50: continue
+        
+        ema_fast = pd.Series(closes).ewm(span=20).mean().iloc[-1]
+        ema_slow = pd.Series(closes).ewm(span=50).mean().iloc[-1]
+        
+        if direction == "buy":
+            ema_values.append(ema_fast > ema_slow)
+        else:
+            ema_values.append(ema_fast < ema_slow)
     
-    for tf in timeframes:
-        candles = get_candles(pair, tf, 50)  # Implémentez cette fonction
-        ema50 = pd.Series([c["mid"]["c"] for c in candles]).ewm(span=50).mean().iloc[-1]
-        current_price = float(candles[-1]["mid"]["c"])
-        trends.append(current_price > ema50 if direction == "BUY" else current_price < ema50)
-    
-    return all(trends)
+    return sum(ema_values) >= 1  # Au moins 1 TF aligné
 
 def is_price_approaching(price, zone, pair, threshold_pips=None):
     """
@@ -288,7 +293,7 @@ def get_asian_session_range(pair):
         asian_end_date = now.date()
     else:
         # Sinon, la session asiatique correspond à aujourd'hui  *********** faire l'inverse juste en dessous ligne 96 pour 97 et 97 pour 96
-        asian_start_date = (now + timedelta(days=1)).date()
+        asian_start_date = (now + timedelta(days=-1)).date()
         asian_end_date = now.date()
 
     # Créer les objets datetime complets pour le début et la fin
