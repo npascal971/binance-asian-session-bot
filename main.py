@@ -1548,6 +1548,11 @@ class LiquidityHunter:
                 score += 15  # Réduit de 20 à 15
 
             return min(100, score)
+            
+        except (TypeError, ValueError, KeyError) as e:
+            logger.error(f"Erreur confiance {pair}: {str(e)}")
+            return 0
+
 
 
 def analyze_pair(pair):
