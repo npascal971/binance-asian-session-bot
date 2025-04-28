@@ -1538,37 +1538,36 @@ class LiquidityHunter:
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         score = 0
         try:
-            # Get ATR and validate
+            # Get essential data with validation
             current_atr = calculate_atr_for_pair(pair)
-            if current_atr is None or current_atr <= 0:
+            pair_settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+            zone_price = self._get_zone_price(zone, zone_type)
+        
+            if None in [current_atr, zone_price] or current_atr <= 0:
                 return 0
 
-            # Get settings safely
-            pair_settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
-
-            # 1. Get volume data
-            volume_data = self._get_volume_data(pair)
-            last_volume = volume_data["last"]
-            avg_volume = volume_data["average"]
-
-            # 2. Calculate distance to zone
-            zone_price = self._get_zone_price(zone, zone_type)
-            distance = abs(price - zone_price) if zone_price else 0
-
-            # 3. Volatility check
+            # 1. Volatility check (20%)
             if current_atr > pair_settings.get("min_atr", 0.5):
                 score += 20
 
-            # 4. Volume condition
-            if last_volume > avg_volume * 1.1:
-                score += 10
-
-            # 5. Distance condition
-            pip_value = self.get_pip_value(pair)
-            if distance < 2 * pip_value:  # Within 2 pips
+            # 2. Volume check (15%)
+            volume_data = self._get_volume_data(pair)
+            if volume_data["last"] > volume_data["average"] * 1.2:
                 score += 15
 
-        # Add other scoring conditions...
+            # 3. Distance check (15%)
+            pip_value = self.get_pip_value(pair)
+            distance_pips = abs(price - zone_price) / pip_value
+            if distance_pips < 5:  # Within 5 pips
+                score += 15
+
+            # 4. Trend alignment (25%)
+            if is_trend_aligned(pair, direction):
+                score += 25
+
+            # 5. Zone type weighting (25%)
+            zone_weights = {"fvg": 25, "ob": 20, "session": 15}
+            score += zone_weights.get(zone_type, 0)
 
             return min(100, score)
 
@@ -1592,12 +1591,16 @@ class LiquidityHunter:
 
     def _get_zone_price(self, zone, zone_type):
         """Extract relevant price from zone data"""
-        if zone_type == "fvg":
-            return (zone[0] + zone[1])/2  # FVG midpoint
-        elif zone_type == "ob":
-            return zone["price"]  # Assuming OB has price key
-        else:
-            return zone  # Single value
+        try:
+            if zone_type == "fvg":
+                return (zone[0] + zone[1]) / 2  # FVG midpoint
+            elif zone_type == "ob":
+                return zone[1]  # Use high of bearish OB / low of bullish OB
+            else:  # Session levels
+                return float(zone)
+        except (TypeError, IndexError) as e:
+            logger.error(f"Zone price error ({zone_type}): {str(e)}")
+            return None
 
 
 
