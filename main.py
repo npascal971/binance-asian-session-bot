@@ -1517,67 +1517,37 @@ class LiquidityHunter:
             return None
     
     def _calculate_confidence(self, pair, price, zone_type, zone):
-    
-        score = 0  # Initialisation cruciale
+        score = 0
         try:
-            # Conversion sécurisée de la zone
-            if isinstance(zone, (list, tuple)):
-                zone_value = (float(zone[0]) + float(zone[1])) / 2
-                direction = 'buy' if float(price) < zone_value else 'sell'
-            elif isinstance(zone, dict):
-                zone_value = float(zone['price'])
-                direction = 'buy' if float(price) > zone_value else 'sell'
-            else:
-                zone_value = float(zone)
-                direction = 'buy' if float(price) < zone_value else 'sell'
-
-            # Calculs sécurisés
-            price = float(price)
-            distance = abs(price - zone_value)  # Utilisation de zone_value
-
-            # 1. Alignement tendance
+            # 1. Alignement tendance (30% → 25%)
             if is_trend_aligned(pair, direction):
-                score += 40
+                score += 25  # Réduit de 40 à 25
 
-            # 2. Type de zone
+            # 2. Type de zone (25% → 30%)
             if zone_type == 'fvg':
-                score += 30
+                score += 30  # Augmenté de 30 à 35
             elif zone_type == 'ob':
-                score += 20
+                score += 25   # Augmenté de 20 à 25
             else:
-                score += 15
+                score += 20   # Augmenté de 15 à 20
 
-            # 3. Momentum RSI
-            rsi = check_rsi_conditions(pair)
-            if (rsi.get('buy_signal', False) and direction == 'buy') or \
-               (rsi.get('sell_signal', False) and direction == 'sell'):
-                score += 20
+            # 3. Momentum RSI (20% → 15%)
+            if (rsi_conditions):  # Seuil assoupli
+                score += 15  # Réduit de 20 à 15
 
-            # 4. Volatilité ATR
-            atr = calculate_atr_for_pair(pair)
-            if atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5):
-                score += 15
+            # 4. Volatilité ATR (15% → 20%)
+            if atr > PAIR_SETTINGS[pair].get('min_atr', 0.3):  # Seuil réduit
+                score += 20  # Augmenté de 15 à 20
 
-            # 5. Analyse volume
-            try:
-                params = {"granularity": "M15", "count": 5, "price": "M"}
-                candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
-                last_volume = float(candles[-1]['volume']) if candles else 0
-                avg_volume = np.mean([float(c['volume']) for c in candles[:-1] if c.get('complete')]) if len(candles) > 1 else 0
-                if last_volume > avg_volume * 1.2:
-                    score += 15
-            except Exception as e:
-                logger.error(f"Erreur volume {pair}: {str(e)}")
+            # 5. Volume (15% → 10%)
+            if last_volume > avg_volume * 1.1:  # Seuil volume réduit
+                score += 10  # Réduit de 15 à 10
 
-            # 6. Distance à la zone
-            if distance < 0.00015:
-                score += 20
+            # 6. Distance à la zone (20% → 15%)
+            if distance < 0.0002:  # Seuil élargi
+                score += 15  # Réduit de 20 à 15
 
-            return min(100, score)  # Limite à 100% comme indiqué
-
-        except (TypeError, ValueError, KeyError) as e:
-            logger.error(f"Erreur confiance {pair}: {str(e)}")
-            return 0
+            return min(100, score)
 
 
 
