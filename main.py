@@ -409,25 +409,27 @@ def detect_pin_bars(candles, pair=None):
         try:
             if not candle['complete']:
                 continue
-                
+
             o = float(candle['mid']['o'])
             h = float(candle['mid']['h'])
             l = float(candle['mid']['l'])
             c = float(candle['mid']['c'])
-            
+
             body_size = abs(c - o)
             upper_wick = h - max(o, c)
             lower_wick = min(o, c) - l
-            
-            # Avoid division by zero for doji candles
+
             if body_size == 0:
-                continue  # Skip doji candles
-                
+                continue  # Bougie doji = on skip
+
             ratio = max(upper_wick, lower_wick) / body_size
             ratio_threshold = settings.get("pin_bar_ratio", PIN_BAR_RATIO_THRESHOLD)
-            
-            if ratio >= ratio_threshold:
-                direction = "bullish" if c > o else "bearish"
+
+            # Nouveau filtre : on veut que la mèche soit au moins 2x plus grande que l'autre mèche
+            wick_ratio = max(upper_wick, lower_wick) / (min(upper_wick, lower_wick) + 1e-6)
+
+            if ratio >= ratio_threshold and wick_ratio > 2.0:
+                direction = "bullish" if lower_wick > upper_wick else "bearish"
                 pin_bars.append({
                     "type": direction,
                     "ratio": round(ratio, 1),
@@ -436,10 +438,13 @@ def detect_pin_bars(candles, pair=None):
                     "low": l,
                     "close": c
                 })
+
         except Exception as e:
             logger.error(f"Erreur analyse bougie {pair}: {str(e)}")
             continue
+
     return pin_bars
+
 
 def is_strong_trend(pair, direction):
     """Vérifie l'alignement sur M15/H1/H4 avec force"""
@@ -1484,53 +1489,91 @@ def analyze_pair(pair):
     
     # 1. Vérifiez les prix
     price = get_current_price(pair)
+    if price is None:
+        logger.error(f"Impossible de récupérer le prix pour {pair}")
+        return
     logger.info(f"Prix actuel: {price}")
     
     # 2. Vérifiez les indicateurs
     atr = calculate_atr_for_pair(pair)
-    logger.info(f"ATR: {atr}")
+    logger.info(f"ATR: {atr if atr else 'Erreur de calcul'}")
     
     # 3. Vérifiez les tendances
     logger.info(f"Tendance H1 alignée BUY: {is_trend_aligned(pair, 'buy')}")
     logger.info(f"Tendance H1 alignée SELL: {is_trend_aligned(pair, 'sell')}")    
     
     hunter = LiquidityHunter()
-    candles = client.request(instruments.InstrumentsCandles(instrument=pair, params={"granularity":"H1","count":50}))
-    logger.info(f"Données reçues pour {pair}: {len(candles['candles'])} bougies")
-    # 1. Mise à jour des données
+    
+    try:
+        # 4. Récupération des données brutes
+        r = instruments.InstrumentsCandles(
+            instrument=pair,
+            params={"granularity": "H1", "count": 50}
+        )
+        response = client.request(r)
+        
+        # Validation de la structure de réponse
+        if not isinstance(response, dict) or 'candles' not in response:
+            logger.error(f"Réponse API invalide pour {pair}: {type(response)}")
+            logger.debug(f"Contenu de la réponse: {response}")
+            return
+            
+        candles = response['candles']
+        logger.info(f"Données reçues pour {pair}: {len(candles)} bougies")
+        
+    except Exception as e:
+        logger.error(f"ERREUR CRITIQUE lors de la récupération des bougies: {str(e)}")
+        logger.exception(e)
+        return
+
+    # 5. Mise à jour des données de base
     if not hunter.update_asian_range(pair):
+        logger.warning(f"Échec mise à jour range asiatique pour {pair}")
         return
     
     if not hunter.analyze_htf_liquidity(pair):
+        logger.warning(f"Échec analyse liquidité HTF pour {pair}")
         return
     
-    # 2. Recherche d'opportunités
-    opportunity = hunter.find_best_opportunity(pair)
+    # 6. Recherche d'opportunités
+    try:
+        opportunity = hunter.find_best_opportunity(pair)
+    except KeyError as ke:
+        logger.error(f"Erreur de structure dans les données: {ke}")
+        return
+    except Exception as e:
+        logger.error(f"Erreur générique dans find_best_opportunity: {e}")
+        return
+    
     if not opportunity:
+        logger.info(f"Aucune opportunité trouvée pour {pair}")
         return
     
-    # 3. Vérification finale des conditions
-    if opportunity['confidence'] < 70:  # Seuil de confiance minimum
-        logger.info(f"Opportunité faible confiance ({opportunity['confidence']}%) pour {pair}")
-        return
-    
-    # 4. Envoi de l'alerte
-    reasons = [
-        f"Zone: {opportunity['zone_type'].upper()}",
-        f"Confiance: {opportunity['confidence']}%",
-        f"Direction: {opportunity['direction'].upper()}",
-        f"ATR: {calculate_atr_for_pair(pair):.5f}"
-    ]
-    
-    send_trade_alert(
-        pair=opportunity['pair'],
-        direction=opportunity['direction'],
-        entry_price=opportunity['entry'],
-        stop_price=opportunity['sl'],
-        take_profit=opportunity['tp'],
-        reasons=reasons
-    )
-
+    # 7. Validation finale
+    try:
+        if opportunity['confidence'] < 70:
+            logger.info(f"Confiance insuffisante ({opportunity['confidence']}%)")
+            return
+            
+        # 8. Envoi d'alerte
+        send_trade_alert(
+            pair=opportunity['pair'],
+            direction=opportunity['direction'],
+            entry_price=opportunity['entry'],
+            stop_price=opportunity['sl'],
+            take_profit=opportunity['tp'],
+            reasons=[
+                f"Type: {opportunity['zone_type'].upper()}",
+                f"Confiance: {opportunity['confidence']}%",
+                f"ATR: {atr:.5f}",
+                f"Alignement tendance: {is_trend_aligned(pair, opportunity['direction'])}"
+            ]
+        )
+        
+    except KeyError as ke:
+        logger.error(f"Clé manquante dans l'opportunité: {ke}")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi de l'alerte: {e}")
 # ... (le reste du code main reste similaire mais utilise la nouvelle analyse_pair)
 
 if __name__ == "__main__":
