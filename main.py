@@ -1390,7 +1390,7 @@ class LiquidityHunter:
                 if self._confirm_zone(pair, ob, 'ob'):
                     return self._prepare_trade(pair, current_price, ob, 'ob')
         
-        # Priorité 3: Niveaux clés du range asiatique
+                # Priorité 3: Niveaux clés du range asiatique
         for level in ['high', 'low', 'mid']:
             if abs(current_price - session.get(level, current_price)) < RETEST_ZONE_RANGE:
                 if self._confirm_zone(pair, session[level], 'session'):
