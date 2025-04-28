@@ -605,30 +605,49 @@ def check_rsi_conditions(pair):
         logger.error(f"Erreur calcul RSI multi-TF: {e}")
         return {"h1": 50, "m15": 50, "buy_signal": False, "sell_signal": False}
 
-def calculate_atr_for_pair(pair):
+def calculate_atr_for_pair(pair, period=14):
+    """Calcule l'ATR pour une paire donnée avec gestion des erreurs améliorée"""
     try:
-        # Correction pour les paires JPY
-        if "_JPY" in pair:
-            params = {"granularity": "H1", "count": 14}
-            candles = cache.get(pair, "ATR") or fetch_candles(pair, params)
-            highs = [float(c['mid']['h']) for c in candles]
-            lows = [float(c['mid']['l']) for c in candles]
-            closes = [float(c['mid']['c']) for c in candles]
+        params = {
+            "granularity": "H1", 
+            "count": period*2, 
+            "price": "M",
+            "smooth": True  # Ajout du lissage
+        }
+        
+        # Journalisation de débogage
+        logger.debug(f"Récupération ATR pour {pair} avec params: {params}")
+        
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        candles = client.request(r)["candles"]
+        
+        # Extraction avec vérification de complétude
+        complete_candles = [c for c in candles if c['complete']]
+        if not complete_candles:
+            logger.warning(f"Aucune bougie complète pour {pair}")
+            return 0.0
             
-            # Conversion en pips
-            multiplier = 100 if pair in ["XAU_JPY", "XAG_JPY"] else 1
-            true_ranges = [
-                (h - l) * multiplier 
-                for h, l in zip(highs, lows)
-            ]
+        highs = [float(c['mid']['h']) for c in complete_candles]
+        lows = [float(c['mid']['l']) for c in complete_candles]
+        closes = [float(c['mid']['c']) for c in complete_candles]
+        
+        # Vérification taille des données
+        if len(highs) < period:
+            logger.warning(f"Données insuffisantes ({len(highs)}/{period}) pour {pair}")
+            return 0.0
             
-            return np.mean(true_ranges[-14:])
-            
-        # [...] (calcul standard pour autres paires)
+        # Calcul final avec arrondi adaptatif
+        atr_value = calculate_atr(highs, lows, closes, period)
+        
+        # Détermination précision décimale
+        precision = 3 if pair in ["XAU_USD", "XAG_USD"] else (2 if "_JPY" in pair else 5)
+        
+        return round(atr_value, precision)
         
     except Exception as e:
-        logger.error(f"ATR Error: {str(e)}")
-        return 0
+        logger.error(f"Erreur critique dans calculate_atr_for_pair({pair}): {str(e)}")
+        return 0.0
+
 def detect_engulfing_patterns(candles):
     """Détecte des engulfing patterns dans une série de bougies"""
     engulfing_patterns = []
