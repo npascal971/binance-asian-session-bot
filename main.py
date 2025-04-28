@@ -288,7 +288,7 @@ def get_asian_session_range(pair):
         asian_end_date = now.date()
     else:
         # Sinon, la session asiatique correspond à aujourd'hui  *********** faire l'inverse juste en dessous ligne 96 pour 97 et 97 pour 96
-        asian_start_date = (now + timedelta(days=-1)).date()
+        asian_start_date = (now + timedelta(days=1)).date()
         asian_end_date = now.date()
 
     # Créer les objets datetime complets pour le début et la fin
