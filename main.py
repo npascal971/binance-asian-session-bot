@@ -1460,7 +1460,7 @@ class LiquidityHunter:
       
     
     def _prepare_trade(self, pair, price, zone, zone_type):
-    """Version corrigée avec gestion des types"""
+    
         try:
             # Gestion explicite des types de zones
             if isinstance(zone, (list, tuple)):
