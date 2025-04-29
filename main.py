@@ -686,7 +686,7 @@ def detect_engulfing_patterns(candles):
     
     return engulfing_patterns
 
-ddef fetch_candles(pair, timeframe, params):
+def fetch_candles(pair, timeframe, params):
     try:
         # Ajouter le timeframe aux paramètres
         params["granularity"] = timeframe
