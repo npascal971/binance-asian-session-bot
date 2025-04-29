@@ -1336,7 +1336,7 @@ class LiquidityHunter:
             return True
         return False
     
-   def analyze_htf_liquidity(self, pair):
+    def analyze_htf_liquidity(self, pair):
         """Analyse approfondie des zones de liquidité HTF"""
         try:
             # Récupération des FVG et Order Blocks
