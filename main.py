@@ -223,23 +223,17 @@ def calculate_atr(highs, lows, closes, period=14):
 
 
 def send_trade_alert(pair, direction, entry_price, stop_price, take_profit, reasons):
-    """Envoie une alerte par email au lieu d'exécuter un trade"""
+    """Envoie une alerte par email au lieu d'exécuter un trade."""
     subject = f"🚨 Signal {direction.upper()} détecté sur {pair}"
-    body = f"""
-Nouveau signal de trading détecté !
-
+    body = f"""Nouveau signal de trading détecté !
 📌 Paire : {pair}
 📈 Direction : {direction.upper()}
 💰 Prix d'entrée : {entry_price:.5f}
 🎯 Take Profit : {take_profit:.5f}
 🛡️ Stop Loss : {stop_price:.5f}
-
 📊 Raisons du signal :
 - {chr(10).join(reasons)}
-
-⚠️ Ceci est une alerte informative - Aucun trade n'a été exécuté automatiquement.
-"""
-
+⚠️ Ceci est une alerte informative - Aucun trade n'a été exécuté automatiquement."""
     send_email(subject, body)
 
 def send_email(subject, body):
@@ -1386,40 +1380,55 @@ class LiquidityHunter:
             return (min(zone) - threshold) <= price <= (max(zone) + threshold)
         return abs(price - zone) <= threshold
 
+    def _calculate_zone_weight(self, price, zone):
+        """Calcule un poids pour une zone en fonction de sa proximité avec le prix."""
+        if isinstance(zone, (list, tuple)):
+            distance = min(abs(price - z) for z in zone)
+        else:
+            distance = abs(price - zone)
+        # Plus la zone est proche, plus le poids est élevé
+        return max(0, 100 - distance * 1000)  # Ajustez le facteur selon vos besoins
+
     def find_best_opportunity(self, pair):
         current_price = self.get_cached_price(pair)
         if current_price is None:
             return None
-          
-        # Vérification type des zones
-        if not isinstance(self.liquidity_zones.get(pair, {}), dict):
-            logger.error(f"Structure de zone invalide pour {pair}")
-            return None       
-   
-        zones = self.liquidity_zones[pair]
-        session = self.session_ranges[pair]
-        
+
+        zones = self.liquidity_zones.get(pair, {})
+        session = self.session_ranges.get(pair, {})
+        opportunities = []
+
         # Priorité 1: FVG
-        for fvg in zones['fvg']:
-            if isinstance(fvg, (list, tuple)) and self._is_price_near_zone(current_price, fvg, pair):
-                if self._confirm_zone(pair, fvg, 'fvg'):
-                    return self._prepare_trade(pair, current_price, fvg, 'fvg')
-        
-        # Priorité 2: Order Blocks avec volume élevé
-        for ob in zones['ob']:
-            if isinstance(ob, (list, tuple)) and is_price_approaching(current_price, ob, pair, threshold_pips=0.001):
-                if self._confirm_zone(pair, ob, 'ob'):
-                    return self._prepare_trade(pair, current_price, ob, 'ob')
-        
-        # Priorité 3: Niveaux clés du range asiatique
-        for level in ['high', 'low', 'mid']:
-            if abs(current_price - session.get(level, current_price)) < RETEST_ZONE_RANGE:
-                if self._confirm_zone(pair, session[level], 'session'):
-                    return self._prepare_trade(pair, current_price, session[level], 'session')
-        
+        for fvg in zones.get("fvg", []):
+            weight = self._calculate_zone_weight(current_price, fvg)
+            if weight > 50:  # Seuil minimum
+                opportunities.append({"zone": fvg, "type": "fvg", "weight": weight})
+
+        # Priorité 2: Order Blocks
+        for ob in zones.get("ob", []):
+            weight = self._calculate_zone_weight(current_price, ob)
+            if weight > 50:
+                opportunities.append({"zone": ob, "type": "ob", "weight": weight})
+
+        # Priorité 3: Niveaux de session asiatique
+        for level in ["high", "low", "mid"]:
+            zone = session.get(level)
+            if zone:
+                weight = self._calculate_zone_weight(current_price, zone)
+                if weight > 50:
+                    opportunities.append({"zone": zone, "type": "session", "weight": weight})
+
+        # Trier les opportunités par poids
+        opportunities.sort(key=lambda x: x["weight"], reverse=True)
+
+        # Retourner la meilleure opportunité
+        if opportunities:
+            best = opportunities[0]
+            return self._prepare_trade(pair, current_price, best["zone"], best["type"])
+
         return None
     
-    def _confirm_zone(self, pair, zone, zone_type):
+   def _confirm_zone(self, pair, zone, zone_type):
         try:
             # Récupère les données M5
             params = {"granularity": "M5", "count": 20, "price": "M"}
@@ -1435,52 +1444,22 @@ class LiquidityHunter:
         
             # Conditions de confirmation selon le type de zone
             if zone_type in ['fvg', 'ob']:
-                return (any(p[0] in ['Pin Bar', 'Engulfing'] for p in patterns)) and rsi > 40
+                score = 0
+                if any(p[0] in ['Pin Bar', 'Engulfing'] for p in patterns):
+                    score += 20
+                if rsi > 40:
+                    score += 15
+                volume_data = self._get_volume_data(pair)
+                if volume_data["last"] > volume_data["average"] * 1.5:
+                    score += 10
+                vwap = calculate_vwap(pair)
+                if vwap and abs(current_price - vwap) < atr * 0.5:
+                    score += 15
+                return score >= 50  # Minimum pour confirmation
         
-            else:  # Session levels
-                try:
-                    current_price = get_current_price(pair)
-                    if current_price is None:
-                        return False
-                
-                # Vérification de proximité avec la zone de session
-                    session_range = self.session_ranges.get(pair)
-                    if not session_range:
-                        logger.warning(f"Range de session non disponible pour {pair}")
-                        return False
-                
-                # Définir explicitement les niveaux de la zone de session
-                    high_level = session_range.get('high')
-                    low_level = session_range.get('low')
-                    mid_level = session_range.get('mid')
-
-                    # Initialisation de zone
-                    zone = None
-                
-                # Vérification par rapport aux niveaux de session
-                    if abs(current_price - high_level) < RETEST_ZONE_RANGE:
-                        zone = high_level
-                    elif abs(current_price - low_level) < RETEST_ZONE_RANGE:
-                        zone = low_level
-                    elif abs(current_price - mid_level) < RETEST_ZONE_RANGE:
-                        zone = mid_level
-                    if zone is None:
-                        logger.warning(f"Aucune zone de session valide trouvée pour {pair}")
-                        return False
-                # Maintenant que 'zone' est défini, continuer avec les vérifications
-                    pin_bars = detect_pin_bars(candles, pair)
-                    atr = calculate_atr_for_pair(pair)
-                
-                    return (len(pin_bars) > 0 and 
-                            atr > PAIR_SETTINGS.get(pair, {}).get('min_atr', 0.5) and
-                            abs(current_price - zone) < RETEST_ZONE_RANGE)
-                
-                except Exception as e:
-                    logger.error(f"Erreur confirmation zone session {pair}: {e}")
-                    return False
-    
+            return False
         except Exception as e:
-            logger.error(f"Erreur confirmation zone {pair}: {e}")
+            logger.error(f"Erreur dans _confirm_zone pour {pair}: {str(e)}")
             return False
     
       
@@ -1588,18 +1567,34 @@ class LiquidityHunter:
         except Exception as e:
             logger.error(f"Erreur confiance {pair}: {str(e)}")
             return 0
+
+    def calculate_vwap(pair, timeframe="H1", period=20):
+        """Calcule le VWAP pour une paire donnée."""
+        try:
+            params = {"granularity": timeframe, "count": period * 2, "price": "M"}
+            candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))["candles"]
+            closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
+            volumes = [float(c["volume"]) for c in candles if c["complete"]]
+            if not closes or not volumes:
+                return None
+            vwap = sum(c * v for c, v in zip(closes, volumes)) / sum(volumes)
+            return round(vwap, 5)
+        except Exception as e:
+            logger.error(f"Erreur lors du calcul du VWAP pour {pair}: {e}")
+            return None
+    
     def _get_volume_data(self, pair):
-        """Get last 20 volumes from H1 timeframe"""
+        """Récupère les volumes récents (H1) pour une paire."""
         try:
             params = {"granularity": "H1", "count": 20}
             candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))["candles"]
             volumes = [float(c["volume"]) for c in candles if c["complete"]]
             return {
                 "last": volumes[-1] if volumes else 0,
-                "average": np.mean(volumes) if volumes else 0
+                "average": np.mean(volumes) if volumes else 0,
             }
         except Exception as e:
-            logger.error(f"Volume data error {pair}: {str(e)}")
+            logger.error(f"Erreur lors de la récupération des volumes pour {pair}: {e}")
             return {"last": 0, "average": 0}
 
     def _get_zone_price(self, zone, zone_type):
