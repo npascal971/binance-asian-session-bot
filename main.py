@@ -74,20 +74,19 @@ active_trades = set()
 
 
 class DataCache:
-    def __init__(self, ttl=300):
+    def __init__(self):
         self.cache = {}
-        self.ttl = ttl  # Cache de 5 minutes par défaut
-
+    
     def get(self, key):
         item = self.cache.get(key)
-        if item and (time.time() - item['timestamp']) < self.ttl:
+        if item and (time.time() < item['expiry']):
             return item['data']
         return None
 
-    def set(self, key, data):
+    def set(self, key, data, ttl=60):
         self.cache[key] = {
-            'timestamp': time.time(),
-            'data': data
+            'data': data,
+            'expiry': time.time() + ttl  # Nouveau paramètre TTL
         }
 # Initialisation globale du cache
 cache = DataCache()
@@ -180,11 +179,14 @@ def is_ranging(pair, timeframe="H1", threshold=0.5):
         return False  # Default to False if error occurs
 
 def calculate_bollinger_bands(closes, window=20, num_std=2):
+    if len(closes) < window:  # Vérification cruciale ajoutée
+        logger.warning(f"Données insuffisantes ({len(closes)}/{window})")
+        return (None, None)
+    
     rolling_mean = pd.Series(closes).rolling(window).mean()
     rolling_std = pd.Series(closes).rolling(window).std()
-    upper_band = rolling_mean + (rolling_std * num_std)
-    lower_band = rolling_mean - (rolling_std * num_std)
-    return upper_band.iloc[-1], lower_band.iloc[-1]
+    return (rolling_mean.iloc[-1] + (rolling_std.iloc[-1] * num_std),
+            rolling_mean.iloc[-1] - (rolling_std.iloc[-1] * num_std))
     
 def get_current_price(pair, max_retries=3):
     for attempt in range(max_retries):
