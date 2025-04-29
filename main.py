@@ -795,13 +795,49 @@ def detect_engulfing_patterns(candles):
     return engulfing_patterns
 
 def fetch_candles(pair, timeframe, params):
+    """Version améliorée avec cache intelligent et gestion des erreurs"""
     try:
-        params["granularity"] = timeframe  # injecte le timeframe correctement
+        # Génération d'une clé de cache unique
+        cache_key = f"{pair}|{timeframe}|{hash(frozenset(params.items()))}"
+
+        # 1. Vérification du cache en premier
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            logger.debug(f"Cache hit pour {cache_key}")
+            return [c for c in cached_data if c['complete']]  # Filtrage persistant
+
+        # 2. Appel API si non trouvé en cache
+        params["granularity"] = timeframe
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         response = client.request(r)
-        return response["candles"]
+        
+        # 3. Validation et nettoyage des données
+        candles = response.get("candles", [])
+        valid_candles = []
+        for c in candles:
+            if c['complete'] and all(key in c['mid'] for key in ['o','h','l','c']):
+                valid_candles.append(c)
+        
+        # 4. Mise à jour du cache avec TTL adaptatif
+        cache_ttl = {
+            'M1': 30,   # 30 secondes
+            'M5': 300,   # 5 minutes
+            'H1': 3600,  # 1 heure
+            'DEFAULT': 60
+        }.get(timeframe, 60)
+        
+        cache.set(cache_key, valid_candles, ttl=cache_ttl)
+        logger.info(f"Nouvelles données enregistrées en cache ({len(valid_candles)} bougies)")
+
+        return valid_candles
+
+    except oandapyV20.exceptions.V20Error as e:
+        logger.error(f"Erreur API OANDA ({pair}): {e.code} {e.msg}")
+        # Retourne les dernières données valides si disponibles
+        return cache.get(cache_key, [])[-params.get("count", 100):] if params else []
+    
     except Exception as e:
-        logger.error(f"Erreur fetch_candles pour {pair}: {str(e)}")
+        logger.error(f"Erreur critique fetch_candles: {str(e)}")
         return []
 
 def update_closed_trades():
