@@ -717,7 +717,7 @@ def analyze_htf(pair, params=None):
         params = {"granularity": "H4", "count": 50}
     try:
         params = {"granularity": "H4", "count": 50}
-        candles = fetch_candles(pair, {"granularity": "H4", "count": 50})
+        candles = fetch_candles(pair, "H4", {"granularity": "H4", "count": 50})
         
         fvg_zones = []
         ob_zones = []
