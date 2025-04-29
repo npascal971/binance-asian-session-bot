@@ -202,22 +202,18 @@ def calculate_bollinger_bands(closes, window=20, num_std=2):
         logger.error(f"Erreur Bollinger Bands: {str(e)}")
         return (closes[-1], closes[-1])  # Fallback sécurisé
     
-def get_current_price(pair, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            params = {"granularity": "S5", "count": 1, "price": "M"}
-            r = instruments.InstrumentsCandles(instrument=pair, params=params)
-            response = client.request(r)
-            if not response.get('candles'):
-                raise ValueError("Aucune donnée de prix disponible")
-            candle = response['candles'][0]
-            return float(candle['mid']['c'])  # Return just the close price as float
-        except Exception as e:
-            logger.warning(f"Tentative {attempt + 1} échouée pour {pair}: {str(e)}")
-            if attempt < max_retries - 1:
-                time.sleep(1)
-    logger.error(f"Échec après {max_retries} tentatives pour {pair}")
-    return None
+def get_current_price(pair):
+    """Récupère le prix actuel pour une paire donnée."""
+    try:
+        candles = fetch_candles(pair, "M1", {"count": 1})
+        if candles and candles[-1]['complete']:
+            return float(candles[-1]['mid']['c'])
+        else:
+            logger.warning(f"Pas de données pour {pair}")
+            return None
+    except Exception as e:
+        logger.error(f"Erreur get_current_price pour {pair}: {e}")
+        return None
 
 def calculate_atr(highs, lows, closes, period=14):
     try:
@@ -827,7 +823,7 @@ def detect_engulfing_patterns(candles):
     
     return engulfing_patterns
 
-def fetch_candles(pair, timeframe, params):
+def fetch_candles(pair, timeframe, params=None):
     """Version améliorée avec cache intelligent et gestion des erreurs"""
     try:
         # Génération d'une clé de cache unique
@@ -1574,20 +1570,30 @@ class LiquidityHunter:
             return False
     
     def _is_price_near_zone(self, price, zone, pair):
-        """Méthode interne avec logique avancée"""
-        # 1. Détermine le seuil dynamique
-        atr = calculate_atr_for_pair(pair)
-        base_pips = 15 if "_JPY" in pair else 10
-        dynamic_threshold = min(base_pips, atr * 0.33)  # Max 1/3 de l'ATR
-        
-        # 2. Conversion en valeur absolue
-        pip_value = 0.01 if "_JPY" in pair else 0.0001
-        threshold = dynamic_threshold * pip_value
-        
-        # 3. Vérification de la zone
-        if isinstance(zone, (tuple, list)):
-            return (min(zone) - threshold) <= price <= (max(zone) + threshold)
-        return abs(price - zone) <= threshold
+        """Vérifie si le prix est proche d'une zone."""
+        try:
+            # Vérification du type de zone
+            if isinstance(zone, (tuple, list)):
+                zone_min, zone_max = float(min(zone)), float(max(zone))
+            elif isinstance(zone, dict):
+                zone_min, zone_max = float(zone.get('low')), float(zone.get('high'))
+            else:
+                logger.error(f"Type de zone invalide pour {pair}: {type(zone)}")
+                return False
+
+            # Calcul du seuil dynamique
+            atr = calculate_atr_for_pair(pair)
+            base_pips = 15 if "_JPY" in pair else 10
+            dynamic_threshold = min(base_pips, atr * 0.33)  # Max 1/3 de l'ATR
+            pip_value = 0.01 if "_JPY" in pair else 0.0001
+            threshold = dynamic_threshold * pip_value
+
+            # Vérification de la proximité
+            return (zone_min - threshold) <= price <= (zone_max + threshold)
+
+        except Exception as e:
+            logger.error(f"Erreur _is_price_near_zone pour {pair}: {e}")
+            return False
 
     def _calculate_zone_weight(self, price, zone):
         """Calcule un poids pour une zone en fonction de sa proximité avec le prix."""
