@@ -1465,7 +1465,7 @@ class LiquidityHunter:
         """Analyse approfondie des zones de liquidité HTF"""
         try:
             # Récupération des FVG et Order Blocks
-            fvg_zones, ob_zones = analyze_htf(pair)
+            ob_zones = analyze_htf(pair)
         
             # Récupération des données de volume
             htf_params  = {"granularity": "H4", "count": 100, "price": "M"}
@@ -1483,7 +1483,6 @@ class LiquidityHunter:
         
             # Enregistrement des zones
             self.liquidity_zones[pair] = {
-                'fvg': fvg_zones,
                 'ob': ob_zones,
                 'volume': high_volume_zones,
                 'last_update': datetime.utcnow()
