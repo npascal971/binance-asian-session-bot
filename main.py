@@ -325,7 +325,7 @@ def is_price_approaching(price, zone, pair, threshold_pips=None):
         return False
 
 def dynamic_sl_tp(atr, direction, risk_reward=1.5, min_sl_multiplier=1.8):
-     """Gestion dynamique avec paramètres par paire"""
+    """Gestion dynamique avec paramètres par paire"""
     settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
     
     sl = atr * settings.get("atr_multiplier_sl", 1.5)
