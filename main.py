@@ -1920,14 +1920,8 @@ def check_rsi_divergence(prices, rsi_values, lookback=14, min_trend_strength=0.1
         str: 'bearish', 'bullish' ou None
     """
     
-    try:
-        if not prices or not rsi_values:
-            return None
-            
-        if len(prices) < lookback or len(rsi_values) < lookback:
-            logger.debug("Données insuffisantes pour divergence RSI")
-            return None
-    
+   
+           
     # Validation des données
     if len(prices) < lookback or len(rsi_values) < lookback:
         logger.warning("Données insuffisantes pour détecter une divergence")
