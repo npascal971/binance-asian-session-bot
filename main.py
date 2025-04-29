@@ -689,7 +689,8 @@ def detect_engulfing_patterns(candles):
 def fetch_candles(pair, timeframe, params):
     try:
         # Ajouter le timeframe aux paramètres
-        params["granularity"] = timeframe
+        params = {"granularity": "H4", "count": 50}
+        candles = fetch_candles(pair, "H4", params)
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         response = client.request(r)
         return response["candles"]
