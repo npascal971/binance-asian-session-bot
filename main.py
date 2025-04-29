@@ -29,7 +29,7 @@ SMTP_PORT = 587
 
 client = oandapyV20.API(access_token=OANDA_API_KEY)
 # Ajouter dans les paramètres globaux
-CACHE_TTL = 300  # 5 minutes
+CACHE_TTL = 60  # 5 minutes
 MAX_ZONES = 5
 # Paramètres de trading
 PAIRS = [
@@ -63,7 +63,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-SIMULATION_MODE = False  # Mettre à True pour tester sans exécuter de vrais trades
+SIMULATION_MODE = True  # Mettre à True pour tester sans exécuter de vrais trades
 CONFIRMATION_REQUIRED = {
     "XAU_USD": 2,  # Nombre de confirmations requises pour XAU_USD
     "EUR_USD": 1,  # Nombre de confirmations requises pour EUR_USD
@@ -133,7 +133,7 @@ def confirm_signal(pair, direction):
         bid = float(candles[-1]['bid']['c'])
         spread = ask - bid
         
-        if spread > 0.0003:  # Spread trop élevé
+        if spread > 0.0005:  # Spread trop élevé
             return False
 
         # 2. Volumes récents
@@ -435,13 +435,13 @@ PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois
 
 PAIR_SETTINGS = {
     "XAU_USD": {
-        "min_atr": 0.7,  # Réduit de 0.8
+        "min_atr": 0.5,  # Réduit de 0.8
         "rsi_overbought": 68,  # Ajusté
         "rsi_oversold": 32,
         "pin_bar_ratio": 2.0
     },
     "EUR_USD": {
-        "min_atr": 0.0004,  # Réduit de 0.0005
+        "min_atr": 0.0003,  # Réduit de 0.0005
         "rsi_overbought": 68,
         "rsi_oversold": 32,
         "pin_bar_ratio": 2.5
