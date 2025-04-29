@@ -1542,7 +1542,9 @@ class LiquidityHunter:
                 score += 10
         
             # 5. Alignement de tendance
-            if is_trend_aligned(pair, "buy" if price < zone[0] else "sell"):
+            zone_ref = zone[0] if isinstance(zone, (list, tuple)) else zone
+            direction = "buy" if price < zone_ref else "sell"
+            if is_trend_aligned(pair, direction):
                 score += 15
         
             logger.info(f"Confiance {pair}: {score}% (Zone={zone_type})")
