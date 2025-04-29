@@ -1690,7 +1690,7 @@ def analyze_pair(pair):
     
     # 7. Validation finale
     try:
-        if opportunity['confidence'] < 70:
+        if opportunity['confidence'] < 50:
             logger.info(f"Confiance insuffisante ({opportunity['confidence']}%)")
             return
             
