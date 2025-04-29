@@ -847,22 +847,31 @@ def check_breakout(pair, price, window=5):
 
 
 def analyze_htf(pair, params=None):
-    """Détection précise des Order Blocks"""
+    """Détection précise des Order Blocks avec gestion des paires JPY"""
     try:
         candles = fetch_candles(pair, "H4", {"count": 100})
         ob_zones = []
-        
+        seuil = 0.0008 if "_JPY" not in pair else 0.08  # Ajustement dynamique
+
         for i in range(2, len(candles)):
-            # Bearish OB : forte bougie rouge après mouvement haussier
-            if (float(candles[i-2]['mid']['c']) > float(candles[i-2]['mid']['o'])) and  # 2 bougies haussières
-               (float(candles[i-1]['mid']['c']) > float(candles[i-1]['mid']['o'])) and 
-               (float(candles[i]['mid']['c']) < float(candles[i]['mid']['o'])) and       # Forte bougie baissière
-               (abs(float(candles[i]['mid']['c']) - float(candles[i]['mid']['o'])) > 0.0008):
+            # Vérification complétude des bougies
+            if not all([candles[i-2]['complete'], candles[i-1]['complete'], candles[i]['complete']]):
+                continue
+
+            # Bearish OB : structure + momentum
+            prev_bullish = (float(candles[i-2]['mid']['c']) > float(candles[i-2]['mid']['o'])) 
+            prev_bullish &= (float(candles[i-1]['mid']['c']) > float(candles[i-1]['mid']['o']))
+            
+            current_bearish = (float(candles[i]['mid']['c']) < float(candles[i]['mid']['o']))
+            strong_body = abs(float(candles[i]['mid']['c']) - float(candles[i]['mid']['o'])) > seuil
+
+            if prev_bullish and current_bearish and strong_body:
                 ob_zones.append((
-                    float(candles[i]['mid']['h']),
-                    float(candles[i]['mid']['l'])
+                    round(float(candles[i]['mid']['h']), 5),
+                    round(float(candles[i]['mid']['l']), 5)
                 ))
-        return ob_zones[-3:]  # Garde seulement les 3 derniers OB
+
+        return ob_zones[-3:] if len(ob_zones) >=3 else ob_zones
 
     except Exception as e:
         logger.error(f"Erreur analyse_htf: {str(e)}")
