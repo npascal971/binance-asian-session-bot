@@ -1339,7 +1339,7 @@ class LiquidityHunter:
         
             # Récupération des données de volume
             htf_params  = {"granularity": "H4", "count": 100, "price": "M"}
-            candles = fetch_candles(pair, htf_params)  # Ajout de `params`
+            candles = fetch_candles(pair, "H4", htf_params)  # Ajout de `params`
         
             volumes = [float(c['volume']) for c in candles if c['complete']]
             closes = [float(c['mid']['c']) for c in candles if c['complete']]
