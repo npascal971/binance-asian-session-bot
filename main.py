@@ -856,7 +856,7 @@ def analyze_htf(pair, params=None):
             # Bearish OB : forte bougie rouge après mouvement haussier
             if (float(candles[i-2]['mid']['c']) > float(candles[i-2]['mid']['o']) and  # 2 bougies haussières
                (float(candles[i-1]['mid']['c']) > float(candles[i-1]['mid']['o'])) and 
-               (float(candles[i]['mid']['c']) < float(candles[i]['mid']['o']) and       # Forte bougie baissière
+               (float(candles[i]['mid']['c']) < float(candles[i]['mid']['o'])) and       # Forte bougie baissière
                (abs(float(candles[i]['mid']['c']) - float(candles[i]['mid']['o'])) > 0.0008):
                 ob_zones.append((
                     float(candles[i]['mid']['h']),
