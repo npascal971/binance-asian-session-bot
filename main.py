@@ -1527,6 +1527,10 @@ class LiquidityHunter:
             logger.debug(f"Détails erreur: price={price} | zone={zone} | type={type(zone)}")
             return None
     
+    def is_london_session():
+        now = datetime.utcnow().time()
+        return (6 <= now.hour < 18)  # Session londonienne
+
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         score = 0
         try:
@@ -1534,18 +1538,19 @@ class LiquidityHunter:
             current_atr = calculate_atr_for_pair(pair)
             pair_settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
             required_confidence = 65  # Seuil réduit de 70 à 65
-
+            if is_london_session() and pair in ["EUR_USD","GBP_USD"]:
+                required_confidence = 40  # Seuil plus bas pendant les heures actives
             # 2. Score de base selon le type de zone
             zone_weights = {
-                "fvg": 30,  # Augmenté de 25 à 30
-                "ob": 25,   # Augmenté de 20 à 25
-                "session": 20
+                "fvg": 40,  # Augmenté de 25 à 30
+                "ob": 30,   # Augmenté de 20 à 25
+                "session": 25
             }
             score += zone_weights.get(zone_type, 0)
 
             # 3. Alignement de la tendance (valeur augmentée)
             if is_trend_aligned(pair, direction):
-                score += 30  # Augmenté de 25 à 30
+                score += 25  # Augmenté de 25 à 30
 
             # 4. Volatilité (seuil ajusté)
             if current_atr > pair_settings.get("min_atr", 0.5) * 0.8:  # Seuil réduit
@@ -1567,7 +1572,7 @@ class LiquidityHunter:
             final_score = min(100, score)
         
             logger.info(f"Confiance totale {pair}: {final_score}%")
-            return final_score if final_score >= required_confidence else 0
+            return final_score
 
         except Exception as e:
             logger.error(f"Erreur confiance {pair}: {str(e)}")
