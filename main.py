@@ -686,7 +686,7 @@ def detect_engulfing_patterns(candles):
     
     return engulfing_patterns
 
-def fetch_candles(pair, params):
+def fetch_candles(pair, timeframe, params):
     """Récupère les bougies avec gestion du cache"""
     cache_key = f"{pair}_{params['granularity']}_{params['count']}"
     cached = cache.get(cache_key)
