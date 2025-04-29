@@ -1737,7 +1737,7 @@ class LiquidityHunter:
 
             # Cassure haussière
             if price > max(highs[:-1]):
-            return "bullish_breakout"
+                return "bullish_breakout"
             # Cassure baissière
             elif price < min(lows[:-1]):
                 return "bearish_breakout"
