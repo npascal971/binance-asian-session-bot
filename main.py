@@ -851,14 +851,13 @@ def analyze_htf(pair, params=None):
     try:
         candles = fetch_candles(pair, "H4", {"count": 100})
         ob_zones = []
-        seuil = 0.0008 if "_JPY" not in pair else 0.08  # Ajustement dynamique
+        seuil = 0.0008 if "_JPY" not in pair else 0.08
 
         for i in range(2, len(candles)):
-            # Vérification complétude des bougies
-            if not all([candles[i-2]['complete'], candles[i-1]['complete'], candles[i]['complete']]):
+            if not all([candles[j]['complete'] for j in [i-2, i-1, i]]):
                 continue
 
-            # Bearish OB : structure + momentum
+            # Logique de détection OB
             prev_bullish = (float(candles[i-2]['mid']['c']) > float(candles[i-2]['mid']['o'])) 
             prev_bullish &= (float(candles[i-1]['mid']['c']) > float(candles[i-1]['mid']['o']))
             
@@ -871,11 +870,11 @@ def analyze_htf(pair, params=None):
                     round(float(candles[i]['mid']['l']), 5)
                 ))
 
-        return ob_zones[-3:] if len(ob_zones) >=3 else ob_zones
+        return ob_zones[-3:]  # Retourne uniquement les OB
 
     except Exception as e:
         logger.error(f"Erreur analyse_htf: {str(e)}")
-        return []
+        return []  # Retourne une liste vide au lieu de None
 
 def detect_ltf_patterns(candles, pairs):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
