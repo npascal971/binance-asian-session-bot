@@ -1517,55 +1517,39 @@ class LiquidityHunter:
             return None
     
     
-    def _calculate_confidence(self, pair, price, zone_type, zone, direction):
-        score = 0
+    def _calculate_confidence(self, pair, price, zone_type, zone):
         try:
-            # 1. Configuration essentielle
-            current_atr = calculate_atr_for_pair(pair)
-            pair_settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
-            required_confidence = 65  # Seuil réduit de 70 à 65
-            if self._is_london_session() and pair in ["EUR_USD","GBP_USD"]:
-                required_confidence = 40  # Seuil plus bas pendant les heures actives
-            elif self._is_new_york_session() and pair in ["USD_CAD","XAU_USD"]:  # <-- Et ici
-                required_confidence = 35
-            else:
-                required_confidence = 45
-            # 2. Score de base selon le type de zone
-            zone_weights = {
-                "fvg": 40,  # Augmenté de 25 à 30
-                "ob": 30,   # Augmenté de 20 à 25
-                "session": 25
-            }
-            score += zone_weights.get(zone_type, 0)
-
-            # 3. Alignement de la tendance (valeur augmentée)
-            if is_trend_aligned(pair, direction):
-                score += 25  # Augmenté de 25 à 30
-
-            # 4. Volatilité (seuil ajusté)
-            if current_atr > pair_settings.get("min_atr", 0.5) * 0.8:  # Seuil réduit
-                score += 25  # Augmenté de 20 à 25
-
-            # 5. Momentum additionnel (nouveau facteur)
-            rsi_conditions = check_rsi_conditions(pair)
-            if direction == "buy" and rsi_conditions["m15"] < 40:
-                score += 15
-            elif direction == "sell" and rsi_conditions["m15"] > 60:
-                score += 15
-
-            # 6. Gestion du volume (seuil assoupli)
-            volume_data = self._get_volume_data(pair)
-            if volume_data["last"] > volume_data["average"] * 1.1:  # Seuil réduit
-                score += 15
-
-            # 7. Validation finale
-            final_score = min(100, score)
+            score = 0
+            atr = calculate_atr_for_pair(pair)
+            candles = fetch_candles(pair, "M5", 20)
         
-            logger.info(f"Confiance totale {pair}: {final_score}%")
-            return final_score
-
+            # 1. Proximité de la zone
+            if self._is_price_near_zone(price, zone, pair):
+                score += 20
+        
+            # 2. Patterns de prix
+            pin_bars = detect_pin_bars(candles, pair)
+            if any(p['ratio'] > 2 for p in pin_bars):
+                score += 15
+        
+            # 3. Momentum (RSI)
+            rsi = calculate_rsi([float(c['mid']['c']) for c in candles if c['complete']])
+            if zone_type == "fvg" and rsi > 60:
+                score += 10
+        
+            # 4. Volume
+            volume_data = self._get_volume_data(pair)
+            if volume_data["last"] > volume_data["average"] * 1.5:
+                score += 10
+        
+            # 5. Alignement de tendance
+            if is_trend_aligned(pair, "buy" if price < zone[0] else "sell"):
+                score += 15
+        
+            logger.info(f"Confiance {pair}: {score}% (Zone={zone_type})")
+            return min(100, score)
         except Exception as e:
-            logger.error(f"Erreur confiance {pair}: {str(e)}")
+            logger.error(f"Erreur calcul confiance {pair}: {str(e)}")
             return 0
 
     def calculate_vwap(pair, timeframe="H1", period=20):
