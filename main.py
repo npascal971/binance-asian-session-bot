@@ -2018,13 +2018,14 @@ def analyze_pair(pair):
             logger.warning(f"Données insuffisantes pour {pair} ({len(CLOSES_HISTORY[pair])} bougies)")
             return
 
-        # Utilisation dans check_rsi_divergence
-        divergence = check_rsi_divergence(
-            prices=CLOSES_HISTORY[pair], 
-            rsi_values=[calculate_rsi(CLOSES_HISTORY[pair][-14:])],
-            lookback=50
-        )
-    
+        # Calcul des indicateurs
+        rsi_values = [calculate_rsi(closes[-14:]) for closes in CLOSES_HISTORY[pair]]
+        divergence = check_rsi_divergence(CLOSES_HISTORY[pair], rsi_values)
+
+    except Exception as e:
+        logger.error(f"Erreur initialisation données {pair}: {str(e)}")
+        return
+
     # 1. Vérifiez les prix
     price = get_current_price(pair)
     if price is None:
@@ -2040,10 +2041,15 @@ def analyze_pair(pair):
     logger.info(f"Tendance H1 alignée BUY: {is_trend_aligned(pair, 'buy')}")
     logger.info(f"Tendance H1 alignée SELL: {is_trend_aligned(pair, 'sell')}")    
     
+    # 4. Vérification divergence
+    if divergence == 'bearish':
+        logger.warning("Divergence baissière détectée - annulation signal")
+        return
+    
     hunter = LiquidityHunter()
     
     try:
-        # 4. Récupération des données brutes
+        # 5. Récupération des données brutes
         r = instruments.InstrumentsCandles(
             instrument=pair,
             params={"granularity": "H1", "count": 50}
@@ -2064,7 +2070,7 @@ def analyze_pair(pair):
         logger.exception(e)
         return
 
-    # 5. Mise à jour des données de base
+    # 6. Mise à jour des données de base
     if not hunter.update_asian_range(pair):
         logger.warning(f"Échec mise à jour range asiatique pour {pair}")
         return
@@ -2073,7 +2079,7 @@ def analyze_pair(pair):
         logger.warning(f"Échec analyse liquidité HTF pour {pair}")
         return
     
-    # 6. Recherche d'opportunités
+    # 7. Recherche d'opportunités
     try:
         opportunity = hunter.find_best_opportunity(pair)
     except KeyError as ke:
@@ -2087,30 +2093,23 @@ def analyze_pair(pair):
         logger.info(f"Aucune opportunité trouvée pour {pair}")
         return
 
-    rsi_values = [calculate_rsi(closes[-14:]) for closes in closes_history]
-    divergence = check_rsi_divergence(closes, rsi_values)
-    
-    if divergence == 'bearish' and signal['direction'] == 'buy':
-        logger.warning("Divergence baissière détectée - annulation signal")
-        return
-    # Vérification ADX dans la validation finale
-    if not validate_signal(pair, signal):
-        return
-    
-    # Vérification volume lors de la confirmation
-    current_volume = get_current_volume(pair)
-    if current_volume < get_average_volume(pair):
-        logger.warning("Volume actuel inférieur à la moyenne")
-        return
-    # 7. Validation finale
+    # 8. Validation finale
     try:
         if opportunity['confidence'] < 50:
             logger.info(f"Confiance insuffisante ({opportunity['confidence']}%)")
             return
+            
         if not validate_signal(pair, opportunity):
             logger.info(f"Validation finale échouée pour {pair}")
-            return    
-        # 8. Envoi d'alerte
+            return
+
+        # Vérification volume
+        current_volume = get_current_volume(pair)
+        if current_volume < get_average_volume(pair):
+            logger.warning("Volume actuel inférieur à la moyenne")
+            return
+    
+        # 9. Envoi d'alerte
         send_trade_alert(
             pair=opportunity['pair'],
             direction=opportunity['direction'],
@@ -2125,9 +2124,7 @@ def analyze_pair(pair):
             ]
         )
         logger.info(f"✅ Signal envoyé pour {pair} ({opportunity['direction'].upper()}) à {opportunity['entry']:.5f}")
-        
-    except KeyError as ke:
-        logger.error(f"Clé manquante dans l'opportunité: {ke}")
+
     except Exception as e:
         logger.error(f"Erreur lors de l'envoi de l'alerte: {e}")
 # ... (le reste du code main reste similaire mais utilise la nouvelle analyse_pair)
