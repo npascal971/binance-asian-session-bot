@@ -1727,6 +1727,25 @@ class LiquidityHunter:
             logger.error(f"Zone price error ({zone_type}): {str(e)}")
             return None
 
+    def check_breakout(pair, price, window=3):
+        """Vérifie une cassure récente sur un timeframe réduit"""
+        try:
+            params = {"granularity": "M15", "count": window}
+            candles = fetch_candles(pair, params)
+            highs = [float(c['mid']['h']) for c in candles]
+            lows = [float(c['mid']['l']) for c in candles]
+
+            # Cassure haussière
+            if price > max(highs[:-1]):
+            return "bullish_breakout"
+            # Cassure baissière
+            elif price < min(lows[:-1]):
+                return "bearish_breakout"
+            return None
+        
+        except Exception as e:
+            logger.error(f"Erreur check_breakout: {str(e)}")
+            return None
 
 
 def analyze_pair(pair):
@@ -1876,25 +1895,7 @@ if __name__ == "__main__":
             logger.info("🛑 Session inactive. Prochaine vérification dans 5 minutes...")
             time.sleep(300)
 
-def check_breakout(pair, price, window=3):
-    """Vérifie une cassure récente sur un timeframe réduit"""
-    try:
-        params = {"granularity": "M15", "count": window}
-        candles = fetch_candles(pair, params)
-        highs = [float(c['mid']['h']) for c in candles]
-        lows = [float(c['mid']['l']) for c in candles]
 
-        # Cassure haussière
-        if price > max(highs[:-1]):
-            return "bullish_breakout"
-        # Cassure baissière
-        elif price < min(lows[:-1]):
-            return "bearish_breakout"
-        return None
-        
-    except Exception as e:
-        logger.error(f"Erreur check_breakout: {str(e)}")
-        return None
 def manage_open_trade(pair):
     """Gère les trades ouverts avec trailing stop et prise de profits partiels"""
     try:
