@@ -1519,7 +1519,8 @@ class LiquidityHunter:
         try:
             score = 0
             atr = calculate_atr_for_pair(pair)
-            candles = fetch_candles(pair, "M5", 20)
+            candles = fetch_candles(pair, "M5", {"granularity": "M5", "count": 20})
+
         
             # 1. Proximité de la zone
             if self._is_price_near_zone(price, zone, pair):
