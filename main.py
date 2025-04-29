@@ -144,7 +144,7 @@ def confirm_signal(pair, direction):
 
         # 3. Alignment price/zone
         price = get_current_price(pair)
-        zones = analyze_htf(pair)
+        zones = analyze_htf(pair, params)
         return any(abs(price - z[0]) < 0.0002 for z in zones)
 
     except Exception as e:
@@ -1332,7 +1332,7 @@ class LiquidityHunter:
         """Analyse approfondie des zones de liquidité HTF"""
         try:
             # Récupération des FVG et Order Blocks
-            fvg_zones, ob_zones = analyze_htf(pair)
+            fvg_zones, ob_zones = analyze_htf(pair, params)
         
             # Récupération des données de volume
             params = {"granularity": "H4", "count": 100, "price": "M"}
