@@ -260,30 +260,35 @@ def send_email(subject, body):
         logger.error(f"Erreur lors de l'envoi de l'e-mail: {e}")
 # Remplacer is_trend_aligned() par :
 def is_trend_aligned(pair, direction):
+    alignments = 0
     try:
-        timeframes = ['M1', 'M5', 'M15']
-        alignment = 0
-        
-        for tf in timeframes:
-            candles = cache.get(pair, f"TREND_{tf}") or fetch_candles(pair, {"granularity": tf, "count": 50})
-            closes = [float(c['mid']['c']) for c in candles]
-            
-            # Lissage triple EMA
-            ema1 = pd.Series(closes).ewm(span=9).mean()
-            ema2 = ema1.ewm(span=13).mean()
-            ema3 = ema2.ewm(span=21).mean()
-            
-            current_slope = (ema3.iloc[-1] - ema3.iloc[-5]) / 5
-            
-            if direction == 'buy' and current_slope > 0:
-                alignment += 1
-            elif direction == 'sell' and current_slope < 0:
-                alignment += 1
+        for tf in ['M1', 'M5']:
+            closes = get_closes(pair, tf, 20)
+            if len(closes) < 15:
+                continue
                 
-        return alignment >= 2  # Alignement sur 2/3 TF
+            fast_span = 9 if "_JPY" not in pair else 5
+            slow_span = 21 if "_JPY" not in pair else 13
+            
+            ema_fast = pd.Series(closes).ewm(span=fast_span).mean()
+            ema_slow = pd.Series(closes).ewm(span=slow_span).mean()
+            
+            # Vérification pente + croisement
+            slope = ema_fast.iloc[-1] - ema_fast.iloc[-5]
+            condition = (
+                (ema_fast.iloc[-1] > ema_slow.iloc[-1]) & (slope > 0)
+                if direction == "buy" else 
+                (ema_fast.iloc[-1] < ema_slow.iloc[-1]) & (slope < 0)
+            )
+            
+            if condition:
+                alignments += 1
+                logger.debug(f"Alignement {direction} confirmé sur {tf}")
+                
+        return alignments >= 1  # Au moins 1 TF aligné
         
     except Exception as e:
-        logger.error(f"Trend Alignment Error: {str(e)}")
+        logger.error(f"Erreur tendance {pair}: {str(e)}")
         return False
 
 def is_price_approaching(price, zone, pair, threshold_pips=None):
@@ -341,7 +346,7 @@ def get_closes(pair, timeframe, count):
 
 def is_trend_aligned(pair, direction):
     ema_values = []
-    for tf in ['H1', 'H4']:
+    for tf in ['M1', 'M5']:
         closes = get_closes(pair, tf, 50)
         if len(closes) < 50: continue
         
@@ -468,7 +473,7 @@ PAIR_SETTINGS = {
         "volume_multiplier": 1.5  # Nécessite 50% plus de volume que la moyenne
     },    
     "XAG_USD": {  # Silver
-        "min_atr": 0.3,  # Augmenté de 0.1 → 0.3 (3$ de volatilité)
+        "min_atr": 0.1,  # Augmenté de 0.1 → 0.3 (3$ de volatilité)
         "rsi_overbought": 72,  # Rehaussé de 68 à 72
         "rsi_oversold": 28,    # Baissé de 32 à 28
         "pin_bar_ratio": 3.0,  # Plus strict (2.0 → 3.0)
@@ -524,7 +529,7 @@ def detect_pin_bars(candles, pair=None):
 def validate_signal(pair, signal):
     # Nouvelle vérification ajoutée
     weekly_atr = calculate_atr_for_pair(pair, "D", 14)
-    if signal['atr'] < weekly_atr * 0.3:  # Volatilité actuelle < 30% de la volatilité hebdo
+    if signal['atr'] < weekly_atr * 0.15:  # Volatilité actuelle < 30% de la volatilité hebdo
         logger.warning(f"Volatilité actuelle trop faible pour {pair}")
         return False
     breakout_type = check_breakout(pair, signal['entry'])
