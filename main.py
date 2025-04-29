@@ -276,7 +276,7 @@ def send_email(subject, body):
 def is_trend_aligned(pair, direction):
     alignments = 0
     try:
-        for tf in ['M1', 'M5']:
+        for tf in ['H1', 'M5']:
             closes = get_closes(pair, tf, 20)
             if len(closes) < 15:
                 continue
@@ -360,7 +360,7 @@ def get_closes(pair, timeframe, count):
 
 def is_trend_aligned(pair, direction):
     ema_values = []
-    for tf in ['M1', 'M5']:
+    for tf in ['H1', 'M5']:
         closes = get_closes(pair, tf, 50)
         if len(closes) < 50: continue
         
@@ -501,6 +501,12 @@ def detect_pin_bars(candles, pair=None):
     settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
     pin_bars = []
     for candle in candles:
+        volume = float(candle['volume'])
+        avg_volume = np.mean([float(c['volume']) for c in candles[-20:]])
+        
+        # Rejet des pin bars à faible volume
+        if volume < avg_volume * 0.7:
+            continue
         try:
             if not candle['complete']:
                 continue
@@ -563,6 +569,17 @@ def validate_signal(pair, signal):
         if signal['atr'] < settings["min_atr"] * 1.2:
             logger.info(f"ATR trop faible pour {pair} ({signal['atr']})")
             return False
+    # Calcul de l'ADX
+    highs = [float(c['mid']['h']) for c in candles]
+    lows = [float(c['mid']['l']) for c in candles]
+    closes = [float(c['mid']['c']) for c in candles]
+    adx = calculate_adx(highs, lows, closes)
+    
+    # Seuil ADX dynamique selon le type d'instrument
+    min_adx = 20 if pair in CRYPTO_PAIRS else 25
+    if adx < min_adx:
+        logger.warning(f"Tendance trop faible (ADX={adx:.1f} < {min_adx})")
+        return False
 
     return True
 
@@ -1879,6 +1896,93 @@ class LiquidityHunter:
             logger.error(f"Erreur check_breakout: {str(e)}")
             return None
 
+def check_rsi_divergence(prices, rsi_values, lookback=14, min_trend_strength=0.1, min_rsi=30, max_rsi=70):
+    """
+    Détecte les divergences RSI avec validation de la tendance et filtrage avancé.
+    
+    Args:
+        prices (list): Liste des prix de clôture (plus récents en dernier)
+        rsi_values (list): Liste des valeurs RSI correspondantes
+        lookback (int): Période d'analyse (nombre de bougies)
+        min_trend_strength (float): Pente minimale pour considérer une tendance
+        min_rsi (int): Filtre les divergences en zone neutre
+        max_rsi (int): Filtre les divergences en zone neutre
+    
+    Returns:
+        str: 'bearish', 'bullish' ou None
+    """
+    
+    # Validation des données
+    if len(prices) < lookback or len(rsi_values) < lookback:
+        logger.warning("Données insuffisantes pour détecter une divergence")
+        return None
+    
+    # Extraction des données récentes
+    prices = prices[-lookback:]
+    rsi = rsi_values[-lookback:]
+    
+    # Calcul de la pente des prix
+    price_trend = np.polyfit(range(len(prices)), prices, 1)[0]
+    rsi_trend = np.polyfit(range(len(rsi)), rsi, 1)[0]
+    
+    # Détection des pics/creux avec gestion des plateaux
+    def find_extremes(data, window=3, mode='high'):
+        extremes = []
+        for i in range(window, len(data)-window):
+            if mode == 'high':
+                if data[i] == max(data[i-window:i+window+1]):
+                    extremes.append(i)
+            else:
+                if data[i] == min(data[i-window:i+window+1]):
+                    extremes.append(i)
+        return extremes
+    
+    # Détection des pics (highs) et creux (lows)
+    price_highs = find_extremes(prices, mode='high')
+    price_lows = find_extremes(prices, mode='low')
+    rsi_highs = find_extremes(rsi, mode='high')
+    rsi_lows = find_extremes(rsi, mode='low')
+    
+    # Vérification du nombre de points nécessaires
+    if len(price_highs) < 2 or len(rsi_highs) < 2 or len(price_lows) < 2 or len(rsi_lows) < 2:
+        return None
+    
+    # Derniers points significatifs
+    last_price_high = prices[price_highs[-1]]
+    prev_price_high = prices[price_highs[-2]]
+    last_rsi_high = rsi[rsi_highs[-1]]
+    prev_rsi_high = rsi[rsi_highs[-2]]
+    
+    last_price_low = prices[price_lows[-1]]
+    prev_price_low = prices[price_lows[-2]]
+    last_rsi_low = rsi[rsi_lows[-1]]
+    prev_rsi_low = rsi[rsi_lows[-2]]
+    
+    # Divergence baissière
+    bearish_conditions = [
+        last_price_high > prev_price_high,  # Prix fait un plus haut
+        last_rsi_high < prev_rsi_high,      # RSI fait un plus bas
+        abs(price_trend) > min_trend_strength,  # Tendance significative
+        last_rsi_high > max_rsi,            # Zone de sur-achat
+        rsi[-1] < prev_rsi_high             # Confirmation momentum baissier
+    ]
+    
+    # Divergence haussière
+    bullish_conditions = [
+        last_price_low < prev_price_low,    # Prix fait un plus bas
+        last_rsi_low > prev_rsi_low,        # RSI fait un plus haut
+        abs(price_trend) > min_trend_strength,  # Tendance significative
+        last_rsi_low < min_rsi,             # Zone de sur-vente
+        rsi[-1] > prev_rsi_low              # Confirmation momentum haussier
+    ]
+    
+    # Validation des conditions
+    if all(bearish_conditions):
+        return 'bearish'
+    elif all(bullish_conditions):
+        return 'bullish'
+    
+    return None
 
 def analyze_pair(pair):
     """Nouvelle version focalisée sur les liquidités"""
@@ -1945,7 +2049,22 @@ def analyze_pair(pair):
     if not opportunity:
         logger.info(f"Aucune opportunité trouvée pour {pair}")
         return
+
+    rsi_values = [calculate_rsi(closes[-14:]) for closes in closes_history]
+    divergence = check_rsi_divergence(closes, rsi_values)
     
+    if divergence == 'bearish' and signal['direction'] == 'buy':
+        logger.warning("Divergence baissière détectée - annulation signal")
+        return
+    # Vérification ADX dans la validation finale
+    if not validate_signal(pair, signal):
+        return
+    
+    # Vérification volume lors de la confirmation
+    current_volume = get_current_volume(pair)
+    if current_volume < get_average_volume(pair):
+        logger.warning("Volume actuel inférieur à la moyenne")
+        return
     # 7. Validation finale
     try:
         if opportunity['confidence'] < 50:
