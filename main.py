@@ -1517,7 +1517,7 @@ class LiquidityHunter:
             return None
     
     
-    def _calculate_confidence(self, pair, price, zone_type, zone):
+    def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         try:
             score = 0
             atr = calculate_atr_for_pair(pair)
