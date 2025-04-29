@@ -1548,6 +1548,8 @@ class LiquidityHunter:
                 score += 15
         
             logger.info(f"Confiance {pair}: {score}% (Zone={zone_type})")
+            logger.info(f"{pair} - zone: {zone}, RSI: {rsi}, volume: {volume_data}, pin_bars: {len(pin_bars)}")
+
             return min(100, score)
         except Exception as e:
             logger.error(f"Erreur calcul confiance {pair}: {str(e)}")
