@@ -1287,6 +1287,16 @@ class LiquidityHunter:
             "DEFAULT": 0.0001
         }
 
+    def _is_london_session(self):
+        """Vérifie si c'est la session londonienne (8h-17h CET)"""
+        now = datetime.utcnow()
+        return (6 <= now.hour < 15)  # 8h-17h CET en UTC
+
+    def _is_new_york_session(self):
+        """Vérifie si c'est la session new-yorkaise (13h-22h CET)"""
+        now = datetime.utcnow()
+        return (12 <= now.hour < 21)
+
     def get_pip_value(self, pair):
         """Retourne la valeur d'un pip pour la paire"""
         return self.pip_values.get(pair, self.pip_values["DEFAULT"])
@@ -1527,10 +1537,7 @@ class LiquidityHunter:
             logger.debug(f"Détails erreur: price={price} | zone={zone} | type={type(zone)}")
             return None
     
-    def is_london_session():
-        now = datetime.utcnow().time()
-        return (6 <= now.hour < 18)  # Session londonienne
-
+    
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         score = 0
         try:
