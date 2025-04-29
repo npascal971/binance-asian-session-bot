@@ -688,15 +688,14 @@ def detect_engulfing_patterns(candles):
 
 def fetch_candles(pair, timeframe, params):
     try:
-        # Ajouter le timeframe aux paramètres
-        params = {"granularity": "H4", "count": 50}
-        candles = fetch_candles(pair, "H4", params)
+        params["granularity"] = timeframe  # injecte le timeframe correctement
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         response = client.request(r)
         return response["candles"]
     except Exception as e:
         logger.error(f"Erreur fetch_candles pour {pair}: {str(e)}")
         return []
+
 def update_closed_trades():
     try:
         r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
