@@ -179,14 +179,26 @@ def is_ranging(pair, timeframe="H1", threshold=0.5):
         return False  # Default to False if error occurs
 
 def calculate_bollinger_bands(closes, window=20, num_std=2):
-    if len(closes) < window:  # Vérification cruciale ajoutée
-        logger.warning(f"Données insuffisantes ({len(closes)}/{window})")
-        return (None, None)
-    
-    rolling_mean = pd.Series(closes).rolling(window).mean()
-    rolling_std = pd.Series(closes).rolling(window).std()
-    return (rolling_mean.iloc[-1] + (rolling_std.iloc[-1] * num_std),
-            rolling_mean.iloc[-1] - (rolling_std.iloc[-1] * num_std))
+    """Version sécurisée avec gestion des None"""
+    try:
+        if len(closes) < window or None in closes:
+            logger.warning(f"Données invalides pour BB: {len(closes)}/{window} ou valeurs None")
+            return (closes[-1] if closes else 0, closes[-1] if closes else 0)  # Retourne le dernier prix
+        
+        series = pd.Series(closes).dropna()
+        if series.empty:
+            return (0, 0)
+            
+        rolling_mean = series.rolling(window).mean()
+        rolling_std = series.rolling(window).std()
+        
+        return (
+            rolling_mean.iloc[-1] + (rolling_std.iloc[-1] * num_std),
+            rolling_mean.iloc[-1] - (rolling_std.iloc[-1] * num_std)
+        )
+    except Exception as e:
+        logger.error(f"Erreur Bollinger Bands: {str(e)}")
+        return (closes[-1], closes[-1])  # Fallback sécurisé
     
 def get_current_price(pair, max_retries=3):
     for attempt in range(max_retries):
@@ -1699,74 +1711,110 @@ class LiquidityHunter:
    
 
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
-        try:
-            score = 0
-            atr = calculate_atr_for_pair(pair)
+    try:
+        score = 0
+        atr = calculate_atr_for_pair(pair)
 
-            candles = fetch_candles(pair, "M5", {"granularity": "M5", "count": 20})
-            closes = [float(c['mid']['c']) for c in candles if c['complete']]
-            bb_upper, bb_lower = calculate_bollinger_bands(closes)
-            bb_percentage = (price - bb_lower) / (bb_upper - bb_lower)
-
-            if bb_percentage > 0.8:  # Prix proche de la bande supérieure
-                score -= 25  #Pénalité importante
-            elif bb_percentage < 0.2:  # Prix proche de la bande inférieure
-                score += 20  # Bonus
-            # 1. Proximité de la zone
-            is_near = self._is_price_near_zone(price, zone, pair)
-            if is_near:
-                score += 20
-
-            # 2. Patterns de prix (Pin Bars)
-            pin_bars = detect_pin_bars(candles, pair)
-            if len(pin_bars) >= 1:
-                score += 10
-                if any(p['ratio'] > 2 for p in pin_bars):
-                    score += 5  # bonus
-
-            # 3. Momentum (RSI)
-            rsi = calculate_rsi(closes)
-            if zone_type == "fvg" and rsi > 55:
-                score += 10
-            elif zone_type == "ob" and 45 < rsi < 55:
-                score += 5  # zone d'équilibre intéressante
-
-            # 4. Volume
-            volume_data = self._get_volume_data(pair)
-            if volume_data["last"] > volume_data["average"] * 1.2:
-                score += 15
-            elif volume_data["last"] > volume_data["average"]:
-                score += 5
-
-            # Bonus si RSI et volume élevés
-            if rsi > 70 and volume_data["last"] > volume_data["average"]:
-                score += 10
-
-            # 5. Alignement de tendance
-            zone_ref = zone[0] if isinstance(zone, (list, tuple)) else zone
-            direction = "buy" if price < zone_ref else "sell"
-            if is_trend_aligned(pair, direction):
-                score += 20
-
-            # Logging détaillé
-            logger.info(f"Confiance {pair}: {score}% (Zone={zone_type})")
-            logger.info(f"{pair} - zone: {zone}, RSI: {rsi}, volume: {volume_data}, pin_bars: {len(pin_bars)}")
-
-            logger.info(f"{pair} - Score décomposé → "
-                        f"Proximité: {20 if is_near else 0}, "
-                        f"PinBars: {10 if len(pin_bars) >= 1 else 0} + {5 if any(p['ratio'] > 2 for p in pin_bars) else 0}, "
-                        f"RSI: {10 if zone_type == 'fvg' and rsi > 55 else 5 if zone_type == 'ob' and 45 < rsi < 55 else 0}, "
-                        f"Volume: {15 if volume_data['last'] > volume_data['average'] * 1.2 else 5 if volume_data['last'] > volume_data['average'] else 0}, "
-                        f"Bonus RSI+Vol: {10 if rsi > 70 and volume_data['last'] > volume_data['average'] else 0}, "
-                        f"Tendance: {20 if is_trend_aligned(pair, direction) else 0}"
-            )
-
-            return min(100, score)
-        except Exception as e:
-            logger.error(f"Erreur calcul confiance {pair}: {str(e)}")
+        # 1. Validation des données de base
+        candles = fetch_candles(pair, "M5", {"granularity": "M5", "count": 20})
+        if not candles:
+            logger.warning(f"Aucune bougie disponible pour {pair}")
             return 0
 
+        # 2. Calcul sécurisé des closes
+        closes = []
+        for c in candles:
+            if c['complete'] and 'mid' in c and 'c' in c['mid']:
+                try:
+                    closes.append(float(c['mid']['c']))
+                except (ValueError, TypeError):
+                    continue
 
+        # 3. Calcul Bollinger Bands protégé
+        bb_upper, bb_lower = calculate_bollinger_bands(closes)
+        bb_percentage = 0.5  # Valeur neutre par défaut
+        
+        if bb_upper is not None and bb_lower is not None and bb_upper != bb_lower:
+            try:
+                bb_percentage = (price - bb_lower) / (bb_upper - bb_lower)
+            except ZeroDivisionError:
+                logger.warning("Bollinger Bands collapse (division par zéro)")
+
+        # 4. Logique de score révisée
+        if bb_percentage > 0.8:
+            score -= 25
+        elif bb_percentage < 0.2:
+            score += 20
+
+        # 5. Vérification de proximité
+        is_near = False
+        try:
+            is_near = self._is_price_near_zone(price, zone, pair)
+        except Exception as e:
+            logger.error(f"Erreur vérification proximité: {str(e)}")
+        
+        if is_near:
+            score += 20
+
+        # 6. Détection Pin Bars sécurisée
+        pin_bars = []
+        try:
+            pin_bars = detect_pin_bars(candles, pair) or []
+        except Exception as e:
+            logger.error(f"Erreur détection Pin Bars: {str(e)}")
+
+        if len(pin_bars) >= 1:
+            score += 10
+            if any(p.get('ratio', 0) > 2 for p in pin_bars):
+                score += 5
+
+        # 7. Calcul RSI protégé
+        rsi = 50  # Valeur neutre
+        try:
+            if len(closes) >= 14:  # Minimum pour RSI
+                rsi = calculate_rsi(closes[-14:])
+        except Exception as e:
+            logger.error(f"Erreur calcul RSI: {str(e)}")
+
+        # 8. Logique RSI révisée
+        if zone_type == "fvg" and rsi > 55:
+            score += 10
+        elif zone_type == "ob" and 45 < rsi < 55:
+            score += 5
+
+        # 9. Gestion volume sécurisée
+        volume_data = {"last": 0, "average": 1}  # Valeurs par défaut
+        try:
+            volume_data = self._get_volume_data(pair) or volume_data
+        except Exception as e:
+            logger.error(f"Erreur données volume: {str(e)}")
+
+        try:
+            if volume_data["last"] > volume_data.get("average", 1) * 1.2:
+                score += 15
+            elif volume_data["last"] > volume_data.get("average", 1):
+                score += 5
+        except KeyError:
+            logger.warning("Clés manquantes dans volume_data")
+
+        # 10. Vérification finale tendance
+        try:
+            zone_ref = zone[0] if isinstance(zone, (list, tuple)) and len(zone) > 0 else price
+            current_direction = "buy" if price < zone_ref else "sell"
+            if is_trend_aligned(pair, current_direction):
+                score += 20
+        except (IndexError, TypeError) as e:
+            logger.error(f"Erreur détermination direction: {str(e)}")
+
+        # 11. Limites et logging
+        final_score = max(0, min(100, score))
+        logger.debug(f"Confiance finale {pair}: {final_score}%")
+        
+        return final_score
+
+    except Exception as e:
+        logger.error(f"ERREUR CRITIQUE confiance {pair}: {str(e)}", exc_info=True)
+        return 0
     def calculate_vwap(pair, timeframe="H1", period=20):
         """Calcule le VWAP pour une paire donnée."""
         try:
