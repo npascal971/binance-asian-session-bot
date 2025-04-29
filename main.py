@@ -711,8 +711,10 @@ def update_closed_trades():
     except Exception as e:
         logger.error(f"Erreur lors de la mise à jour des trades fermés: {e}")
 
-def analyze_htf(pair, params):
+def analyze_htf(pair, params=None):
     """Version corrigée avec gestion des FVG et OB"""
+    if params is None:
+        params = {"granularity": "H4", "count": 50}
     try:
         params = {"granularity": "H4", "count": 50}
         candles = fetch_candles(pair, {"granularity": "H4", "count": 50})
