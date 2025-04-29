@@ -523,7 +523,7 @@ def detect_pin_bars(candles, pair=None):
 
 def validate_signal(pair, signal):
     # Nouvelle vérification ajoutée
-    weekly_atr = calculate_atr_for_pair(pair)
+    weekly_atr = calculate_atr_for_pair(pair, "D", 14)
     if signal['atr'] < weekly_atr * 0.3:  # Volatilité actuelle < 30% de la volatilité hebdo
         logger.warning(f"Volatilité actuelle trop faible pour {pair}")
         return False
@@ -730,23 +730,21 @@ def check_rsi_conditions(pair):
         logger.error(f"Erreur calcul RSI multi-TF: {e}")
         return {"h1": 50, "m15": 50, "buy_signal": False, "sell_signal": False}
 
-def calculate_atr_for_pair(pair, period=14):
+def calculate_atr_for_pair(pair, timeframe="H1", period=14):
     """Calcule l'ATR pour une paire donnée avec gestion des erreurs améliorée"""
     try:
         params = {
-            "granularity": "H1", 
-            "count": period*2, 
+            "granularity": timeframe,  # Utilisation du paramètre timeframe
+            "count": period * 2, 
             "price": "M",
-            "smooth": True  # Ajout du lissage
+            "smooth": True
         }
         
-        # Journalisation de débogage
         logger.debug(f"Récupération ATR pour {pair} avec params: {params}")
         
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         candles = client.request(r)["candles"]
         
-        # Extraction avec vérification de complétude
         complete_candles = [c for c in candles if c['complete']]
         if not complete_candles:
             logger.warning(f"Aucune bougie complète pour {pair}")
@@ -756,15 +754,12 @@ def calculate_atr_for_pair(pair, period=14):
         lows = [float(c['mid']['l']) for c in complete_candles]
         closes = [float(c['mid']['c']) for c in complete_candles]
         
-        # Vérification taille des données
         if len(highs) < period:
             logger.warning(f"Données insuffisantes ({len(highs)}/{period}) pour {pair}")
             return 0.0
             
-        # Calcul final avec arrondi adaptatif
         atr_value = calculate_atr(highs, lows, closes, period)
         
-        # Détermination précision décimale
         precision = 3 if pair in ["XAU_USD", "XAG_USD"] else (2 if "_JPY" in pair else 5)
         
         return round(atr_value, precision)
