@@ -571,9 +571,10 @@ def analyze_gold():
         params_h1 = {"granularity": "H1", "count": 100, "price": "M"}
         params_m15 = {"granularity": "M15", "count": 50, "price": "M"}
         
-        candles_h1 = client.request(instruments.InstrumentsCandles(instrument=pair, params=params_h1))["candles"]
-        candles_h1 = fetch_candles(pair, params_h1)             
-        candles_m15 = fetch_candles(pair, params_m15)
+        #candles_h1 = client.request(instruments.InstrumentsCandles(instrument=pair, params=params_h1))["candles"]
+        candles_h1 = fetch_candles(pair, params_h1["granularity"], params_h1)  
+        candles_m15 = fetch_candles(pair, params_m15["granularity"], params_m15)           
+        #candles_m15 = fetch_candles(pair, params_m15)
 
         # 2. Calcul des indicateurs techniques
         closes_h1 = [float(c['mid']['c']) for c in candles_h1 if c['complete']]
@@ -1611,19 +1612,7 @@ class LiquidityHunter:
             logger.debug(f"Détails erreur: price={price} | zone={zone} | type={type(zone)}")
             return None
     
-    def check_breakout(pair, price, window=5):
-        params = {"granularity": "M15", "count": window}
-        candles = fetch_candles(pair, params)
-        highs = [float(c['mid']['h']) for c in candles]
-        lows = [float(c['mid']['l']) for c in candles]
-    
-        # Cassure haussière
-        if price > max(highs[:-1]):
-            return "breakout_up"
-        # Cassure baissière
-        elif price < min(lows[:-1]):
-            return "breakout_down"
-        return None
+   
 
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         try:
@@ -1887,7 +1876,25 @@ if __name__ == "__main__":
             logger.info("🛑 Session inactive. Prochaine vérification dans 5 minutes...")
             time.sleep(300)
 
+def check_breakout(pair, price, window=3):
+    """Vérifie une cassure récente sur un timeframe réduit"""
+    try:
+        params = {"granularity": "M15", "count": window}
+        candles = fetch_candles(pair, params)
+        highs = [float(c['mid']['h']) for c in candles]
+        lows = [float(c['mid']['l']) for c in candles]
 
+        # Cassure haussière
+        if price > max(highs[:-1]):
+            return "bullish_breakout"
+        # Cassure baissière
+        elif price < min(lows[:-1]):
+            return "bearish_breakout"
+        return None
+        
+    except Exception as e:
+        logger.error(f"Erreur check_breakout: {str(e)}")
+        return None
 def manage_open_trade(pair):
     """Gère les trades ouverts avec trailing stop et prise de profits partiels"""
     try:
