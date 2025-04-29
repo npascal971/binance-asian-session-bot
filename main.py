@@ -561,77 +561,134 @@ def is_strong_trend(pair, direction):
             logger.error(f"Error checking trend on {tf}: {e}")
     
     return alignments >= 2  # Au moins 2/3 timeframes alignés
-
 def analyze_gold():
     pair = "XAU_USD"
     logger.info(f"Analyse approfondie de {pair}...")
 
-    # Récupération des données
-    params = {"granularity": "H1", "count": 100, "price": "M"}
-    candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
+    try:
+        # 1. Récupération des données multi-timeframe
+        params_h1 = {"granularity": "H1", "count": 100, "price": "M"}
+        params_m15 = {"granularity": "M15", "count": 50, "price": "M"}
+        
+        candles_h1 = fetch_candles(pair, params_h1)
+        candles_m15 = fetch_candles(pair, params_m15)
 
-    # Calcul des indicateurs
-    closes = [float(c['mid']['c']) for c in candles if c['complete']]
-    highs = [float(c['mid']['h']) for c in candles if c['complete']]
-    lows = [float(c['mid']['l']) for c in candles if c['complete']]
+        # 2. Calcul des indicateurs techniques
+        closes_h1 = [float(c['mid']['c']) for c in candles_h1 if c['complete']]
+        highs_h1 = [float(c['mid']['h']) for c in candles_h1 if c['complete']]
+        lows_h1 = [float(c['mid']['l']) for c in candles_h1 if c['complete']]
 
-    rsi = calculate_rsi(closes[-14:])
-    atr = calculate_atr(highs[-14:], lows[-14:], closes[-14:])
-    pin_bars = detect_pin_bars(candles[-6:], pair)
+        # Bollinger Bands (H1)
+        bb_upper_h1, bb_lower_h1 = calculate_bollinger_bands(closes_h1)
+        current_price = get_current_price(pair)
+        
+        # Volatilité et momentum
+        atr_h1 = calculate_atr(highs_h1[-14:], lows_h1[-14:], closes_h1[-14:])
+        rsi_h1 = calculate_rsi(closes_h1[-14:])
+        rsi_m15 = calculate_rsi([float(c['mid']['c']) for c in candles_m15 if c['complete']][-14:])
 
-    strong_trend = is_strong_trend(pair, "sell")
+        # 3. Détection des niveaux clés
+        support = min(lows_h1[-20:])
+        resistance = max(highs_h1[-20:])
+        recent_low = min(lows_h1[-5:])
+        recent_high = max(highs_h1[-5:])
 
-    # Conditions de vente
-    sell_conditions = (
-        rsi > 60 and
-        any(p['type'] == 'bearish' and p['ratio'] > 2 for p in pin_bars) and
-        strong_trend and
-        closes[-1] < max(highs[-5:-1])
-    )
-
-    if sell_conditions:
-        current_price = closes[-1]
-        take_profit = current_price - (atr * 2)  # Exemple de calcul dynamique
-        stop_loss = current_price + (atr * 1.5)
-
-        signal_details = {
-            "direction": "sell",
-            "current_price": current_price,
-            "target_zone": (take_profit + current_price) / 2,
-            "stop_loss": stop_loss,
-            "rsi": rsi,
-            "atr": atr,
-            "momentum": True,
-            "pattern": "Pin Bar Baissière + RSI Élevé"
+        # 4. Configuration spécifique à l'or
+        GOLD_SETTINGS = {
+            "rsi_overbought": 65,
+            "rsi_oversold": 35,
+            "atr_multiplier_sl": 1.8,
+            "atr_multiplier_tp": 3.2,
+            "min_volume_ratio": 1.3
         }
-        send_gold_alert(pair, signal_details)
-    else:
-        logger.info(f"❌ Aucun signal pour {pair}")
-        logger.info(f"→ RSI: {rsi:.2f}, Pin bars: {len(pin_bars)}, Strong trend: {strong_trend}, Clôture: {closes[-1]:.2f}, Max high: {max(highs[-5:-1]):.2f}")
 
-def send_gold_alert(pair, signal_details):
-    """Envoie une alerte détaillée pour l'or"""
-    subject = f"🚨 ALERTE OR - Signal {signal_details['direction'].upper()} détecté"
+        # 5. Analyse des conditions de marché
+        is_oversold = rsi_h1 < GOLD_SETTINGS["rsi_oversold"] and rsi_m15 < 40
+        is_overbought = rsi_h1 > GOLD_SETTINGS["rsi_overbought"] and rsi_m15 > 60
+        near_support = current_price <= support * 1.005
+        near_resistance = current_price >= resistance * 0.995
+        volatility_ok = atr_h1 > 15  # $15 de volatilité horaire
+
+        # 6. Scénarios de trading
+        scenarios = []
+        if near_support and is_oversold:
+            scenarios.append({
+                "direction": "BUY",
+                "reason": f"Rebond technique sur support {support:.2f} avec RSI oversold (H1: {rsi_h1:.1f}/M15: {rsi_m15:.1f})",
+                "entry": current_price,
+                "tp": recent_high,
+                "sl": support - (atr_h1 * GOLD_SETTINGS["atr_multiplier_sl"])
+            })
+
+        if near_resistance and is_overbought:
+            scenarios.append({
+                "direction": "SELL",
+                "reason": f"Rejection à la résistance {resistance:.2f} avec RSI overbought (H1: {rsi_h1:.1f}/M15: {rsi_m15:.1f})",
+                "entry": current_price,
+                "tp": recent_low,
+                "sl": resistance + (atr_h1 * GOLD_SETTINGS["atr_multiplier_sl"])
+            })
+
+        # 7. Validation finale
+        valid_scenarios = []
+        for scenario in scenarios:
+            if validate_gold_signal(scenario, atr_h1):
+                valid_scenarios.append(scenario)
+
+        # 8. Envoi d'alerte si scénario valide
+        if valid_scenarios:
+            send_gold_alert(pair, valid_scenarios, {
+                "price": current_price,
+                "rsi_h1": rsi_h1,
+                "rsi_m15": rsi_m15,
+                "atr": atr_h1,
+                "support": support,
+                "resistance": resistance,
+                "bb_upper": bb_upper_h1,
+                "bb_lower": bb_lower_h1
+            })
+
+    except Exception as e:
+        logger.error(f"Erreur analyse OR: {str(e)}")
+
+def validate_gold_signal(scenario, atr):
+    """Valide les paramètres de risque pour l'or"""
+    risk = abs(scenario['entry'] - scenario['sl'])
+    reward = abs(scenario['tp'] - scenario['entry'])
+    return (reward / risk) >= 2.0 and risk <= (atr * 2)
+
+def send_gold_alert(pair, scenarios, indicators):
+    """Envoie une alerte détaillée avec analyse technique"""
+    subject = f"🔥 {pair} - {len(scenarios)} scénario(s) détecté(s)"
     
-    body = f"""
-🔥 Signal de trading confirmé pour {pair} 🔥
+    analysis = f"""
+📊 **Analyse Technique Avancée - {pair}**
+-----------------------------------------
+💰 Prix Actuel : {indicators['price']:.2f}
+⚡ Volatilité (ATR H1) : {indicators['atr']:.2f}
+📉 RSI H1 : {indicators['rsi_h1']:.1f} | RSI M15 : {indicators['rsi_m15']:.1f}
 
-📊 Direction: {signal_details['direction'].upper()}
-💰 Prix actuel: {signal_details['current_price']:.2f}
-🎯 Zone cible: {signal_details['target_zone']:.2f}
-📉 Stop Loss: {signal_details['stop_loss']:.2f}
+📌 **Niveaux Clés :**
+- Support : {indicators['support']:.2f}
+- Résistance : {indicators['resistance']:.2f}
+- Bollinger Bands (H1) : [{indicators['bb_lower']:.2f} - {indicators['bb_upper']:.2f}]
 
-📈 Indicateurs:
-- RSI: {signal_details['rsi']:.2f}
-- ATR: {signal_details['atr']:.2f}
-- Momentum: {'Fort' if signal_details['momentum'] else 'Faible'}
-
-📌 Pattern détecté: {signal_details['pattern']}
-📆 Heure du signal: {datetime.now().strftime('%Y-%m-%d %H:%M')}
-
-⚠️ Ceci est une alerte basée sur votre stratégie gagnante récente.
+🔍 **Scénarios Valides ({len(scenarios)}) :**
 """
-    send_email(subject, body)
+    for i, scenario in enumerate(scenarios, 1):
+        analysis += f"""
+🎯 **Scénario {i} - {scenario['direction']}**
+➤ Raison : {scenario['reason']}
+➤ Entrée : {scenario['entry']:.2f}
+➤ Take Profit : {scenario['tp']:.2f} (+{(scenario['tp']-scenario['entry']):.2f})
+➤ Stop Loss : {scenario['sl']:.2f} (Risque: {(scenario['entry']-scenario['sl']):.2f})
+➤ Risk/Reward : {(abs(scenario['tp']-scenario['entry'])/abs(scenario['entry']-scenario['sl'])):.1f}:1
+-----------------------------------------
+"""
+
+    analysis += "\n⚠️ **Recommendation :** Surveillez les niveaux clés et confirmez avec les volumes !"
+    
+    send_email(subject, analysis)
 
 def check_rsi_conditions(pair):
     """Vérifie les conditions RSI sur H1 et M15"""
