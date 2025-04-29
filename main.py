@@ -1545,8 +1545,12 @@ class LiquidityHunter:
             current_atr = calculate_atr_for_pair(pair)
             pair_settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
             required_confidence = 65  # Seuil réduit de 70 à 65
-            if is_london_session() and pair in ["EUR_USD","GBP_USD"]:
+            if self._is_london_session() and pair in ["EUR_USD","GBP_USD"]:
                 required_confidence = 40  # Seuil plus bas pendant les heures actives
+            elif self._is_new_york_session() and pair in ["USD_CAD","XAU_USD"]:  # <-- Et ici
+                required_confidence = 35
+            else:
+                required_confidence = 45
             # 2. Score de base selon le type de zone
             zone_weights = {
                 "fvg": 40,  # Augmenté de 25 à 30
