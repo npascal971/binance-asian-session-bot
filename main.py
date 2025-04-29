@@ -1577,7 +1577,7 @@ class LiquidityHunter:
             bb_percentage = (price - bb_lower) / (bb_upper - bb_lower)
 
             if bb_percentage > 0.8:  # Prix proche de la bande supérieure
-                score -= 25  Pénalité importante
+                score -= 25  #Pénalité importante
             elif bb_percentage < 0.2:  # Prix proche de la bande inférieure
                 score += 20  # Bonus
             # 1. Proximité de la zone
