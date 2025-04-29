@@ -1519,41 +1519,64 @@ class LiquidityHunter:
         try:
             score = 0
             atr = calculate_atr_for_pair(pair)
-            candles = fetch_candles(pair, "M5", {"granularity": "M5", "count": 20})
 
-        
+            candles = fetch_candles(pair, "M5", {"granularity": "M5", "count": 20})
+            closes = [float(c['mid']['c']) for c in candles if c['complete']]
+
             # 1. Proximité de la zone
-            if self._is_price_near_zone(price, zone, pair):
+            is_near = self._is_price_near_zone(price, zone, pair)
+            if is_near:
                 score += 20
-        
-            # 2. Patterns de prix
+
+            # 2. Patterns de prix (Pin Bars)
             pin_bars = detect_pin_bars(candles, pair)
-            if any(p['ratio'] > 2 for p in pin_bars):
-                score += 15
-        
-            # 3. Momentum (RSI)
-            rsi = calculate_rsi([float(c['mid']['c']) for c in candles if c['complete']])
-            if zone_type == "fvg" and rsi > 60:
+            if len(pin_bars) >= 1:
                 score += 10
-        
+                if any(p['ratio'] > 2 for p in pin_bars):
+                    score += 5  # bonus
+
+            # 3. Momentum (RSI)
+            rsi = calculate_rsi(closes)
+            if zone_type == "fvg" and rsi > 55:
+                score += 10
+            elif zone_type == "ob" and 45 < rsi < 55:
+                score += 5  # zone d'équilibre intéressante
+
             # 4. Volume
             volume_data = self._get_volume_data(pair)
-            if volume_data["last"] > volume_data["average"] * 1.5:
+            if volume_data["last"] > volume_data["average"] * 1.2:
+                score += 15
+            elif volume_data["last"] > volume_data["average"]:
+                score += 5
+
+            # Bonus si RSI et volume élevés
+            if rsi > 70 and volume_data["last"] > volume_data["average"]:
                 score += 10
-        
+
             # 5. Alignement de tendance
             zone_ref = zone[0] if isinstance(zone, (list, tuple)) else zone
             direction = "buy" if price < zone_ref else "sell"
             if is_trend_aligned(pair, direction):
-                score += 15
-        
+                score += 20
+
+            # Logging détaillé
             logger.info(f"Confiance {pair}: {score}% (Zone={zone_type})")
             logger.info(f"{pair} - zone: {zone}, RSI: {rsi}, volume: {volume_data}, pin_bars: {len(pin_bars)}")
+
+            logger.info(f"{pair} - Score décomposé → "
+                        f"Proximité: {20 if is_near else 0}, "
+                        f"PinBars: {10 if len(pin_bars) >= 1 else 0} + {5 if any(p['ratio'] > 2 for p in pin_bars) else 0}, "
+                        f"RSI: {10 if zone_type == 'fvg' and rsi > 55 else 5 if zone_type == 'ob' and 45 < rsi < 55 else 0}, "
+                        f"Volume: {15 if volume_data['last'] > volume_data['average'] * 1.2 else 5 if volume_data['last'] > volume_data['average'] else 0}, "
+                        f"Bonus RSI+Vol: {10 if rsi > 70 and volume_data['last'] > volume_data['average'] else 0}, "
+                        f"Tendance: {20 if is_trend_aligned(pair, direction) else 0}"
+            )
 
             return min(100, score)
         except Exception as e:
             logger.error(f"Erreur calcul confiance {pair}: {str(e)}")
             return 0
+
 
     def calculate_vwap(pair, timeframe="H1", period=20):
         """Calcule le VWAP pour une paire donnée."""
