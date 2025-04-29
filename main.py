@@ -686,22 +686,15 @@ def detect_engulfing_patterns(candles):
     
     return engulfing_patterns
 
-def fetch_candles(pair, params):
+def fetch_candles(pair, timeframe, params):
     try:
+        # Ajouter le timeframe aux paramètres
+        params["granularity"] = timeframe
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         response = client.request(r)
         return response["candles"]
     except Exception as e:
         logger.error(f"Erreur fetch_candles pour {pair}: {str(e)}")
-        return []
-    
-    try:
-        r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        candles = client.request(r)['candles']
-        cache.set(cache_key, candles)
-        return candles
-    except Exception as e:
-        logger.error(f"Erreur fetch_candles: {str(e)}")
         return []
 
 def update_closed_trades():
