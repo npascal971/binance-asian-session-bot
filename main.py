@@ -824,47 +824,32 @@ def detect_engulfing_patterns(candles):
     return engulfing_patterns
 
 def fetch_candles(pair, timeframe, params=None):
-    """Version améliorée avec cache intelligent et gestion des erreurs"""
+    """Récupère les bougies via API OANDA"""
     try:
-        # Génération d'une clé de cache unique
-        cache_key = f"{pair}|{timeframe}|{hash(frozenset(params.items()))}"
-
-        # 1. Vérification du cache en premier
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            logger.debug(f"Cache hit pour {cache_key}")
-            return [c for c in cached_data if c['complete']]  # Filtrage persistant
-
-        # 2. Appel API si non trouvé en cache
-        params["granularity"] = timeframe
+        if not params:
+            params = {"granularity": timeframe, "count": 50}
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         response = client.request(r)
         
-        # 3. Validation et nettoyage des données
+        # Validation des données
         candles = response.get("candles", [])
         valid_candles = []
         for c in candles:
-            if c['complete'] and all(key in c['mid'] for key in ['o','h','l','c']):
-                valid_candles.append(c)
+            if c['complete'] and all(key in c['mid'] for key in ['o', 'h', 'l', 'c']):
+                try:
+                    c['mid']['o'] = float(c['mid']['o'])
+                    c['mid']['h'] = float(c['mid']['h'])
+                    c['mid']['l'] = float(c['mid']['l'])
+                    c['mid']['c'] = float(c['mid']['c'])
+                    valid_candles.append(c)
+                except ValueError as ve:
+                    logger.warning(f"Bougie invalide ignorée: {ve}")
         
-        # 4. Mise à jour du cache avec TTL adaptatif
-        cache_ttl = {
-            'M1': 30,   # 30 secondes
-            'M5': 300,   # 5 minutes
-            'H1': 3600,  # 1 heure
-            'DEFAULT': 60
-        }.get(timeframe, 60)
-        
-        cache.set(cache_key, valid_candles, ttl=cache_ttl)
-        logger.info(f"Nouvelles données enregistrées en cache ({len(valid_candles)} bougies)")
-
         return valid_candles
 
     except oandapyV20.exceptions.V20Error as e:
         logger.error(f"Erreur API OANDA ({pair}): {e.code} {e.msg}")
-        # Retourne les dernières données valides si disponibles
-        return cache.get(cache_key, [])[-params.get("count", 100):] if params else []
-    
+        return []
     except Exception as e:
         logger.error(f"Erreur critique fetch_candles: {str(e)}")
         return []
@@ -1008,6 +993,32 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
     except Exception as e:
         logger.error(f"Erreur calcul position {pair}: {str(e)}")
         return 0
+
+def process_zone(zone, zone_type):
+    """
+    Extrait le prix clé d'une zone selon son type.
+    
+    Args:
+        zone (list/dict/float): Zone détectée (FVG, OB, ou niveau classique)
+        zone_type (str): Type de zone ('fvg', 'ob', 'session', etc.)
+
+    Returns:
+        float: Prix cible de la zone
+        None: Si le type n’est pas reconnu
+    """
+    try:
+        if zone_type == "fvg":
+            return (float(zone[0]) + float(zone[1])) / 2  # Milieu du FVG
+        elif zone_type == "ob":
+            return float(zone[1])  # Bas pour bearish OB (achat)
+        elif zone_type == "session":
+            return float(zone)  # Niveau simple
+        else:
+            logger.warning(f"[process_zone] Type de zone inconnu : {zone_type}")
+            return None
+    except Exception as e:
+        logger.error(f"[process_zone] Erreur traitement zone {zone} ({zone_type}) : {e}")
+        return None
 
 def process_pin_bar(pin_bar_data):
     """Traite les données d'une Pin Bar."""
