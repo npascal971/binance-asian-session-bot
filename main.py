@@ -847,38 +847,26 @@ def check_breakout(pair, price, window=5):
 
 
 def analyze_htf(pair, params=None):
-    """Version corrigée avec gestion des FVG et OB"""
-    if params is None:
-        params = {"granularity": "H4", "count": 50}
+    """Détection précise des Order Blocks"""
     try:
-        params = {"granularity": "H4", "count": 50}
-        candles = fetch_candles(pair, "H4", {"granularity": "H4", "count": 50})
-        
-        fvg_zones = []
+        candles = fetch_candles(pair, "H4", {"count": 100})
         ob_zones = []
         
-        # Détection des FVG (Fair Value Gaps)
-        for i in range(1, len(candles)-1):
-            prev_high = float(candles[i-1]['mid']['h'])
-            prev_low = float(candles[i-1]['mid']['l'])
-            current_low = float(candles[i]['mid']['l'])
-            
-            # FVG haussier
-            if current_low > prev_high:
-                fvg_zones.append((prev_high, current_low))
-                
-            # Détection des Order Blocks
-            if float(candles[i]['mid']['c']) > float(candles[i-1]['mid']['h']):
+        for i in range(2, len(candles)):
+            # Bearish OB : forte bougie rouge après mouvement haussier
+            if (float(candles[i-2]['mid']['c']) > float(candles[i-2]['mid']['o']) and  # 2 bougies haussières
+               (float(candles[i-1]['mid']['c']) > float(candles[i-1]['mid']['o'])) and 
+               (float(candles[i]['mid']['c']) < float(candles[i]['mid']['o']) and       # Forte bougie baissière
+               (abs(float(candles[i]['mid']['c']) - float(candles[i]['mid']['o'])) > 0.0008):
                 ob_zones.append((
-                    float(candles[i]['mid']['l']),
-                    float(candles[i]['mid']['h'])
+                    float(candles[i]['mid']['h']),
+                    float(candles[i]['mid']['l'])
                 ))
-
-        return fvg_zones[:5], ob_zones[:5]  # Limite à 5 zones de chaque type
+        return ob_zones[-3:]  # Garde seulement les 3 derniers OB
 
     except Exception as e:
         logger.error(f"Erreur analyse_htf: {str(e)}")
-        return [], []
+        return []
 
 def detect_ltf_patterns(candles, pairs):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
@@ -1021,7 +1009,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
                 break
         
         # RSI
-        if rsi < settings["rsi_oversold"]:
+        if rsi < settings["rsi_oversold"] and closes[-1] < closes[-3]:
             signals["rsi"] = True
             reasons.append(f"RSI {rsi:.1f} < {settings['rsi_oversold']} (suracheté)")
         elif rsi > settings["rsi_overbought"]:
