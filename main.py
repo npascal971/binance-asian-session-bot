@@ -38,7 +38,9 @@ PAIRS = [
     "GBP_JPY", "USD_JPY", "EUR_JPY", "AUD_JPY", "CAD_JPY"  # Crosses et JPY  
 ]
 
-
+# Ajouter en haut avec les autres variables globales
+CLOSES_HISTORY = {}  # Dictionnaire pour stocker l'historique par paire
+HISTORY_LENGTH = 200  # Nombre de bougies à conserver
 RISK_PERCENTAGE = 1
 TRAILING_ACTIVATION_THRESHOLD_PIPS = 20
 ATR_MULTIPLIER_SL = 1.5
@@ -1895,6 +1897,12 @@ class LiquidityHunter:
         except Exception as e:
             logger.error(f"Erreur check_breakout: {str(e)}")
             return None
+def clean_historical_data():
+    """Nettoie les données historiques toutes les heures"""
+    global CLOSES_HISTORY
+    for pair in list(CLOSES_HISTORY.keys()):
+        if len(CLOSES_HISTORY[pair]) > HISTORY_LENGTH * 1.2:
+            CLOSES_HISTORY[pair] = CLOSES_HISTORY[pair][-HISTORY_LENGTH:]
 
 def check_rsi_divergence(prices, rsi_values, lookback=14, min_trend_strength=0.1, min_rsi=30, max_rsi=70):
     """
@@ -1911,6 +1919,14 @@ def check_rsi_divergence(prices, rsi_values, lookback=14, min_trend_strength=0.1
     Returns:
         str: 'bearish', 'bullish' ou None
     """
+    
+    try:
+        if not prices or not rsi_values:
+            return None
+            
+        if len(prices) < lookback or len(rsi_values) < lookback:
+            logger.debug("Données insuffisantes pour divergence RSI")
+            return None
     
     # Validation des données
     if len(prices) < lookback or len(rsi_values) < lookback:
@@ -1987,6 +2003,33 @@ def check_rsi_divergence(prices, rsi_values, lookback=14, min_trend_strength=0.1
 def analyze_pair(pair):
     """Nouvelle version focalisée sur les liquidités"""
     logger.info(f"\n=== Analyse détaillée pour {pair} ===")
+    
+    global CLOSES_HISTORY
+    
+    # Initialiser l'historique si nécessaire
+    if pair not in CLOSES_HISTORY:
+        CLOSES_HISTORY[pair] = []
+
+    try:
+        # Récupération des données historiques
+        params = {"granularity": "H1", "count": HISTORY_LENGTH, "price": "M"}
+        candles = fetch_candles(pair, params["granularity"], params)
+        
+        # Mise à jour de l'historique
+        new_closes = [float(c['mid']['c']) for c in candles if c['complete']]
+        CLOSES_HISTORY[pair] = (CLOSES_HISTORY[pair] + new_closes)[-HISTORY_LENGTH:]
+
+        # Vérifier la qualité des données
+        if len(CLOSES_HISTORY[pair]) < 50:
+            logger.warning(f"Données insuffisantes pour {pair} ({len(CLOSES_HISTORY[pair])} bougies)")
+            return
+
+        # Utilisation dans check_rsi_divergence
+        divergence = check_rsi_divergence(
+            prices=CLOSES_HISTORY[pair], 
+            rsi_values=[calculate_rsi(CLOSES_HISTORY[pair][-14:])],
+            lookback=50
+        )
     
     # 1. Vérifiez les prix
     price = get_current_price(pair)
@@ -2114,7 +2157,9 @@ if __name__ == "__main__":
     while True:
         now = datetime.utcnow().time()
         if SESSION_START <= now <= SESSION_END:
+            clean_historical_data()            
             logger.info("⏱ Session active - Chasse aux liquidités en cours...")
+
             try:
                 for pair in sorted(PAIRS, key=lambda x: 0 if x == "XAU_USD" else 1):
                     try:
