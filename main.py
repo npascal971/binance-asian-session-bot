@@ -807,6 +807,45 @@ def update_closed_trades():
     except Exception as e:
         logger.error(f"Erreur lors de la mise à jour des trades fermés: {e}")
 
+
+def check_breakout(pair, price, window=5):
+    """
+    Vérifie si le prix actuel réalise un breakout par rapport aux bougies précédentes.
+    
+    Args:
+        pair (str): La paire de trading (ex: "XAU_USD")
+        price (float): Le prix actuel
+        window (int): Nombre de bougies à analyser
+
+    Returns:
+        str: "breakout_up" ou "breakout_down", None si pas de breakout
+    """
+    try:
+        # Paramètres pour récupérer les bougies
+        params = {"granularity": "M15", "count": window}
+        
+        # Récupère les bougies via la fonction fetch_candles
+        candles = fetch_candles(pair, params["granularity"], params)
+        
+        if not candles or len(candles) < window:
+            raise ValueError(f"Pas assez de données pour {pair}")
+        
+        highs = [float(candle['mid']['h']) for candle in candles if candle['complete']]
+        lows  = [float(candle['mid']['l']) for candle in candles if candle['complete']]
+
+        # Détecte breakout haussier ou baissier
+        if price > max(highs[:-1]):
+            return "breakout_up"
+        elif price < min(lows[:-1]):
+            return "breakout_down"
+        else:
+            return None
+    
+    except Exception as e:
+        print(f"[ERREUR] check_breakout({pair}, {price}): {e}")
+        return None
+
+
 def analyze_htf(pair, params=None):
     """Version corrigée avec gestion des FVG et OB"""
     if params is None:
