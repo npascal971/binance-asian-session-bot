@@ -179,6 +179,13 @@ def is_ranging(pair, timeframe="H1", threshold=0.5):
         logger.error(f"Error checking ranging market for {pair}: {e}")
         return False  # Default to False if error occurs
 
+def calculate_bollinger_bands(closes, window=20, num_std=2):
+    rolling_mean = pd.Series(closes).rolling(window).mean()
+    rolling_std = pd.Series(closes).rolling(window).std()
+    upper_band = rolling_mean + (rolling_std * num_std)
+    lower_band = rolling_mean - (rolling_std * num_std)
+    return upper_band.iloc[-1], lower_band.iloc[-1]
+    
 def get_current_price(pair, max_retries=3):
     for attempt in range(max_retries):
         try:
@@ -451,6 +458,13 @@ PAIR_SETTINGS = {
         "rsi_overbought": 68,
         "rsi_oversold": 32,
         "pin_bar_ratio": 2.5
+    },
+    "CAD_JPY": {
+        "min_atr": 0.15,  # Seuil relevé
+        "rsi_overbought": 70,
+        "rsi_oversold": 30,
+        "pin_bar_ratio": 3.0,
+        "volume_multiplier": 1.5  # Nécessite 50% plus de volume que la moyenne
     }
 }
 
@@ -498,6 +512,28 @@ def detect_pin_bars(candles, pair=None):
 
     return pin_bars
 
+def validate_signal(pair, signal):
+    """Validation finale multi-couches"""
+    # Vérification de la cassure technique
+    breakout_type = check_breakout(pair, signal['entry'])
+    if not breakout_type:
+        logger.info(f"Aucune cassure confirmée pour {pair}")
+        return False
+
+    # Vérification du régime de marché
+    if is_ranging(pair):
+        logger.info(f"Marché en range pour {pair}")
+        return False
+
+    # Configuration spécifique aux paires JPY
+    jpy_pairs = ["CAD_JPY", "USD_JPY", "GBP_JPY"]
+    if pair in jpy_pairs:
+        settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+        if signal['atr'] < settings["min_atr"] * 1.2:
+            logger.info(f"ATR trop faible pour {pair} ({signal['atr']})")
+            return False
+
+    return True
 
 def is_strong_trend(pair, direction):
     """Vérifie l'alignement sur M15/H1/H4 avec force"""
@@ -1448,8 +1484,10 @@ class LiquidityHunter:
                 if rsi > 40:
                     score += 15
                 volume_data = self._get_volume_data(pair)
-                if volume_data["last"] > volume_data["average"] * 1.5:
-                    score += 10
+                if volume_data["last"] > volume_data["max"] * 0.8:
+                    score += 20
+                elif volume_data["last"] < volume_data["min"] * 1.2:
+                    score -= 15
                 vwap = calculate_vwap(pair)
                 if vwap and abs(current_price - vwap) < atr * 0.5:
                     score += 15
@@ -1514,7 +1552,20 @@ class LiquidityHunter:
             logger.debug(f"Détails erreur: price={price} | zone={zone} | type={type(zone)}")
             return None
     
+    def check_breakout(pair, price, window=5):
+        params = {"granularity": "M15", "count": window}
+        candles = fetch_candles(pair, params)
+        highs = [float(c['mid']['h']) for c in candles]
+        lows = [float(c['mid']['l']) for c in candles]
     
+        # Cassure haussière
+        if price > max(highs[:-1]):
+            return "breakout_up"
+        # Cassure baissière
+        elif price < min(lows[:-1]):
+            return "breakout_down"
+        return None
+
     def _calculate_confidence(self, pair, price, zone_type, zone, direction):
         try:
             score = 0
@@ -1522,7 +1573,13 @@ class LiquidityHunter:
 
             candles = fetch_candles(pair, "M5", {"granularity": "M5", "count": 20})
             closes = [float(c['mid']['c']) for c in candles if c['complete']]
+            bb_upper, bb_lower = calculate_bollinger_bands(closes)
+            bb_percentage = (price - bb_lower) / (bb_upper - bb_lower)
 
+             if bb_percentage > 0.8:  # Prix proche de la bande supérieure
+                score -= 25  Pénalité importante
+            elif bb_percentage < 0.2:  # Prix proche de la bande inférieure
+                score += 20  # Bonus
             # 1. Proximité de la zone
             is_near = self._is_price_near_zone(price, zone, pair)
             if is_near:
@@ -1596,12 +1653,14 @@ class LiquidityHunter:
     def _get_volume_data(self, pair):
         """Récupère les volumes récents (H1) pour une paire."""
         try:
-            params = {"granularity": "H1", "count": 20}
+            params = {"granularity": "H1", "count": 50}
             candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))["candles"]
             volumes = [float(c["volume"]) for c in candles if c["complete"]]
             return {
                 "last": volumes[-1] if volumes else 0,
                 "average": np.mean(volumes) if volumes else 0,
+                "max": np.max(volumes),
+                "min": np.min(volumes)
             }
         except Exception as e:
             logger.error(f"Erreur lors de la récupération des volumes pour {pair}: {e}")
@@ -1693,7 +1752,9 @@ def analyze_pair(pair):
         if opportunity['confidence'] < 50:
             logger.info(f"Confiance insuffisante ({opportunity['confidence']}%)")
             return
-            
+        if not validate_signal(pair, opportunity):
+            logger.info(f"Validation finale échouée pour {pair}")
+            return    
         # 8. Envoi d'alerte
         send_trade_alert(
             pair=opportunity['pair'],
