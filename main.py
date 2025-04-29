@@ -563,6 +563,7 @@ def is_strong_trend(pair, direction):
     return alignments >= 2  # Au moins 2/3 timeframes alignés
 def analyze_gold():
     pair = "XAU_USD"
+    params = {"granularity": "H1", "count": 100, "price": "M"}
     logger.info(f"Analyse approfondie de {pair}...")
 
     try:
@@ -571,7 +572,8 @@ def analyze_gold():
         params_m15 = {"granularity": "M15", "count": 50, "price": "M"}
         
         candles_h1 = client.request(instruments.InstrumentsCandles(instrument=pair, params=params_h1))["candles"]
-        candles_m15 = client.request(instruments.InstrumentsCandles(instrument=pair, params=params_m15))["candles"]
+        candles_h1 = fetch_candles(pair, params_h1)             
+        candles_m15 = fetch_candles(pair, params_m15)
 
         # 2. Calcul des indicateurs techniques
         closes_h1 = [float(c['mid']['c']) for c in candles_h1 if c['complete']]
