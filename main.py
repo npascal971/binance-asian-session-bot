@@ -686,7 +686,7 @@ def detect_engulfing_patterns(candles):
     
     return engulfing_patterns
 
-def fetch_candles(pair, timeframe, params):
+ddef fetch_candles(pair, timeframe, params):
     try:
         # Ajouter le timeframe aux paramètres
         params["granularity"] = timeframe
@@ -696,7 +696,6 @@ def fetch_candles(pair, timeframe, params):
     except Exception as e:
         logger.error(f"Erreur fetch_candles pour {pair}: {str(e)}")
         return []
-
 def update_closed_trades():
     try:
         r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
