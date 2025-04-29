@@ -523,7 +523,7 @@ def detect_pin_bars(candles, pair=None):
 
 def validate_signal(pair, signal):
     # Nouvelle vérification ajoutée
-    weekly_atr = calculate_atr_for_pair(pair, "D", 14)
+    weekly_atr = calculate_atr_for_pair(pair)
     if signal['atr'] < weekly_atr * 0.3:  # Volatilité actuelle < 30% de la volatilité hebdo
         logger.warning(f"Volatilité actuelle trop faible pour {pair}")
         return False
