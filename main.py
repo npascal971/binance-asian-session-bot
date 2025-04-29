@@ -325,10 +325,11 @@ def is_price_approaching(price, zone, pair, threshold_pips=None):
         return False
 
 def dynamic_sl_tp(atr, direction, risk_reward=1.5, min_sl_multiplier=1.8):
-    """Gestion dynamique avec filet de sécurité"""
-    base_sl = max(atr * 1.5, atr * min_sl_multiplier)  # Le plus grand des deux
-    sl = base_sl * 1.2  # Marge supplémentaire de 20%
-    tp = sl * risk_reward
+     """Gestion dynamique avec paramètres par paire"""
+    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+    
+    sl = atr * settings.get("atr_multiplier_sl", 1.5)
+    tp = atr * settings.get("atr_multiplier_tp", 3.0)
     
     return (sl, tp) if direction == "buy" else (-sl, -tp)
 
@@ -465,6 +466,14 @@ PAIR_SETTINGS = {
         "rsi_oversold": 30,
         "pin_bar_ratio": 3.0,
         "volume_multiplier": 1.5  # Nécessite 50% plus de volume que la moyenne
+    },    
+    "XAG_USD": {  # Silver
+        "min_atr": 0.3,  # Augmenté de 0.1 → 0.3 (3$ de volatilité)
+        "rsi_overbought": 72,  # Rehaussé de 68 à 72
+        "rsi_oversold": 28,    # Baissé de 32 à 28
+        "pin_bar_ratio": 3.0,  # Plus strict (2.0 → 3.0)
+        "atr_multiplier_sl": 2.0,  # Nouveau paramètre spécifique
+        "atr_multiplier_tp": 4.0   # RR 2:1
     }
 }
 
@@ -513,8 +522,11 @@ def detect_pin_bars(candles, pair=None):
     return pin_bars
 
 def validate_signal(pair, signal):
-    """Validation finale multi-couches"""
-    # Vérification de la cassure technique
+    # Nouvelle vérification ajoutée
+    weekly_atr = calculate_atr_for_pair(pair, "D", 14)
+    if signal['atr'] < weekly_atr * 0.3:  # Volatilité actuelle < 30% de la volatilité hebdo
+        logger.warning(f"Volatilité actuelle trop faible pour {pair}")
+        return False
     breakout_type = check_breakout(pair, signal['entry'])
     if not breakout_type:
         logger.info(f"Aucune cassure confirmée pour {pair}")
