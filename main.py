@@ -261,7 +261,7 @@ def send_email(subject, body):
 # Remplacer is_trend_aligned() par :
 def is_trend_aligned(pair, direction):
     try:
-        timeframes = ['H1', 'H4', 'D']
+        timeframes = ['M1', 'M5', 'M15']
         alignment = 0
         
         for tf in timeframes:
