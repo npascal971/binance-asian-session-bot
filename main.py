@@ -686,12 +686,14 @@ def detect_engulfing_patterns(candles):
     
     return engulfing_patterns
 
-def fetch_candles(pair, timeframe, params):
-    """Récupère les bougies avec gestion du cache"""
-    cache_key = f"{pair}_{params['granularity']}_{params['count']}"
-    cached = cache.get(cache_key)
-    if cached:
-        return cached
+def fetch_candles(pair, params):
+    try:
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        response = client.request(r)
+        return response["candles"]
+    except Exception as e:
+        logger.error(f"Erreur fetch_candles pour {pair}: {str(e)}")
+        return []
     
     try:
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
@@ -721,7 +723,7 @@ def analyze_htf(pair):
     """Version corrigée avec gestion des FVG et OB"""
     try:
         params = {"granularity": "H4", "count": 50}
-        candles = fetch_candles(pair, params)
+        candles = fetch_candles(pair, {"granularity": "H4", "count": 50})
         
         fvg_zones = []
         ob_zones = []
@@ -1334,24 +1336,27 @@ class LiquidityHunter:
             return True
         return False
     
-    def analyze_htf_liquidity(self, pair):
-        """Version corrigée de l'analyse des liquidités"""
+   def analyze_htf_liquidity(self, pair):
+        """Analyse approfondie des zones de liquidité HTF"""
         try:
+            # Récupération des FVG et Order Blocks
             fvg_zones, ob_zones = analyze_htf(pair)
         
             # Récupération des données de volume
-            params = {"granularity": "H4", "count": 100}
-            candles = fetch_candles(pair, params)
+            params = {"granularity": "H4", "count": 100, "price": "M"}
+            candles = fetch_candles(pair, params)  # Ajout de `params`
+        
             volumes = [float(c['volume']) for c in candles if c['complete']]
+            closes = [float(c['mid']['c']) for c in candles if c['complete']]
         
-            # Calcul des zones de volume
+            # Détection des zones de volume élevé
+            high_volume_zones = []
             avg_volume = np.mean(volumes)
-            high_volume_zones = [
-                float(c['mid']['c']) 
-                for c in candles 
-                if float(c['volume']) > avg_volume * 1.5
-            ]
+            for i in range(len(volumes)):
+                if volumes[i] > avg_volume * 2:  # Volume 2x supérieur à la moyenne
+                     high_volume_zones.append(closes[i])
         
+            # Enregistrement des zones
             self.liquidity_zones[pair] = {
                 'fvg': fvg_zones,
                 'ob': ob_zones,
@@ -1359,9 +1364,8 @@ class LiquidityHunter:
                 'last_update': datetime.utcnow()
             }
             return True
-        
         except Exception as e:
-            logger.error(f"Erreur analyze_htf_liquidity: {str(e)}")
+            logger.error(f"Erreur analyse liquidité HTF {pair}: {e}")
             return False
     
     def _is_price_near_zone(self, price, zone, pair):
