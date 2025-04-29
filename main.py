@@ -1624,9 +1624,8 @@ class LiquidityHunter:
             # Calculs sécurisés
             atr = float(calculate_atr_for_pair(pair))
         
-            # Validation finale des valeurs
-            if None in [price, atr] or atr <= 0:
-                raise ValueError("Données invalides pour le calcul")
+            if atr <= 0:
+                raise ValueError(f"ATR invalide: {atr}")
 
             # Calcul SL/TP avec vérification de type
             stop_loss = (
@@ -1645,7 +1644,8 @@ class LiquidityHunter:
                 'sl': float(stop_loss),
                 'tp': float(take_profit),
                 'zone_type': zone_type,
-                'confidence': self._calculate_confidence(pair, price, zone_type, zone, direction)
+                'confidence': self._calculate_confidence(pair, price, zone_type, zone, direction),
+                'atr': atr
             }
 
         except (TypeError, ValueError, IndexError) as e:
