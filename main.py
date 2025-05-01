@@ -2023,82 +2023,78 @@ def analyze_pair(pair):
     if pair not in CLOSES_HISTORY:
         CLOSES_HISTORY[pair] = []
 
-    # Récupération des données historiques
-try:
-    # Récupération des données historiques
-    params = {"granularity": "H1", "count": HISTORY_LENGTH, "price": "M"}
-    candles = fetch_candles(pair, params["granularity"], params)
+    try:
+        # Récupération des données historiques
+        params = {"granularity": "H1", "count": HISTORY_LENGTH, "price": "M"}
+        candles = fetch_candles(pair, params["granularity"], params)
 
-    # Filtrage des bougies valides
-    valid_closes = []
-    for c in candles:
-        if isinstance(c, dict) and 'mid' in c and 'c' in c['mid'] and c.get('complete', False):
-            valid_closes.append(float(c['mid']['c']))
-        else:
-            logger.warning(f"Bougie mal formatée ignorée pour {pair}: {c}")
+        # Filtrage des bougies valides
+        valid_closes = []
+        for c in candles:
+            if isinstance(c, dict) and 'mid' in c and 'c' in c['mid'] and c.get('complete', False):
+                valid_closes.append(float(c['mid']['c']))
+            else:
+                logger.warning(f"Bougie mal formatée ignorée pour {pair}: {c}")
 
-    # Mise à jour de l'historique
-    CLOSES_HISTORY[pair] = (CLOSES_HISTORY[pair] + valid_closes)[-HISTORY_LENGTH:]
+        # Mise à jour de l'historique
+        CLOSES_HISTORY[pair] = (CLOSES_HISTORY[pair] + valid_closes)[-HISTORY_LENGTH:]
 
-    # Vérifier la qualité des données
-    if len(CLOSES_HISTORY[pair]) < 50:
-        logger.warning(f"Données insuffisantes pour {pair} ({len(CLOSES_HISTORY[pair])} bougies)")
-        return
+        # Vérifier la qualité des données
+        if len(CLOSES_HISTORY[pair]) < 50:
+            logger.warning(f"Données insuffisantes pour {pair} ({len(CLOSES_HISTORY[pair])} bougies)")
+            return
 
-    # Calcul des RSI glissants
-    rsi_values = [calculate_rsi(CLOSES_HISTORY[pair][i-14:i]) for i in range(14, len(CLOSES_HISTORY[pair]))]
-    divergence = check_rsi_divergence(CLOSES_HISTORY[pair][-len(rsi_values):], rsi_values)
-
+        # Calcul des RSI glissants
+        rsi_values = [calculate_rsi(CLOSES_HISTORY[pair][i-14:i]) for i in range(14, len(CLOSES_HISTORY[pair]))]
+        divergence = check_rsi_divergence(CLOSES_HISTORY[pair][-len(rsi_values):], rsi_values)
 
     except Exception as e:
         logger.error(f"Erreur initialisation données {pair}: {str(e)}")
         return
 
-    # 1. Vérifiez les prix
+    # Vérifiez le prix actuel
     price = get_current_price(pair)
     if price is None:
         logger.error(f"Impossible de récupérer le prix pour {pair}")
         return
     logger.info(f"Prix actuel: {price}")
     
-    # 2. Vérifiez les indicateurs
+    # Vérifiez les indicateurs
     atr = calculate_atr_for_pair(pair)
     logger.info(f"ATR: {atr if atr else 'Erreur de calcul'}")
     
-    # 3. Vérifiez les tendances
+    # Vérifiez les tendances
     logger.info(f"Tendance H1 alignée BUY: {is_trend_aligned(pair, 'buy')}")
     logger.info(f"Tendance H1 alignée SELL: {is_trend_aligned(pair, 'sell')}")    
     
-    # 4. Vérification divergence
+    # Vérification divergence
     if divergence == 'bearish':
         logger.warning("Divergence baissière détectée - annulation signal")
         return
-    
+
     hunter = LiquidityHunter()
-    
+
     try:
-        # 5. Récupération des données brutes
+        # Récupération des données brutes
         r = instruments.InstrumentsCandles(
             instrument=pair,
             params={"granularity": "H1", "count": 50}
         )
         response = client.request(r)
-        
-        # Validation de la structure de réponse
+
         if not isinstance(response, dict) or 'candles' not in response:
             logger.error(f"Réponse API invalide pour {pair}: {type(response)}")
             logger.debug(f"Contenu de la réponse: {response}")
             return
-            
+
         candles = response['candles']
         logger.info(f"Données reçues pour {pair}: {len(candles)} bougies")
-        
+
     except Exception as e:
         logger.error(f"ERREUR CRITIQUE lors de la récupération des bougies: {str(e)}")
         logger.exception(e)
         return
 
-    # 6. Mise à jour des données de base
     if not hunter.update_asian_range(pair):
         logger.warning(f"Échec mise à jour range asiatique pour {pair}")
         return
@@ -2107,7 +2103,6 @@ try:
         logger.warning(f"Échec analyse liquidité HTF pour {pair}")
         return
     
-    # 7. Recherche d'opportunités
     try:
         opportunity = hunter.find_best_opportunity(pair)
     except KeyError as ke:
@@ -2116,12 +2111,11 @@ try:
     except Exception as e:
         logger.error(f"Erreur générique dans find_best_opportunity: {e}")
         return
-    
+
     if not opportunity:
         logger.info(f"Aucune opportunité trouvée pour {pair}")
         return
 
-    # 8. Validation finale
     try:
         if opportunity['confidence'] < 50:
             logger.info(f"Confiance insuffisante ({opportunity['confidence']}%)")
@@ -2131,13 +2125,11 @@ try:
             logger.info(f"Validation finale échouée pour {pair}")
             return
 
-        # Vérification volume
         current_volume = get_current_volume(pair)
         if current_volume < get_average_volume(pair):
             logger.warning("Volume actuel inférieur à la moyenne")
             return
-    
-        # 9. Envoi d'alerte
+
         send_trade_alert(
             pair=opportunity['pair'],
             direction=opportunity['direction'],
@@ -2155,6 +2147,7 @@ try:
 
     except Exception as e:
         logger.error(f"Erreur lors de l'envoi de l'alerte: {e}")
+
 # ... (le reste du code main reste similaire mais utilise la nouvelle analyse_pair)
 
 if __name__ == "__main__":
