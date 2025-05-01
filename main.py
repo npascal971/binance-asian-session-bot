@@ -2029,7 +2029,14 @@ def analyze_pair(pair):
         candles = fetch_candles(pair, params["granularity"], params)
         
         # Mise à jour de l'historique
-        new_closes = [float(c['mid']['c']) for c in candles if c['complete']]
+        new_closes = [
+            float(c['mid']['c'])
+            for c in candles:
+                if not (isinstance(c, dict) and 'mid' in c and 'c' in c['mid'] and c.get('complete', False)):
+                    logger.warning(f"Bougie mal formatée ignorée pour {pair}: {c}")
+
+        ]
+
         CLOSES_HISTORY[pair] = (CLOSES_HISTORY[pair] + new_closes)[-HISTORY_LENGTH:]
 
         # Vérifier la qualité des données
