@@ -2023,21 +2023,21 @@ def analyze_pair(pair):
     if pair not in CLOSES_HISTORY:
         CLOSES_HISTORY[pair] = []
 
-    try:
-        # Récupération des données historiques
-        params = {"granularity": "H1", "count": HISTORY_LENGTH, "price": "M"}
-        candles = fetch_candles(pair, params["granularity"], params)
-        
-        # Mise à jour de l'historique
-        new_closes = [
-            float(c['mid']['c'])
-            for c in candles:
-                if not (isinstance(c, dict) and 'mid' in c and 'c' in c['mid'] and c.get('complete', False)):
-                    logger.warning(f"Bougie mal formatée ignorée pour {pair}: {c}")
+    # Récupération des données historiques
+    params = {"granularity": "H1", "count": HISTORY_LENGTH, "price": "M"}
+    candles = fetch_candles(pair, params["granularity"], params)
 
-        ]
+    # Bougies valides uniquement
+    valid_closes = []
+    for c in candles:
+        if isinstance(c, dict) and 'mid' in c and 'c' in c['mid'] and c.get('complete', False):
+            valid_closes.append(float(c['mid']['c']))
+        else:
+            logger.warning(f"Bougie mal formatée ignorée pour {pair}: {c}")
 
-        CLOSES_HISTORY[pair] = (CLOSES_HISTORY[pair] + new_closes)[-HISTORY_LENGTH:]
+    # Mise à jour de l'historique
+    CLOSES_HISTORY[pair] = (CLOSES_HISTORY[pair] + valid_closes)[-HISTORY_LENGTH:]
+
 
         # Vérifier la qualité des données
         if len(CLOSES_HISTORY[pair]) < 50:
