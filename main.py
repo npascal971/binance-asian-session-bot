@@ -791,36 +791,20 @@ def detect_engulfing_patterns(candles):
     
     return engulfing_patterns
 
-def fetch_candles(pair, timeframe, params=None):
-    """Récupère les bougies via API OANDA"""
-    try:
-        if not params:
-            params = {"granularity": timeframe, "count": 50}
-        r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        response = client.request(r)
-        
-        # Validation des données
-        candles = response.get("candles", [])
-        valid_candles = []
-        for c in candles:
-            if c['complete'] and all(key in c['mid'] for key in ['o', 'h', 'l', 'c']):
-                try:
-                    c['mid']['o'] = float(c['mid']['o'])
-                    c['mid']['h'] = float(c['mid']['h'])
-                    c['mid']['l'] = float(c['mid']['l'])
-                    c['mid']['c'] = float(c['mid']['c'])
-                    valid_candles.append(c)
-                except ValueError as ve:
-                    logger.warning(f"Bougie invalide ignorée: {ve}")
-        
-        return valid_candles
-
-    except oandapyV20.exceptions.V20Error as e:
-        logger.error(f"Erreur API OANDA ({pair}): {e.code} {e.msg}")
-        return []
-    except Exception as e:
-        logger.error(f"Erreur critique fetch_candles: {str(e)}")
-        return []
+def fetch_candles(pair, params, max_retries=3):
+    """Récupère les bougies avec système de réessai"""
+    for attempt in range(max_retries):
+        try:
+            r = instruments.InstrumentsCandles(instrument=pair, params=params)
+            return client.request(r)["candles"]
+        except oandapyV20.exceptions.V20Error as e:
+            if e.code == 429:  # Too Many Requests
+                sleep_time = 2 ** attempt
+                logger.warning(f"Attente {sleep_time}s avant réessai...")
+                time.sleep(sleep_time)
+                continue
+            raise
+    return []
 
 def update_closed_trades():
     try:
