@@ -2040,13 +2040,13 @@ def analyze_pair(pair):
 
 
         # Vérifier la qualité des données
-        if len(CLOSES_HISTORY[pair]) < 50:
-            logger.warning(f"Données insuffisantes pour {pair} ({len(CLOSES_HISTORY[pair])} bougies)")
-            return
+    if len(CLOSES_HISTORY[pair]) < 50:
+        logger.warning(f"Données insuffisantes pour {pair} ({len(CLOSES_HISTORY[pair])} bougies)")
+        return
 
         # Calcul des indicateurs
-        rsi_values = [calculate_rsi(closes[-14:]) for closes in CLOSES_HISTORY[pair]]
-        divergence = check_rsi_divergence(CLOSES_HISTORY[pair], rsi_values)
+    rsi_values = [calculate_rsi(closes[-14:]) for closes in CLOSES_HISTORY[pair]]
+    divergence = check_rsi_divergence(CLOSES_HISTORY[pair], rsi_values)
 
     except Exception as e:
         logger.error(f"Erreur initialisation données {pair}: {str(e)}")
