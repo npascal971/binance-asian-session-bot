@@ -2024,10 +2024,12 @@ def analyze_pair(pair):
         CLOSES_HISTORY[pair] = []
 
     # Récupération des données historiques
+try:
+    # Récupération des données historiques
     params = {"granularity": "H1", "count": HISTORY_LENGTH, "price": "M"}
     candles = fetch_candles(pair, params["granularity"], params)
 
-    # Bougies valides uniquement
+    # Filtrage des bougies valides
     valid_closes = []
     for c in candles:
         if isinstance(c, dict) and 'mid' in c and 'c' in c['mid'] and c.get('complete', False):
@@ -2038,15 +2040,15 @@ def analyze_pair(pair):
     # Mise à jour de l'historique
     CLOSES_HISTORY[pair] = (CLOSES_HISTORY[pair] + valid_closes)[-HISTORY_LENGTH:]
 
-
-        # Vérifier la qualité des données
+    # Vérifier la qualité des données
     if len(CLOSES_HISTORY[pair]) < 50:
         logger.warning(f"Données insuffisantes pour {pair} ({len(CLOSES_HISTORY[pair])} bougies)")
         return
 
-        # Calcul des indicateurs
-    rsi_values = [calculate_rsi(closes[-14:]) for closes in CLOSES_HISTORY[pair]]
-    divergence = check_rsi_divergence(CLOSES_HISTORY[pair], rsi_values)
+    # Calcul des RSI glissants
+    rsi_values = [calculate_rsi(CLOSES_HISTORY[pair][i-14:i]) for i in range(14, len(CLOSES_HISTORY[pair]))]
+    divergence = check_rsi_divergence(CLOSES_HISTORY[pair][-len(rsi_values):], rsi_values)
+
 
     except Exception as e:
         logger.error(f"Erreur initialisation données {pair}: {str(e)}")
