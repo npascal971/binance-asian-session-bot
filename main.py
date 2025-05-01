@@ -146,7 +146,9 @@ def confirm_signal(pair, direction):
         # 3. Alignment price/zone
         price = get_current_price(pair)
         zones = analyze_htf(pair, params)
-        return any(abs(price - z[0]) < 0.0002 for z in zones)
+        valid_zones = [z for z in zones if isinstance(z, (list, tuple)) and len(z) > 0]
+        return any(abs(price - z[0]) < 0.0002 for z in valid_zones)
+
 
     except Exception as e:
         logger.error(f"Erreur confirmation: {e}")
