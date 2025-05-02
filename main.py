@@ -146,7 +146,8 @@ def confirm_signal(pair, direction):
 
         # 3. Alignment price/zone
         price = get_current_price(pair)
-        zones = analyze_htf(pair, params)
+        raw_zones = analyze_htf(pair, params)
+        zones = [process_zone(z, 'ob') for z in raw_zones]
         valid_zones = [z for z in zones if isinstance(z, (list, tuple)) and len(z) > 0]
         return any(abs(price - z[0]) < 0.0002 for z in valid_zones)
 
@@ -184,26 +185,26 @@ def is_ranging(pair, timeframe="H1", threshold=0.5):
         return False  # Default to False if error occurs
 
 def calculate_bollinger_bands(closes, window=20, num_std=2):
-    """Version sécurisée avec gestion des None"""
+    """Version sécurisée avec gestion des données manquantes"""
     try:
-        if len(closes) < window or None in closes:
-            logger.warning(f"Données invalides pour BB: {len(closes)}/{window} ou valeurs None")
-            return (closes[-1] if closes else 0, closes[-1] if closes else 0)  # Retourne le dernier prix
-        
-        series = pd.Series(closes).dropna()
-        if series.empty:
+        if len(closes) < window or pd.Series(closes).isnull().any():
+            logger.debug(f"Données insuffisantes pour BB: {len(closes)}/{window}")
+            if closes:
+                last_close = closes[-1]
+                return (last_close, last_close)  # Retourne le dernier prix connu
             return (0, 0)
             
+        series = pd.Series(closes).dropna()
         rolling_mean = series.rolling(window).mean()
         rolling_std = series.rolling(window).std()
         
-        return (
-            rolling_mean.iloc[-1] + (rolling_std.iloc[-1] * num_std),
-            rolling_mean.iloc[-1] - (rolling_std.iloc[-1] * num_std)
-        )
+        upper = rolling_mean + (rolling_std * num_std)
+        lower = rolling_mean - (rolling_std * num_std)
+        
+        return (upper.iloc[-1], lower.iloc[-1])
     except Exception as e:
         logger.error(f"Erreur Bollinger Bands: {str(e)}")
-        return (closes[-1], closes[-1])  # Fallback sécurisé
+        return (closes[-1], closes[-1]) if closes else (0, 0)
     
 def get_current_price(pair):
     """Récupère le prix actuel via l'endpoint de pricing"""
@@ -994,30 +995,22 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
         return 0
 
 def process_zone(zone, zone_type):
-    """
-    Extrait le prix clé d'une zone selon son type.
-    
-    Args:
-        zone (list/dict/float): Zone détectée (FVG, OB, ou niveau classique)
-        zone_type (str): Type de zone ('fvg', 'ob', 'session', etc.)
-
-    Returns:
-        float: Prix cible de la zone
-        None: Si le type n’est pas reconnu
-    """
+    """Gère les différents formats de zones"""
     try:
-        if zone_type == "fvg":
-            return (float(zone[0]) + float(zone[1])) / 2  # Milieu du FVG
-        elif zone_type == "ob":
-            return float(zone[1])  # Bas pour bearish OB (achat)
-        elif zone_type == "session":
-            return float(zone)  # Niveau simple
-        else:
-            logger.warning(f"[process_zone] Type de zone inconnu : {zone_type}")
-            return None
+        if isinstance(zone, float):
+            return (zone - 0.0001, zone + 0.0001)  # Crée un mini-range
+            
+        if isinstance(zone, (list, tuple)):
+            return (float(min(zone)), float(max(zone)))
+            
+        if isinstance(zone, dict):
+            return (float(zone.get('low', 0)), float(zone.get('high', 0)))
+            
+        logger.warning(f"Type de zone non supporté: {type(zone)}")
+        return (0, 0)
     except Exception as e:
-        logger.error(f"[process_zone] Erreur traitement zone {zone} ({zone_type}) : {e}")
-        return None
+        logger.error(f"Erreur traitement zone: {str(e)}")
+        return (0, 0)
 
 def process_pin_bar(pin_bar_data):
     """Traite les données d'une Pin Bar."""
@@ -1168,7 +1161,10 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         if not check_momentum(pair):
             logger.info(f"Momentum défavorable pour {pair}")
             return False
-
+        # Avant la vérification des zones
+        if not isinstance(zones, list):
+            logger.warning("Format de zones invalide")
+            return False
         if not confirm_signal(pair, direction):
             logger.info(f"Confirmation échouée pour {pair}")
             return False
@@ -1495,6 +1491,25 @@ class LiquidityHunter:
             "DEFAULT": 0.0001
         }
 
+    def _get_volume_data(self, pair):
+        """Récupère les données de volume historiques"""
+        try:
+            params = {"granularity": "H1", "count": 20}
+            r = instruments.InstrumentsCandles(instrument=pair, params=params)
+            candles = client.request(r)["candles"]
+            
+            volumes = [float(c['volume']) for c in candles if c['complete']]
+            
+            return {
+                "last": volumes[-1] if volumes else 0,
+                "average": np.mean(volumes) if volumes else 0,
+                "max": np.max(volumes) if volumes else 0,
+                "min": np.min(volumes) if volumes else 0
+            }
+        except Exception as e:
+            logger.error(f"Erreur récupération volume {pair}: {str(e)}")
+            return {"last": 0, "average": 0, "max": 0, "min": 0}
+            
     def _is_london_session(self):
         """Vérifie si c'est la session londonienne (8h-17h CET)"""
         now = datetime.utcnow()
