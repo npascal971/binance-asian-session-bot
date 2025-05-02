@@ -11,6 +11,7 @@ import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.accounts as accounts
 import oandapyV20.endpoints.trades as trades
+from oandapyV20.endpoints import pricing
 from email.mime.text import MIMEText
 import smtplib 
 from scipy.stats import gaussian_kde
@@ -205,20 +206,23 @@ def calculate_bollinger_bands(closes, window=20, num_std=2):
         return (closes[-1], closes[-1])  # Fallback sécurisé
     
 def get_current_price(pair):
-    """Récupère le prix actuel avec gestion des erreurs améliorée"""
+    """Récupère le prix actuel via l'endpoint de pricing"""
     try:
-        params = {"count": 1, "price": "M"}
-        r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        candles = client.request(r)["candles"]
+        params = {"instruments": pair}
+        r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params=params)
+        response = client.request(r)
         
-        if not candles or not candles[0]['complete']:
-            logger.warning(f"Pas de données récentes pour {pair}")
+        if 'prices' not in response or not response['prices']:
+            logger.warning(f"Aucune donnée de prix pour {pair}")
             return None
             
-        return float(candles[0]['mid']['c'])
-    
-    except KeyError as e:
-        logger.error(f"Erreur de structure de données pour {pair}: {e}")
+        price_info = response['prices'][0]
+        bid = float(price_info['bids'][0]['price'])
+        ask = float(price_info['asks'][0]['price'])
+        return (bid + ask) / 2  # Prix moyen
+        
+    except (KeyError, IndexError) as e:
+        logger.error(f"Structure de données invalide pour {pair}: {e}")
     except oandapyV20.exceptions.V20Error as e:
         logger.error(f"Erreur OANDA {pair} [{e.code}]: {e.msg}")
     except Exception as e:
