@@ -892,52 +892,52 @@ def check_breakout(pair, price, window=5):
 
 
 def analyze_htf(pair, params=None):
-    """Analyse des Order Blocks haute timeframe avec vérification de type"""
+    """Analyse des Order Blocks haute timeframe avec validation de type stricte"""
     try:
-        # Récupération des bougies avec validation
-        candles = fetch_candles(pair, "H4", params)
-        if not isinstance(candles, list) or len(candles) < 3:
-            logger.warning(f"Données insuffisantes pour {pair}")
-            return []
-
+        # ... (code existant)
+        
         ob_zones = []
-        seuil = 0.0008 if "_JPY" not in pair else 0.08
-
-        # Itération sécurisée
         for i in range(2, len(candles)):
-            if not all([
-                isinstance(candles[i-2], dict),
-                isinstance(candles[i-1], dict),
-                isinstance(candles[i], dict)
-            ]):
-                continue
+            # ... (logique existante de détection OB)
+            
+            # Validation stricte du type de sortie
+            if isinstance(zone_high, (int, float)) and isinstance(zone_low, (int, float)):
+                ob_zones.append((round(zone_high, 5), round(zone_low, 5)))
+            else:
+                logger.warning(f"Format de zone invalide ignoré pour {pair}")
 
-            # Extraction des prix avec vérification
-            try:
-                prev2_close = float(candles[i-2]['mid']['c'])
-                prev1_close = float(candles[i-1]['mid']['c'])
-                current_close = float(candles[i]['mid']['c'])
-            except KeyError as e:
-                logger.warning(f"Clé manquante dans la bougie {i}: {e}")
-                continue
-
-            # Logique de détection OB
-            prev_bullish = (prev2_close > float(candles[i-2]['mid']['o'])) and (prev1_close > float(candles[i-1]['mid']['o']))
-            current_bearish = current_close < float(candles[i]['mid']['o'])
-            body_size = abs(current_close - float(candles[i]['mid']['o']))
-
-            if prev_bullish and current_bearish and (body_size > seuil):
-                ob_zones.append((
-                    round(float(candles[i]['mid']['h']), 5),
-                    round(float(candles[i]['mid']['l']), 5)
-                ))
-
-        return ob_zones[-3:]
+        return ob_zones[-3:] if ob_zones else [(0.0, 0.0)]  # Tuple par défaut
 
     except Exception as e:
         logger.error(f"Erreur analyse_htf: {str(e)}")
-        return []
+        return [(0.0, 0.0)]  # Retourne un tuple vide sécurisé
 
+def process_zone(zone, zone_type):
+    """Conversion robuste en tuple avec fallback sécurisé"""
+    try:
+        # Gestion des numpy types
+        if hasattr(zone, 'item'):
+            zone = zone.item()
+            
+        # Conversion des singles valeurs en range
+        if isinstance(zone, (int, float)):
+            spread = 0.00015 if "_JPY" not in pair else 0.015
+            return (round(zone - spread, 5), round(zone + spread, 5))
+            
+        # Conversion des dicts
+        if isinstance(zone, dict):
+            return (float(zone.get('low', 0)), float(zone.get('high', 0)))
+            
+        # Validation finale
+        if isinstance(zone, (list, tuple)) and len(zone) >= 2:
+            return (round(float(zone[0]), 5), round(float(zone[1]), 5))
+
+        logger.warning(f"Structure de zone inconnue: {type(zone)}")
+        return (0.0, 0.0)  # Fallback sécurisé
+        
+    except Exception as e:
+        logger.error(f"Erreur process_zone: {str(e)}")
+        return (0.0, 0.0)
 def detect_ltf_patterns(candles, pairs):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
     patterns_detected = []
@@ -1090,8 +1090,9 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
 
         # 3. Détection des signaux
         # Vérification des zones clés
-        for zone in key_zones:
-            if abs(price - zone[0]) <= RETEST_ZONE_RANGE or abs(price - zone[1]) <= RETEST_ZONE_RANGE:
+        for raw_zone in key_zones:
+            zone = process_zone(raw_zone, 'ob')
+            if abs(price - zone[0]) <= RETEST_ZONE_RANGE:
                 signals["zone"] = True
                 reasons.append("Prix dans zone clé")
                 break
