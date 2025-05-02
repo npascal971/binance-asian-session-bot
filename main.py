@@ -791,20 +791,46 @@ def detect_engulfing_patterns(candles):
     
     return engulfing_patterns
 
-def fetch_candles(pair, params, max_retries=3):
-    """Récupère les bougies avec système de réessai"""
-    for attempt in range(max_retries):
-        try:
-            r = instruments.InstrumentsCandles(instrument=pair, params=params)
-            return client.request(r)["candles"]
-        except oandapyV20.exceptions.V20Error as e:
-            if e.code == 429:  # Too Many Requests
-                sleep_time = 2 ** attempt
-                logger.warning(f"Attente {sleep_time}s avant réessai...")
-                time.sleep(sleep_time)
-                continue
-            raise
-    return []
+def fetch_candles(pair, timeframe, params=None):
+    """Récupère les bougies avec validation renforcée du format de réponse"""
+    try:
+        if params is None:
+            params = {"granularity": timeframe, "count": 200}
+        elif not isinstance(params, dict):
+            raise TypeError("Les paramètres doivent être un dictionnaire")
+
+        # Envoi de la requête API
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        response = client.request(r)
+
+        # Validation approfondie de la réponse
+        if not isinstance(response, dict):
+            logger.error(f"Réponse API invalide pour {pair}: Type {type(response)}")
+            return []
+
+        if 'candles' not in response:
+            logger.error(f"Clé 'candles' manquante pour {pair}: {response.keys()}")
+            return []
+
+        candles = response['candles']
+        if not isinstance(candles, list):
+            logger.error(f"Format de bougies invalide pour {pair}: {type(candles)}")
+            return []
+
+        # Filtrage des bougies complètes
+        valid_candles = []
+        for c in candles:
+            if isinstance(c, dict) and c.get('complete', False):
+                valid_candles.append(c)
+                
+        return valid_candles
+
+    except oandapyV20.exceptions.V20Error as e:
+        logger.error(f"Erreur API OANDA ({pair}): {e.code} {e.msg}")
+        return []
+    except Exception as e:
+        logger.error(f"Erreur critique fetch_candles: {str(e)}")
+        return []
 
 def update_closed_trades():
     try:
@@ -861,34 +887,51 @@ def check_breakout(pair, price, window=5):
 
 
 def analyze_htf(pair, params=None):
-    """Détection précise des Order Blocks avec gestion des paires JPY"""
+    """Analyse des Order Blocks haute timeframe avec vérification de type"""
     try:
-        candles = fetch_candles(pair, "H4", {"count": 100})
+        # Récupération des bougies avec validation
+        candles = fetch_candles(pair, "H4", params)
+        if not isinstance(candles, list) or len(candles) < 3:
+            logger.warning(f"Données insuffisantes pour {pair}")
+            return []
+
         ob_zones = []
         seuil = 0.0008 if "_JPY" not in pair else 0.08
 
+        # Itération sécurisée
         for i in range(2, len(candles)):
-            if not all([candles[j]['complete'] for j in [i-2, i-1, i]]):
+            if not all([
+                isinstance(candles[i-2], dict),
+                isinstance(candles[i-1], dict),
+                isinstance(candles[i], dict)
+            ]):
+                continue
+
+            # Extraction des prix avec vérification
+            try:
+                prev2_close = float(candles[i-2]['mid']['c'])
+                prev1_close = float(candles[i-1]['mid']['c'])
+                current_close = float(candles[i]['mid']['c'])
+            except KeyError as e:
+                logger.warning(f"Clé manquante dans la bougie {i}: {e}")
                 continue
 
             # Logique de détection OB
-            prev_bullish = (float(candles[i-2]['mid']['c']) > float(candles[i-2]['mid']['o'])) 
-            prev_bullish &= (float(candles[i-1]['mid']['c']) > float(candles[i-1]['mid']['o']))
-            
-            current_bearish = (float(candles[i]['mid']['c']) < float(candles[i]['mid']['o']))
-            strong_body = abs(float(candles[i]['mid']['c']) - float(candles[i]['mid']['o'])) > seuil
+            prev_bullish = (prev2_close > float(candles[i-2]['mid']['o'])) and (prev1_close > float(candles[i-1]['mid']['o']))
+            current_bearish = current_close < float(candles[i]['mid']['o'])
+            body_size = abs(current_close - float(candles[i]['mid']['o']))
 
-            if prev_bullish and current_bearish and strong_body:
+            if prev_bullish and current_bearish and (body_size > seuil):
                 ob_zones.append((
                     round(float(candles[i]['mid']['h']), 5),
                     round(float(candles[i]['mid']['l']), 5)
                 ))
 
-        return ob_zones[-3:]  # Retourne uniquement les OB
+        return ob_zones[-3:]
 
     except Exception as e:
         logger.error(f"Erreur analyse_htf: {str(e)}")
-        return []  # Retourne une liste vide au lieu de None
+        return []
 
 def detect_ltf_patterns(candles, pairs):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
@@ -1502,34 +1545,49 @@ class LiquidityHunter:
         return False
     
     def analyze_htf_liquidity(self, pair):
-        """Analyse approfondie des zones de liquidité HTF"""
+        """Analyse des zones de liquidité haute timeframe"""
         try:
-            # Récupération des FVG et Order Blocks
-            ob_zones = analyze_htf(pair)
+            # Récupération des données avec timeout
+            params = {"granularity": "H4", "count": 100, "price": "M"}
+            candles = fetch_candles(pair, "H4", params)
         
-            # Récupération des données de volume
-            htf_params  = {"granularity": "H4", "count": 100, "price": "M"}
-            candles = fetch_candles(pair, "H4", htf_params)  # Ajout de `params`
-        
-            volumes = [float(c['volume']) for c in candles if c['complete']]
-            closes = [float(c['mid']['c']) for c in candles if c['complete']]
-        
-            # Détection des zones de volume élevé
-            high_volume_zones = []
-            avg_volume = np.mean(volumes)
-            for i in range(len(volumes)):
-                if volumes[i] > avg_volume * 2:  # Volume 2x supérieur à la moyenne
-                     high_volume_zones.append(closes[i])
-        
-            # Enregistrement des zones
+            if not isinstance(candles, list):
+                logger.error(f"Type de bougies invalide pour {pair}: {type(candles)}")
+                return False
+
+            # Validation des données
+            if len(candles) < 50:
+                logger.warning(f"Données insuffisantes pour {pair} ({len(candles)} bougies)")
+                return False
+
+            # Traitement des volumes
+            volumes = []
+            closes = []
+            for c in candles:
+                if isinstance(c, dict) and c.get('complete', False):
+                    try:
+                        volumes.append(float(c['volume']))
+                        closes.append(float(c['mid']['c']))
+                    except (KeyError, ValueError) as e:
+                        logger.warning(f"Erreur traitement bougie: {e}")
+
+            # Détection des zones de volume
+            high_volume_zones = [
+                closes[i] 
+                for i in range(len(volumes)) 
+                if volumes[i] > np.mean(volumes) * 1.5
+            ]
+
+            # Mise à jour du cache
             self.liquidity_zones[pair] = {
-                'ob': ob_zones,
-                'volume': high_volume_zones,
+                'volume_zones': high_volume_zones,
                 'last_update': datetime.utcnow()
             }
+
             return True
+
         except Exception as e:
-            logger.error(f"Erreur analyse liquidité HTF {pair}: {e}")
+            logger.error(f"Erreur analyse liquidité HTF {pair}: {str(e)}")
             return False
     
     def _is_price_near_zone(self, price, zone, pair):
@@ -1803,6 +1861,32 @@ class LiquidityHunter:
         except Exception as e:
             logger.error(f"ERREUR CRITIQUE confiance {pair}: {str(e)}", exc_info=True)
             return 0
+def initialize_pair_data(pair):
+    """Initialisation sécurisée des données par paire"""
+    try:
+        # Vérification du type de réponse
+        params = {"granularity": "H1", "count": HISTORY_LENGTH}
+        candles = fetch_candles(pair, "H1", params)
+        
+        if not isinstance(candles, list):
+            raise TypeError(f"Type inattendu pour candles: {type(candles)}")
+
+        # Traitement des closes
+        valid_closes = []
+        for c in candles:
+            if isinstance(c, dict) and 'mid' in c:
+                try:
+                    valid_closes.append(float(c['mid']['c']))
+                except (KeyError, ValueError):
+                    continue
+
+        CLOSES_HISTORY[pair] = valid_closes[-HISTORY_LENGTH:]
+        logger.info(f"Données initialisées pour {pair}: {len(valid_closes)} closes valides")
+
+    except Exception as e:
+        logger.error(f"Erreur initialisation {pair}: {str(e)}")
+        CLOSES_HISTORY[pair] = []
+
     def calculate_vwap(pair, timeframe="H1", period=20):
         """Calcule le VWAP pour une paire donnée."""
         try:
@@ -2105,7 +2189,10 @@ if __name__ == "__main__":
     
     # Initialisation du chasseur de liquidités
     liquidity_hunter = LiquidityHunter()
-    
+    # Initialiser toutes les paires au lancement
+    for pair in PAIRS:
+        initialize_pair_data(pair)
+        time.sleep(0.5)  # Respect rate limits
     # Vérification initiale de la connexion
     try:
         account_info = accounts.AccountDetails(OANDA_ACCOUNT_ID)
