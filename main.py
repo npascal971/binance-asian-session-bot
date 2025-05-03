@@ -507,11 +507,19 @@ PAIR_SETTINGS = {
         "rsi_overbought": 68,
         "rsi_oversold": 32,
         "pin_bar_ratio": 2.0,
-        "atr_multiplier_sl": 1.8,  # Nouveau
-        "atr_multiplier_tp": 3.2,   # Nouveau
+        "atr_multiplier_sl": 2.5,  # Nouveau
+        "atr_multiplier_tp": 4.0,   # Nouveau
         "min_volume_ratio": 1.3,
         "bollinger_margin": 0.02,  # 2% de marge des Bandes
         "volume_multiplier": 1.2      # Nouveau
+    },
+    "USD_JPY": {
+        "atr_multiplier_sl": 2.0,  # Augmenté de 1.8
+        "atr_multiplier_tp": 3.5,  # Augmenté de 3.2 
+        "min_sl_distance": 0.2,    # 20 pips
+        "spread_max": 0.03,
+        "rsi_overbought": 75,
+        "rsi_oversold": 25
     },
     "EUR_USD": {
         "min_atr": 0.0003,  # Réduit de 0.0005
@@ -1283,6 +1291,18 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     except Exception as e:
         logger.error(f"Erreur dans should_open_trade pour {pair}: {str(e)}")
         return False
+
+def validate_spread(pair):
+    bid = get_current_price(pair, 'bid')
+    ask = get_current_price(pair, 'ask')
+    spread = ask - bid
+    
+    if "_JPY" in pair:
+        return spread <= 0.03  # 3 pips max
+    elif "XAU" in pair:
+        return spread <= 0.5   # 50 cents max
+    else:
+        return spread <= 0.0003
 
 def detect_reversal_patterns(candles):
     """Détecte des patterns de retournement (pin bars, engulfings)"""
