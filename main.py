@@ -162,6 +162,40 @@ def confirm_signal(pair, direction):
         is_price_approaching(pivot_levels[pair])
     )
 
+def calculate_dynamic_levels(pair, entry_price, direction):
+    """Calcule SL/TP avec Bollinger Bands et EMA50 (Nouvelle version)"""
+    closes_m15 = get_closes(pair, "M15", 50)
+    atr_value = calculate_atr_for_pair(pair)
+    
+    # Bollinger Bands M15
+    bb_upper, bb_lower = calculate_bollinger_bands(closes_m15)
+    
+    # EMA50 M15
+    ema50 = pd.Series(closes_m15).ewm(span=50, adjust=False).mean().iloc[-1]
+    
+    # Calcul de base SL
+    if direction == "SELL":
+        base_sl = entry_price + (PAIR_SETTINGS[pair]["atr_multiplier_sl"] * atr_value)
+        # Ajustement Bollinger
+        if not np.isnan(bb_upper) and base_sl < bb_upper + 0.2 * (bb_upper - bb_lower):
+            base_sl = bb_upper + 0.5 * atr_value
+    else:
+        base_sl = entry_price - (PAIR_SETTINGS[pair]["atr_multiplier_sl"] * atr_value)
+        if not np.isnan(bb_lower) and base_sl > bb_lower - 0.2 * (bb_upper - bb_lower):
+            base_sl = bb_lower - 0.5 * atr_value
+    
+    # Vérification EMA50
+    current_price = get_closes(pair, "M15", 1)[-1]
+    if ((direction == "SELL" and current_price > ema50) or 
+        (direction == "BUY" and current_price < ema50)):
+        base_sl *= 1.25
+    
+    # Calcul TP
+    tp_distance = abs(entry_price - base_sl) * PAIR_SETTINGS[pair]["atr_multiplier_tp"]
+    take_profit = entry_price - tp_distance if direction == "SELL" else entry_price + tp_distance
+    
+    return round(base_sl, 2), round(take_profit, 2)
+
 def is_ranging(pair, timeframe="H1", threshold=0.5):
     """Determine if a pair is in a ranging market using ADX"""
     try:
@@ -469,10 +503,15 @@ PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois
 
 PAIR_SETTINGS = {
     "XAU_USD": {
-        "min_atr": 0.5,  # Réduit de 0.8
-        "rsi_overbought": 68,  # Ajusté
+        "min_atr": 0.5,
+        "rsi_overbought": 68,
         "rsi_oversold": 32,
-        "pin_bar_ratio": 2.0
+        "pin_bar_ratio": 2.0,
+        "atr_multiplier_sl": 1.8,  # Nouveau
+        "atr_multiplier_tp": 3.2,   # Nouveau
+        "min_volume_ratio": 1.3,
+        "bollinger_margin": 0.02,  # 2% de marge des Bandes
+        "volume_multiplier": 1.2      # Nouveau
     },
     "EUR_USD": {
         "min_atr": 0.0003,  # Réduit de 0.0005
@@ -560,41 +599,102 @@ def detect_pin_bars(candles, pair=None):
     return pin_bars
 
 def validate_signal(pair, signal):
-    # Nouvelle vérification ajoutée
-    weekly_atr = calculate_atr_for_pair(pair, "D", 14)
-    if signal['atr'] < weekly_atr * 0.15:  # Volatilité actuelle < 30% de la volatilité hebdo
-        logger.warning(f"Volatilité actuelle trop faible pour {pair}")
-        return False
-    breakout_type = check_breakout(pair, signal['entry'])
-    if not breakout_type:
-        logger.info(f"Aucune cassure confirmée pour {pair}")
-        return False
-
-    # Vérification du régime de marché
-    if is_ranging(pair):
-        logger.info(f"Marché en range pour {pair}")
-        return False
-
-    # Configuration spécifique aux paires JPY
-    jpy_pairs = ["CAD_JPY", "USD_JPY", "GBP_JPY"]
-    if pair in jpy_pairs:
-        settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
-        if signal['atr'] < settings["min_atr"] * 1.2:
-            logger.info(f"ATR trop faible pour {pair} ({signal['atr']})")
+    """Version améliorée avec les nouvelles validations"""
+    try:
+        # 1. Vérifications existantes
+        weekly_atr = calculate_atr_for_pair(pair, "D", 14)
+        if signal.get('atr', 0) < weekly_atr * 0.15:
+            logger.warning(f"Volatilité actuelle trop faible pour {pair}")
             return False
-    # Calcul de l'ADX
-    highs = [float(c['mid']['h']) for c in candles]
-    lows = [float(c['mid']['l']) for c in candles]
-    closes = [float(c['mid']['c']) for c in candles]
-    adx = calculate_adx(highs, lows, closes)
-    
-    # Seuil ADX dynamique selon le type d'instrument
-    min_adx = 20 if pair in CRYPTO_PAIRS else 25
-    if adx < min_adx:
-        logger.warning(f"Tendance trop faible (ADX={adx:.1f} < {min_adx})")
+
+        if not check_breakout(pair, signal['entry']):
+            logger.info(f"Aucune cassure confirmée pour {pair}")
+            return False
+
+        if is_ranging(pair):
+            logger.info(f"Marché en range pour {pair}")
+            return False
+
+        # 2. Nouveaux contrôles techniques
+        closes = get_closes(pair, "H1", 50)
+        current_price = get_current_price(pair)
+        
+        # Vérification Bollinger Bands
+        bb_upper, bb_lower = calculate_bollinger_bands(closes)
+        if current_price > bb_upper * 0.98 or current_price < bb_lower * 1.02:
+            logger.warning(f"Prix trop proche des Bandes Bollinger - Rejet")
+            return False
+
+        # Alignement EMA50
+        ema50 = pd.Series(closes).ewm(span=50).mean().iloc[-1]
+        if (signal['direction'] == "buy" and current_price < ema50) or \
+           (signal['direction'] == "sell" and current_price > ema50):
+            logger.warning("Désalignement avec EMA50 H1")
+            return False
+
+        # 3. Confirmation multi-timeframe
+        tf_confirmations = 0
+        for tf in ["M15", "H1", "H4"]:
+            tf_closes = get_closes(pair, tf, 50)
+            if len(tf_closes) < 50: continue
+            
+            ema_fast = pd.Series(tf_closes).ewm(span=20).mean().iloc[-1]
+            ema_slow = pd.Series(tf_closes).ewm(span=50).mean().iloc[-1]
+            
+            if signal['direction'] == "buy" and ema_fast > ema_slow:
+                tf_confirmations += 1
+            elif signal['direction'] == "sell" and ema_fast < ema_slow:
+                tf_confirmations += 1
+
+        if tf_confirmations < 2:
+            logger.warning(f"Confirmations multi-TF insuffisantes ({tf_confirmations}/3)")
+            return False
+
+        # 4. Analyse volumétrique
+        volume_data = get_volume_analysis(pair)  # À implémenter
+        if volume_data['current'] < volume_data['average'] * 1.2:
+            logger.warning("Volume insuffisant")
+            return False
+
+        # 5. Validations existantes pour paires JPY
+        jpy_pairs = ["CAD_JPY", "USD_JPY", "GBP_JPY"]
+        if pair in jpy_pairs:
+            settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+            if signal['atr'] < settings["min_atr"] * 1.2:
+                logger.info(f"ATR trop faible pour {pair} ({signal['atr']})")
+                return False
+
+        # 6. Validation ADX existante
+        highs = [float(c['mid']['h']) for c in candles]
+        lows = [float(c['mid']['l']) for c in candles]
+        closes = [float(c['mid']['c']) for c in candles]
+        adx = calculate_adx(highs, lows, closes)
+        
+        min_adx = 20 if pair in CRYPTO_PAIRS else 25
+        if adx < min_adx:
+            logger.warning(f"Tendance trop faible (ADX={adx:.1f} < {min_adx})")
+            return False
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Erreur validation signal {pair}: {str(e)}")
         return False
 
-    return True
+def get_volume_analysis(pair):
+    """Analyse les volumes sur les dernières 20 bouches H1"""
+    try:
+        candles = fetch_candles(pair, "H1", 20)
+        volumes = [float(c['volume']) for c in candles if c['complete']]
+        
+        return {
+            'current': volumes[-1] if volumes else 0,
+            'average': np.mean(volumes[:-1]) if len(volumes) > 1 else 0,
+            'max': max(volumes) if volumes else 0
+        }
+    except Exception as e:
+        logger.error(f"Erreur analyse volume {pair}: {str(e)}")
+        return {'current': 0, 'average': 0}
 
 def is_strong_trend(pair, direction):
     """Vérifie l'alignement sur M15/H1/H4 avec force"""
