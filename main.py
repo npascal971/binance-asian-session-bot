@@ -241,6 +241,9 @@ def calculate_bollinger_bands(closes, window=20, num_std=2):
         return (closes[-1], closes[-1]) if closes else (0, 0)
     
 def get_current_price(pair):
+    if SIMULATION_MODE:
+        # Retourne le dernier prix historique connu
+        return CLOSES_HISTORY.get(pair, [0])[-1]
     """Récupère le prix actuel via l'endpoint de pricing"""
     try:
         params = {"instruments": pair}
@@ -2200,7 +2203,18 @@ def analyze_pair(pair):
     try:
         # Récupération des données historiques
         params = {"granularity": "H1", "count": HISTORY_LENGTH, "price": "M"}
-        candles = fetch_candles(pair, params["granularity"], params)
+        #candles = fetch_candles(pair, params["granularity"], params)
+        
+        candles = []
+        try:
+            if SIMULATION_MODE:
+                candles = [{
+                    'time': datetime.datetime(2023, 10, 25, h).isoformat() + "Z",
+                    'mid': {'c': CLOSES_HISTORY[pair][h]},
+                    'complete': True
+                } for h in range(24)]
+            else:
+                candles = fetch_candles(pair)  # Appel réel        
 
         # Filtrage des bougies valides
         valid_closes = []
@@ -2318,68 +2332,59 @@ def analyze_pair(pair):
             ]
         )
         logger.info(f"✅ Signal envoyé pour {pair} ({opportunity['direction'].upper()}) à {opportunity['entry']:.5f}")
-
+       # Ajoutez ce logging critique
+        logger.info(f"[BACKTEST] {pair} | Signal à {candle['time']} | Prix: {price}")
     except Exception as e:
         logger.error(f"Erreur lors de l'envoi de l'alerte: {e}")
 
 # ... (le reste du code main reste similaire mais utilise la nouvelle analyse_pair)
 
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du bot de trading OANDA - Mode Sniper Liquidités...")
+    logger.info("🚀 Backtest journalier en cours...")
     
-    # Initialisation du chasseur de liquidités
-    liquidity_hunter = LiquidityHunter()
-    # Initialiser toutes les paires au lancement
-    for pair in PAIRS:
-        initialize_pair_data(pair)
-        time.sleep(0.5)  # Respect rate limits
-    # Vérification initiale de la connexion
+    # Override de la date pour hier
+    import datetime
+    yesterday = datetime.datetime.utcnow() - datetime.timedelta(days=1)
+    datetime.datetime = lambda: yesterday  # Patch temporel
+
+    # Désactivation des appels API réels
+    SIMULATION_MODE = True
+    client = None  # Désactive OANDA
+    
+    # Exécution ciblée
+    pairs_to_test = ["EUR_USD", "XAU_USD"]  # Paires à tester
+    for pair in pairs_to_test:
+        try:
+            analyze_pair(pair, days_back=1)  # Nouveau paramètre
+        except Exception as e:
+            logger.error(f"Erreur sur {pair}: {str(e)}")
+
+def get_historical_candles(pair, days_back):
+    """Récupère les données de la veille"""
+    end = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0)
+    start = end - datetime.timedelta(days=days_back)
+    
+    params = {
+        "granularity": "H1",
+        "from": start.isoformat() + "Z",
+        "to": end.isoformat() + "Z",
+        "price": "M"
+    }
+    
     try:
-        account_info = accounts.AccountDetails(OANDA_ACCOUNT_ID)
-        client.request(account_info)
-        logger.info(f"✅ Connecté avec succès au compte OANDA: {OANDA_ACCOUNT_ID}")
-        logger.info(f"🔧 Mode simulation: {'ACTIVÉ' if SIMULATION_MODE else 'DÉSACTIVÉ'}")
+        r = instruments.InstrumentsCandles(instrument=pair, params=params)
+        return client.request(r)['candles']
     except Exception as e:
-        logger.error(f"❌ Échec de la connexion à OANDA: {e}")
-        exit(1)
-    
-    while True:
-        now = datetime.utcnow().time()
-        if SESSION_START <= now <= SESSION_END:
-            clean_historical_data()            
-            logger.info("⏱ Session active - Chasse aux liquidités en cours...")
+        logger.error(f"Erreur historique {pair}: {str(e)}")
+        return []
 
-            try:
-                for pair in sorted(PAIRS, key=lambda x: 0 if x == "XAU_USD" else 1):
-                    try:
-                        # Mise à jour des données de base
-                        liquidity_hunter.update_asian_range(pair)
-                        liquidity_hunter.analyze_htf_liquidity(pair)
-                        
-                        if pair == "XAU_USD":
-                            analyze_gold()  # Analyse spécifique pour l'or
-                        else:
-                            # Utilisation de analyze_pair() qui intègre déjà find_best_opportunity()
-                            analyze_pair(pair)
-                    except Exception as e:
-                        logger.error(f"Erreur analyse {pair}: {str(e)}")
-                        continue
-                
-                # Gestion des trades existants
-                update_closed_trades()
-                for pair in list(active_trades):
-                    try:
-                        manage_open_trade(pair)
-                    except Exception as e:
-                        logger.error(f"Erreur gestion trade {pair}: {e}")
-            except Exception as e:
-                logger.error(f"Erreur majeure: {str(e)}")
-            
-            time.sleep(15)
-        else:
-            logger.info("🛑 Session inactive. Prochaine vérification dans 5 minutes...")
-            time.sleep(300)
-
+def load_historical_data(pair):
+    """Charge les données du 24/10/2023 au 25/10/2023"""
+    # Exemple pour EUR_USD
+    return [
+        1.0578, 1.0582, 1.0591, ...,  # Données du 24/10
+        1.0632, 1.0628, 1.0615, ...    # Données du 25/10
+    ] 
 
 def manage_open_trade(pair):
     """Gère les trades ouverts avec trailing stop et prise de profits partiels"""
@@ -2454,3 +2459,35 @@ def get_position_size(pair):
     elif float(position['position']['short']['units']) < 0:
         return position['position']['short']['units']
     return 0
+
+
+class MockDatetime:
+    @classmethod
+    def utcnow(cls):
+        return datetime.datetime(2023, 10, 25, 12, 0)  # Date fixe pour le test
+
+if __name__ == "__main__":
+    # Override temporel
+    datetime.datetime = MockDatetime
+    
+    # Configuration spécifique backtest
+    SIMULATION_MODE = True
+    client = None  # Désactive complètement OANDA
+    
+    logger.info("=== MODE BACKTEST ===")
+    logger.info(f"Simulation date: {datetime.datetime.utcnow().isoformat()}")
+    
+    # Initialisation des données historiques
+    CLOSES_HISTORY = {
+        "EUR_USD": [1.0632 + i*0.0001 for i in range(24)],  # Données fictives
+        "XAU_USD": [1800.50 + i*0.25 for i in range(24)]
+    }
+    
+    # Exécution pour les paires cibles
+    for pair in ["EUR_USD", "XAU_USD"]:
+        try:
+            logger.info(f"\n{'='*40}")
+            logger.info(f"Analyzing {pair}")
+            analyze_pair(pair)
+        except Exception as e:
+            logger.error(f"Erreur {pair}: {str(e)}")
