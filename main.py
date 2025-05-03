@@ -908,8 +908,19 @@ def detect_engulfing_patterns(candles):
     return engulfing_patterns
 
 def fetch_candles(pair, timeframe, params=None):
-    """Récupère les bougies avec validation renforcée du format de réponse"""
+    """Récupère les bougies avec gestion du mode simulation"""
     try:
+        if SIMULATION_MODE:
+            # Générer des données fictives basées sur CLOSES_HISTORY
+            if pair in CLOSES_HISTORY:
+                return [{
+                    'time': f"2023-10-25T{i:02d}:00:00Z",
+                    'mid': {'c': CLOSES_HISTORY[pair][i]},
+                    'complete': True
+                } for i in range(len(CLOSES_HISTORY[pair]))]
+            return []
+    """Récupère les bougies avec validation renforcée du format de réponse"""
+   
         if params is None:
             params = {"granularity": timeframe, "count": 200}
         elif not isinstance(params, dict):
@@ -2355,7 +2366,7 @@ if __name__ == "__main__":
     pairs_to_test = ["EUR_USD", "XAU_USD"]  # Paires à tester
     for pair in pairs_to_test:
         try:
-            analyze_pair(pair, days_back=1)  # Nouveau paramètre
+            analyze_pair(pair)  # Nouveau paramètre
         except Exception as e:
             logger.error(f"Erreur sur {pair}: {str(e)}")
 
@@ -2460,6 +2471,15 @@ def get_position_size(pair):
         return position['position']['short']['units']
     return 0
 
+def mock_utcnow():
+    return datetime.datetime(2023, 10, 25, 12, 0)
+
+def initialize_test_data():
+    """Initialise les données de test pour le backtest"""
+    for pair in ["EUR_USD", "XAU_USD"]:
+        # Créer des données M5 fictives (24 bougies)
+        closes = [1.0632 + i*0.0001 for i in range(24)] if pair == "EUR_USD" else [1800.50 + i*0.25 for i in range(24)]
+        CLOSES_HISTORY[pair] = closes
 
 class MockDatetime:
     @classmethod
@@ -2467,27 +2487,25 @@ class MockDatetime:
         return datetime.datetime(2023, 10, 25, 12, 0)  # Date fixe pour le test
 
 if __name__ == "__main__":
-    # Override temporel
-    datetime.datetime = MockDatetime
+    logger.info("🚀 Backtest journalier en cours...")
     
-    # Configuration spécifique backtest
+    # Patch temporel
+    def mock_utcnow():
+        return datetime.datetime(2023, 10, 25, 12, 0)
+    datetime.datetime.utcnow = mock_utcnow
+    
+    # Configuration du backtest
     SIMULATION_MODE = True
-    client = None  # Désactive complètement OANDA
+    initialize_test_data()
     
     logger.info("=== MODE BACKTEST ===")
     logger.info(f"Simulation date: {datetime.datetime.utcnow().isoformat()}")
-    
-    # Initialisation des données historiques
-    CLOSES_HISTORY = {
-        "EUR_USD": [1.0632 + i*0.0001 for i in range(24)],  # Données fictives
-        "XAU_USD": [1800.50 + i*0.25 for i in range(24)]
-    }
     
     # Exécution pour les paires cibles
     for pair in ["EUR_USD", "XAU_USD"]:
         try:
             logger.info(f"\n{'='*40}")
             logger.info(f"Analyzing {pair}")
-            analyze_pair(pair)
+            analyze_pair(pair)  # ❌ Plus d'argument days_back
         except Exception as e:
             logger.error(f"Erreur {pair}: {str(e)}")
