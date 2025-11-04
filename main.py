@@ -189,13 +189,14 @@ def calculate_bollinger_bands(closes, window=20, num_std=2):
         return (closes[-1], closes[-1])  # Fallback sécurisé
     
 def get_current_price(pair):
-    """Récupère le prix actuel pour une paire donnée."""
+    """Récupère le prix actuel (même depuis une bougie incomplète)."""
     try:
         candles = fetch_candles(pair, "M1", {"count": 1})
-        if candles and candles[-1]['complete']:
+        if candles:
+            # On accepte la bougie même si elle n'est pas 'complete'
             return float(candles[-1]['mid']['c'])
         else:
-            logger.warning(f"Pas de données pour {pair}")
+            logger.warning(f"Pas de bougies retournées pour {pair}")
             return None
     except Exception as e:
         logger.error(f"Erreur get_current_price pour {pair}: {e}")
