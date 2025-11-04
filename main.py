@@ -11,7 +11,6 @@ import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.accounts as accounts
 import oandapyV20.endpoints.trades as trades
-from oandapyV20.endpoints import pricing
 from email.mime.text import MIMEText
 import smtplib 
 from scipy.stats import gaussian_kde
@@ -146,8 +145,7 @@ def confirm_signal(pair, direction):
 
         # 3. Alignment price/zone
         price = get_current_price(pair)
-        raw_zones = analyze_htf(pair, params)
-        zones = [process_zone(z, 'ob') for z in raw_zones]
+        zones = analyze_htf(pair, params)
         valid_zones = [z for z in zones if isinstance(z, (list, tuple)) and len(z) > 0]
         return any(abs(price - z[0]) < 0.0002 for z in valid_zones)
 
@@ -162,111 +160,47 @@ def confirm_signal(pair, direction):
         is_price_approaching(pivot_levels[pair])
     )
 
-def calculate_dynamic_levels(pair, entry_price, direction):
-    """Calcule SL/TP avec Bollinger Bands et EMA50 (Nouvelle version)"""
-    closes_m15 = get_closes(pair, "M15", 50)
-    atr_value = calculate_atr_for_pair(pair)
-    
-    # Bollinger Bands M15
-    bb_upper, bb_lower = calculate_bollinger_bands(closes_m15)
-    
-    # EMA50 M15
-    ema50 = pd.Series(closes_m15).ewm(span=50, adjust=False).mean().iloc[-1]
-    
-    # Calcul de base SL
-    if direction == "SELL":
-        base_sl = entry_price + (PAIR_SETTINGS[pair]["atr_multiplier_sl"] * atr_value)
-        # Ajustement Bollinger
-        if not np.isnan(bb_upper) and base_sl < bb_upper + 0.2 * (bb_upper - bb_lower):
-            base_sl = bb_upper + 0.5 * atr_value
-    else:
-        base_sl = entry_price - (PAIR_SETTINGS[pair]["atr_multiplier_sl"] * atr_value)
-        if not np.isnan(bb_lower) and base_sl > bb_lower - 0.2 * (bb_upper - bb_lower):
-            base_sl = bb_lower - 0.5 * atr_value
-    
-    # Vérification EMA50
-    current_price = get_closes(pair, "M15", 1)[-1]
-    if ((direction == "SELL" and current_price > ema50) or 
-        (direction == "BUY" and current_price < ema50)):
-        base_sl *= 1.25
-    
-    # Calcul TP
-    tp_distance = abs(entry_price - base_sl) * PAIR_SETTINGS[pair]["atr_multiplier_tp"]
-    take_profit = entry_price - tp_distance if direction == "SELL" else entry_price + tp_distance
-    
-    return round(base_sl, 2), round(take_profit, 2)
-
-def is_ranging(pair, timeframe="H1", threshold=0.5):
-    """Determine if a pair is in a ranging market using ADX"""
-    try:
-        # Get ADX value (already have this calculation in your code)
-        params = {"granularity": timeframe, "count": 20, "price": "M"}
-        r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        candles = client.request(r)["candles"]
-        
-        highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
-        lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
-        closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
-        
-        if len(closes) < 14:  # Need at least 14 periods for ADX
-            return False
-            
-        adx_value = calculate_adx(highs, lows, closes)
-        return adx_value < threshold  # Market is ranging if ADX below threshold
-        
-    except Exception as e:
-        logger.error(f"Error checking ranging market for {pair}: {e}")
-        return False  # Default to False if error occurs
+def is_ranging(pair, timeframe="H1"):
+    adx = calculate_adx_for_pair(pair, timeframe)
+    # Ajustement du seuil selon l'instrument
+    threshold = 20 if pair in ["XAU_USD", "GBP_JPY"] else 25
+    return adx < threshold
 
 def calculate_bollinger_bands(closes, window=20, num_std=2):
-    """Version sécurisée avec gestion des données manquantes"""
+    """Version sécurisée avec gestion des None"""
     try:
-        if len(closes) < window or pd.Series(closes).isnull().any():
-            logger.debug(f"Données insuffisantes pour BB: {len(closes)}/{window}")
-            if closes:
-                last_close = closes[-1]
-                return (last_close, last_close)  # Retourne le dernier prix connu
+        if len(closes) < window or None in closes:
+            logger.warning(f"Données invalides pour BB: {len(closes)}/{window} ou valeurs None")
+            return (closes[-1] if closes else 0, closes[-1] if closes else 0)  # Retourne le dernier prix
+        
+        series = pd.Series(closes).dropna()
+        if series.empty:
             return (0, 0)
             
-        series = pd.Series(closes).dropna()
         rolling_mean = series.rolling(window).mean()
         rolling_std = series.rolling(window).std()
         
-        upper = rolling_mean + (rolling_std * num_std)
-        lower = rolling_mean - (rolling_std * num_std)
-        
-        return (upper.iloc[-1], lower.iloc[-1])
+        return (
+            rolling_mean.iloc[-1] + (rolling_std.iloc[-1] * num_std),
+            rolling_mean.iloc[-1] - (rolling_std.iloc[-1] * num_std)
+        )
     except Exception as e:
         logger.error(f"Erreur Bollinger Bands: {str(e)}")
-        return (closes[-1], closes[-1]) if closes else (0, 0)
+        return (closes[-1], closes[-1])  # Fallback sécurisé
     
 def get_current_price(pair):
-    if SIMULATION_MODE:
-        # Retourne le dernier prix historique connu
-        return CLOSES_HISTORY.get(pair, [0])[-1]
-    """Récupère le prix actuel via l'endpoint de pricing"""
+    """Récupère le prix actuel pour une paire donnée."""
     try:
-        params = {"instruments": pair}
-        r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params=params)
-        response = client.request(r)
-        
-        if 'prices' not in response or not response['prices']:
-            logger.warning(f"Aucune donnée de prix pour {pair}")
+        candles = fetch_candles(pair, "M1", {"count": 1})
+        if candles and candles[-1]['complete']:
+            return float(candles[-1]['mid']['c'])
+        else:
+            logger.warning(f"Pas de données pour {pair}")
             return None
-            
-        price_info = response['prices'][0]
-        bid = float(price_info['bids'][0]['price'])
-        ask = float(price_info['asks'][0]['price'])
-        return (bid + ask) / 2  # Prix moyen
-        
-    except (KeyError, IndexError) as e:
-        logger.error(f"Structure de données invalide pour {pair}: {e}")
-    except oandapyV20.exceptions.V20Error as e:
-        logger.error(f"Erreur OANDA {pair} [{e.code}]: {e.msg}")
     except Exception as e:
-        logger.error(f"Erreur inattendue pour {pair}: {str(e)}")
-    
-    return None
+        logger.error(f"Erreur get_current_price pour {pair}: {e}")
+        return None
+
 def calculate_atr(highs, lows, closes, period=14):
     try:
         if len(highs) < period or len(lows) < period or len(closes) < period:
@@ -506,23 +440,10 @@ PIN_BAR_RATIO_THRESHOLD = 3.0  # Exemple : une mèche doit être au moins 3 fois
 
 PAIR_SETTINGS = {
     "XAU_USD": {
-        "min_atr": 0.5,
-        "rsi_overbought": 68,
+        "min_atr": 0.5,  # Réduit de 0.8
+        "rsi_overbought": 68,  # Ajusté
         "rsi_oversold": 32,
-        "pin_bar_ratio": 2.0,
-        "atr_multiplier_sl": 2.5,  # Nouveau
-        "atr_multiplier_tp": 4.0,   # Nouveau
-        "min_volume_ratio": 1.3,
-        "bollinger_margin": 0.02,  # 2% de marge des Bandes
-        "volume_multiplier": 1.2      # Nouveau
-    },
-    "USD_JPY": {
-        "atr_multiplier_sl": 2.0,  # Augmenté de 1.8
-        "atr_multiplier_tp": 3.5,  # Augmenté de 3.2 
-        "min_sl_distance": 0.2,    # 20 pips
-        "spread_max": 0.03,
-        "rsi_overbought": 75,
-        "rsi_oversold": 25
+        "pin_bar_ratio": 2.0
     },
     "EUR_USD": {
         "min_atr": 0.0003,  # Réduit de 0.0005
@@ -610,102 +531,41 @@ def detect_pin_bars(candles, pair=None):
     return pin_bars
 
 def validate_signal(pair, signal):
-    """Version améliorée avec les nouvelles validations"""
-    try:
-        # 1. Vérifications existantes
-        weekly_atr = calculate_atr_for_pair(pair, "D", 14)
-        if signal.get('atr', 0) < weekly_atr * 0.15:
-            logger.warning(f"Volatilité actuelle trop faible pour {pair}")
-            return False
-
-        if not check_breakout(pair, signal['entry']):
-            logger.info(f"Aucune cassure confirmée pour {pair}")
-            return False
-
-        if is_ranging(pair):
-            logger.info(f"Marché en range pour {pair}")
-            return False
-
-        # 2. Nouveaux contrôles techniques
-        closes = get_closes(pair, "H1", 50)
-        current_price = get_current_price(pair)
-        
-        # Vérification Bollinger Bands
-        bb_upper, bb_lower = calculate_bollinger_bands(closes)
-        if current_price > bb_upper * 0.98 or current_price < bb_lower * 1.02:
-            logger.warning(f"Prix trop proche des Bandes Bollinger - Rejet")
-            return False
-
-        # Alignement EMA50
-        ema50 = pd.Series(closes).ewm(span=50).mean().iloc[-1]
-        if (signal['direction'] == "buy" and current_price < ema50) or \
-           (signal['direction'] == "sell" and current_price > ema50):
-            logger.warning("Désalignement avec EMA50 H1")
-            return False
-
-        # 3. Confirmation multi-timeframe
-        tf_confirmations = 0
-        for tf in ["M15", "H1", "H4"]:
-            tf_closes = get_closes(pair, tf, 50)
-            if len(tf_closes) < 50: continue
-            
-            ema_fast = pd.Series(tf_closes).ewm(span=20).mean().iloc[-1]
-            ema_slow = pd.Series(tf_closes).ewm(span=50).mean().iloc[-1]
-            
-            if signal['direction'] == "buy" and ema_fast > ema_slow:
-                tf_confirmations += 1
-            elif signal['direction'] == "sell" and ema_fast < ema_slow:
-                tf_confirmations += 1
-
-        if tf_confirmations < 2:
-            logger.warning(f"Confirmations multi-TF insuffisantes ({tf_confirmations}/3)")
-            return False
-
-        # 4. Analyse volumétrique
-        volume_data = get_volume_analysis(pair)  # À implémenter
-        if volume_data['current'] < volume_data['average'] * 1.2:
-            logger.warning("Volume insuffisant")
-            return False
-
-        # 5. Validations existantes pour paires JPY
-        jpy_pairs = ["CAD_JPY", "USD_JPY", "GBP_JPY"]
-        if pair in jpy_pairs:
-            settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
-            if signal['atr'] < settings["min_atr"] * 1.2:
-                logger.info(f"ATR trop faible pour {pair} ({signal['atr']})")
-                return False
-
-        # 6. Validation ADX existante
-        highs = [float(c['mid']['h']) for c in candles]
-        lows = [float(c['mid']['l']) for c in candles]
-        closes = [float(c['mid']['c']) for c in candles]
-        adx = calculate_adx(highs, lows, closes)
-        
-        min_adx = 20 if pair in CRYPTO_PAIRS else 25
-        if adx < min_adx:
-            logger.warning(f"Tendance trop faible (ADX={adx:.1f} < {min_adx})")
-            return False
-
-        return True
-
-    except Exception as e:
-        logger.error(f"Erreur validation signal {pair}: {str(e)}")
+    # Nouvelle vérification ajoutée
+    weekly_atr = calculate_atr_for_pair(pair, "D", 14)
+    if signal['atr'] < weekly_atr * 0.15:  # Volatilité actuelle < 30% de la volatilité hebdo
+        logger.warning(f"Volatilité actuelle trop faible pour {pair}")
+        return False
+    breakout_type = check_breakout(pair, signal['entry'])
+    if not breakout_type:
+        logger.info(f"Aucune cassure confirmée pour {pair}")
         return False
 
-def get_volume_analysis(pair):
-    """Analyse les volumes sur les dernières 20 bouches H1"""
-    try:
-        candles = fetch_candles(pair, "H1", 20)
-        volumes = [float(c['volume']) for c in candles if c['complete']]
-        
-        return {
-            'current': volumes[-1] if volumes else 0,
-            'average': np.mean(volumes[:-1]) if len(volumes) > 1 else 0,
-            'max': max(volumes) if volumes else 0
-        }
-    except Exception as e:
-        logger.error(f"Erreur analyse volume {pair}: {str(e)}")
-        return {'current': 0, 'average': 0}
+    # Vérification du régime de marché
+    if is_ranging(pair):
+        logger.info(f"Marché en range pour {pair}")
+        return False
+
+    # Configuration spécifique aux paires JPY
+    jpy_pairs = ["CAD_JPY", "USD_JPY", "GBP_JPY"]
+    if pair in jpy_pairs:
+        settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+        if signal['atr'] < settings["min_atr"] * 1.2:
+            logger.info(f"ATR trop faible pour {pair} ({signal['atr']})")
+            return False
+    # Calcul de l'ADX
+    highs = [float(c['mid']['h']) for c in candles]
+    lows = [float(c['mid']['l']) for c in candles]
+    closes = [float(c['mid']['c']) for c in candles]
+    adx = calculate_adx(highs, lows, closes)
+    
+    # Seuil ADX dynamique selon le type d'instrument
+    min_adx = 20 if pair in CRYPTO_PAIRS else 25
+    if adx < min_adx:
+        logger.warning(f"Tendance trop faible (ADX={adx:.1f} < {min_adx})")
+        return False
+
+    return True
 
 def is_strong_trend(pair, direction):
     """Vérifie l'alignement sur M15/H1/H4 avec force"""
@@ -733,53 +593,95 @@ def is_strong_trend(pair, direction):
             logger.error(f"Error checking trend on {tf}: {e}")
     
     return alignments >= 2  # Au moins 2/3 timeframes alignés
-
 def analyze_gold():
-    """Analyse technique avancée spécifique à l'or (XAU_USD)"""
     pair = "XAU_USD"
     params = {"granularity": "H1", "count": 100, "price": "M"}
     logger.info(f"Analyse approfondie de {pair}...")
 
     try:
         # 1. Récupération des données multi-timeframe
-        candles_h1 = fetch_candles(pair, params["granularity"], params)  
-        candles_m15 = fetch_candles(pair, "M15", {"count": 50})           
+        params_h1 = {"granularity": "H1", "count": 100, "price": "M"}
+        params_m15 = {"granularity": "M15", "count": 50, "price": "M"}
+        
+        #candles_h1 = client.request(instruments.InstrumentsCandles(instrument=pair, params=params_h1))["candles"]
+        candles_h1 = fetch_candles(pair, params_h1["granularity"], params_h1)  
+        candles_m15 = fetch_candles(pair, params_m15["granularity"], params_m15)           
+        #candles_m15 = fetch_candles(pair, params_m15)
 
         # 2. Calcul des indicateurs techniques
         closes_h1 = [float(c['mid']['c']) for c in candles_h1 if c['complete']]
         highs_h1 = [float(c['mid']['h']) for c in candles_h1 if c['complete']]
         lows_h1 = [float(c['mid']['l']) for c in candles_h1 if c['complete']]
 
+        # Bollinger Bands (H1)
+        bb_upper_h1, bb_lower_h1 = calculate_bollinger_bands(closes_h1)
+        current_price = get_current_price(pair)
+        
+        # Volatilité et momentum
+        atr_h1 = calculate_atr(highs_h1[-14:], lows_h1[-14:], closes_h1[-14:])
+        rsi_h1 = calculate_rsi(closes_h1[-14:])
+        rsi_m15 = calculate_rsi([float(c['mid']['c']) for c in candles_m15 if c['complete']][-14:])
+
         # 3. Détection des niveaux clés
-        asian_high, asian_low = get_asian_session_range(pair)
         support = min(lows_h1[-20:])
         resistance = max(highs_h1[-20:])
+        recent_low = min(lows_h1[-5:])
+        recent_high = max(highs_h1[-5:])
 
         # 4. Configuration spécifique à l'or
         GOLD_SETTINGS = {
             "rsi_overbought": 65,
             "rsi_oversold": 35,
             "atr_multiplier_sl": 1.8,
-            "atr_multiplier_tp": 3.2
+            "atr_multiplier_tp": 3.2,
+            "min_volume_ratio": 1.3
         }
 
-        # 5. Analyse des conditions
-        current_price = get_current_price(pair)
-        rsi_h1 = calculate_rsi(closes_h1[-14:])
-        rsi_m15 = calculate_rsi([float(c['mid']['c']) for c in candles_m15][-14:])
-        atr_h1 = calculate_atr(highs_h1, lows_h1, closes_h1)
+        # 5. Analyse des conditions de marché
+        is_oversold = rsi_h1 < GOLD_SETTINGS["rsi_oversold"] and rsi_m15 < 40
+        is_overbought = rsi_h1 > GOLD_SETTINGS["rsi_overbought"] and rsi_m15 > 60
+        near_support = current_price <= support * 1.005
+        near_resistance = current_price >= resistance * 0.995
+        volatility_ok = atr_h1 > 15  # $15 de volatilité horaire
 
         # 6. Scénarios de trading
         scenarios = []
-        if current_price <= asian_high * 1.005 and rsi_h1 < 35:
-            scenarios.append({...})  # Signal d'achat
+        if near_support and is_oversold:
+            scenarios.append({
+                "direction": "BUY",
+                "reason": f"Rebond technique sur support {support:.2f} avec RSI oversold (H1: {rsi_h1:.1f}/M15: {rsi_m15:.1f})",
+                "entry": current_price,
+                "tp": recent_high,
+                "sl": support - (atr_h1 * GOLD_SETTINGS["atr_multiplier_sl"])
+            })
 
-        if current_price >= asian_low * 0.995 and rsi_h1 > 65:
-            scenarios.append({...})  # Signal de vente
+        if near_resistance and is_overbought:
+            scenarios.append({
+                "direction": "SELL",
+                "reason": f"Rejection à la résistance {resistance:.2f} avec RSI overbought (H1: {rsi_h1:.1f}/M15: {rsi_m15:.1f})",
+                "entry": current_price,
+                "tp": recent_low,
+                "sl": resistance + (atr_h1 * GOLD_SETTINGS["atr_multiplier_sl"])
+            })
 
-        # 7. Envoi d'alerte
-        if scenarios:
-            send_gold_alert(pair, scenarios, {...})
+        # 7. Validation finale
+        valid_scenarios = []
+        for scenario in scenarios:
+            if validate_gold_signal(scenario, atr_h1):
+                valid_scenarios.append(scenario)
+
+        # 8. Envoi d'alerte si scénario valide
+        if valid_scenarios:
+            send_gold_alert(pair, valid_scenarios, {
+                "price": current_price,
+                "rsi_h1": rsi_h1,
+                "rsi_m15": rsi_m15,
+                "atr": atr_h1,
+                "support": support,
+                "resistance": resistance,
+                "bb_upper": bb_upper_h1,
+                "bb_lower": bb_lower_h1
+            })
 
     except Exception as e:
         logger.error(f"Erreur analyse OR: {str(e)}")
@@ -908,48 +810,27 @@ def detect_engulfing_patterns(candles):
     return engulfing_patterns
 
 def fetch_candles(pair, timeframe, params=None):
-    """Récupère les bougies avec gestion du mode simulation"""
+    """Récupère les bougies via API OANDA"""
     try:
-        if SIMULATION_MODE:
-            # Générer des données fictives basées sur CLOSES_HISTORY
-            if pair in CLOSES_HISTORY:
-                return [{
-                    'time': f"2023-10-25T{i:02d}:00:00Z",
-                    'mid': {'c': CLOSES_HISTORY[pair][i]},
-                    'complete': True
-                } for i in range(len(CLOSES_HISTORY[pair]))]
-            return []
-    """Récupère les bougies avec validation renforcée du format de réponse"""
-   
-        if params is None:
-            params = {"granularity": timeframe, "count": 200}
-        elif not isinstance(params, dict):
-            raise TypeError("Les paramètres doivent être un dictionnaire")
-
-        # Envoi de la requête API
+        if not params:
+            params = {"granularity": timeframe, "count": 50}
         r = instruments.InstrumentsCandles(instrument=pair, params=params)
         response = client.request(r)
-
-        # Validation approfondie de la réponse
-        if not isinstance(response, dict):
-            logger.error(f"Réponse API invalide pour {pair}: Type {type(response)}")
-            return []
-
-        if 'candles' not in response:
-            logger.error(f"Clé 'candles' manquante pour {pair}: {response.keys()}")
-            return []
-
-        candles = response['candles']
-        if not isinstance(candles, list):
-            logger.error(f"Format de bougies invalide pour {pair}: {type(candles)}")
-            return []
-
-        # Filtrage des bougies complètes
+        
+        # Validation des données
+        candles = response.get("candles", [])
         valid_candles = []
         for c in candles:
-            if isinstance(c, dict) and c.get('complete', False):
-                valid_candles.append(c)
-                
+            if c['complete'] and all(key in c['mid'] for key in ['o', 'h', 'l', 'c']):
+                try:
+                    c['mid']['o'] = float(c['mid']['o'])
+                    c['mid']['h'] = float(c['mid']['h'])
+                    c['mid']['l'] = float(c['mid']['l'])
+                    c['mid']['c'] = float(c['mid']['c'])
+                    valid_candles.append(c)
+                except ValueError as ve:
+                    logger.warning(f"Bougie invalide ignorée: {ve}")
+        
         return valid_candles
 
     except oandapyV20.exceptions.V20Error as e:
@@ -1014,52 +895,35 @@ def check_breakout(pair, price, window=5):
 
 
 def analyze_htf(pair, params=None):
-    """Analyse des Order Blocks haute timeframe avec validation de type stricte"""
+    """Détection précise des Order Blocks avec gestion des paires JPY"""
     try:
-        # ... (code existant)
-        
+        candles = fetch_candles(pair, "H4", {"count": 100})
         ob_zones = []
-        for i in range(2, len(candles)):
-            # ... (logique existante de détection OB)
-            
-            # Validation stricte du type de sortie
-            if isinstance(zone_high, (int, float)) and isinstance(zone_low, (int, float)):
-                ob_zones.append((round(zone_high, 5), round(zone_low, 5)))
-            else:
-                logger.warning(f"Format de zone invalide ignoré pour {pair}")
+        seuil = 0.0008 if "_JPY" not in pair else 0.08
 
-        return ob_zones[-3:] if ob_zones else [(0.0, 0.0)]  # Tuple par défaut
+        for i in range(2, len(candles)):
+            if not all([candles[j]['complete'] for j in [i-2, i-1, i]]):
+                continue
+
+            # Logique de détection OB
+            prev_bullish = (float(candles[i-2]['mid']['c']) > float(candles[i-2]['mid']['o'])) 
+            prev_bullish &= (float(candles[i-1]['mid']['c']) > float(candles[i-1]['mid']['o']))
+            
+            current_bearish = (float(candles[i]['mid']['c']) < float(candles[i]['mid']['o']))
+            strong_body = abs(float(candles[i]['mid']['c']) - float(candles[i]['mid']['o'])) > seuil
+
+            if prev_bullish and current_bearish and strong_body:
+                ob_zones.append((
+                    round(float(candles[i]['mid']['h']), 5),
+                    round(float(candles[i]['mid']['l']), 5)
+                ))
+
+        return ob_zones[-3:]  # Retourne uniquement les OB
 
     except Exception as e:
         logger.error(f"Erreur analyse_htf: {str(e)}")
-        return [(0.0, 0.0)]  # Retourne un tuple vide sécurisé
+        return []  # Retourne une liste vide au lieu de None
 
-def process_zone(zone, zone_type):
-    """Conversion robuste en tuple avec fallback sécurisé"""
-    try:
-        # Gestion des numpy types
-        if hasattr(zone, 'item'):
-            zone = zone.item()
-            
-        # Conversion des singles valeurs en range
-        if isinstance(zone, (int, float)):
-            spread = 0.00015 if "_JPY" not in pair else 0.015
-            return (round(zone - spread, 5), round(zone + spread, 5))
-            
-        # Conversion des dicts
-        if isinstance(zone, dict):
-            return (float(zone.get('low', 0)), float(zone.get('high', 0)))
-            
-        # Validation finale
-        if isinstance(zone, (list, tuple)) and len(zone) >= 2:
-            return (round(float(zone[0]), 5), round(float(zone[1]), 5))
-
-        logger.warning(f"Structure de zone inconnue: {type(zone)}")
-        return (0.0, 0.0)  # Fallback sécurisé
-        
-    except Exception as e:
-        logger.error(f"Erreur process_zone: {str(e)}")
-        return (0.0, 0.0)
 def detect_ltf_patterns(candles, pairs):
     """Détecte des patterns sur des timeframes basses (pin bars, engulfing patterns)"""
     patterns_detected = []
@@ -1117,22 +981,30 @@ def calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
         return 0
 
 def process_zone(zone, zone_type):
-    """Gère les différents formats de zones"""
+    """
+    Extrait le prix clé d'une zone selon son type.
+    
+    Args:
+        zone (list/dict/float): Zone détectée (FVG, OB, ou niveau classique)
+        zone_type (str): Type de zone ('fvg', 'ob', 'session', etc.)
+
+    Returns:
+        float: Prix cible de la zone
+        None: Si le type n’est pas reconnu
+    """
     try:
-        if isinstance(zone, float):
-            return (zone - 0.0001, zone + 0.0001)  # Crée un mini-range
-            
-        if isinstance(zone, (list, tuple)):
-            return (float(min(zone)), float(max(zone)))
-            
-        if isinstance(zone, dict):
-            return (float(zone.get('low', 0)), float(zone.get('high', 0)))
-            
-        logger.warning(f"Type de zone non supporté: {type(zone)}")
-        return (0, 0)
+        if zone_type == "fvg":
+            return (float(zone[0]) + float(zone[1])) / 2  # Milieu du FVG
+        elif zone_type == "ob":
+            return float(zone[1])  # Bas pour bearish OB (achat)
+        elif zone_type == "session":
+            return float(zone)  # Niveau simple
+        else:
+            logger.warning(f"[process_zone] Type de zone inconnu : {zone_type}")
+            return None
     except Exception as e:
-        logger.error(f"Erreur traitement zone: {str(e)}")
-        return (0, 0)
+        logger.error(f"[process_zone] Erreur traitement zone {zone} ({zone_type}) : {e}")
+        return None
 
 def process_pin_bar(pin_bar_data):
     """Traite les données d'une Pin Bar."""
@@ -1162,24 +1034,19 @@ def process_pin_bar(pin_bar_data):
         return None
 
 def update_stop_loss(trade_id, new_stop_loss):
-    """Met à jour le Stop Loss d'une position existante"""
+    """Met à jour le stop-loss d’un trade spécifique."""
     try:
         data = {
-            "order": {
-                "stopLoss": {
-                    "price": "{0:.5f}".format(new_stop_loss),
-                    "timeInForce": "GTC"
-                }
+            "stopLoss": {
+                "price": f"{new_stop_loss:.5f}",
+                "timeInForce": "GTC"
             }
         }
-        r = orders.OrderReplace(accountID=OANDA_ACCOUNT_ID, orderSpecifier=trade_id, data=data)
-        response = client.request(r)
-        if 'orderCancelTransaction' in response:
-            logger.info(f"Stop loss mis à jour: {new_stop_loss}")
-        else:
-            logger.error(f"Échec mise à jour SL: {response}")
+        r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
+        client.request(r)
+        logger.info(f"✅ Stop-loss mis à jour pour {trade_id} → {new_stop_loss}")
     except Exception as e:
-        logger.error(f"Erreur mise à jour SL: {e}")
+        logger.error(f"❌ Échec mise à jour SL ({trade_id}): {e}")
 
 def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, key_zones, atr, candles):
     """Détermine si les conditions pour ouvrir un trade sont remplies"""
@@ -1212,9 +1079,8 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
 
         # 3. Détection des signaux
         # Vérification des zones clés
-        for raw_zone in key_zones:
-            zone = process_zone(raw_zone, 'ob')
-            if abs(price - zone[0]) <= RETEST_ZONE_RANGE:
+        for zone in key_zones:
+            if abs(price - zone[0]) <= RETEST_ZONE_RANGE or abs(price - zone[1]) <= RETEST_ZONE_RANGE:
                 signals["zone"] = True
                 reasons.append("Prix dans zone clé")
                 break
@@ -1284,10 +1150,7 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
         if not check_momentum(pair):
             logger.info(f"Momentum défavorable pour {pair}")
             return False
-        # Avant la vérification des zones
-        if not isinstance(zones, list):
-            logger.warning("Format de zones invalide")
-            return False
+
         if not confirm_signal(pair, direction):
             logger.info(f"Confirmation échouée pour {pair}")
             return False
@@ -1305,18 +1168,6 @@ def should_open_trade(pair, rsi, macd, macd_signal, breakout_detected, price, ke
     except Exception as e:
         logger.error(f"Erreur dans should_open_trade pour {pair}: {str(e)}")
         return False
-
-def validate_spread(pair):
-    bid = get_current_price(pair, 'bid')
-    ask = get_current_price(pair, 'ask')
-    spread = ask - bid
-    
-    if "_JPY" in pair:
-        return spread <= 0.03  # 3 pips max
-    elif "XAU" in pair:
-        return spread <= 0.5   # 50 cents max
-    else:
-        return spread <= 0.0003
 
 def detect_reversal_patterns(candles):
     """Détecte des patterns de retournement (pin bars, engulfings)"""
@@ -1365,59 +1216,56 @@ def validate_trailing_stop_loss_distance(pair, distance):
         return min_distance
     return distance
 
-def place_trade(*args, **kwargs):
-    """Désactivée"""
-    logger.info("Fonction désactivée - Mode alerte email seulement")
-
+def place_trade(pair, direction, entry_price, stop_loss_price, atr, account_balance):
+    """
+    Place un trade réel sur OANDA si SIMULATION_MODE = False.
+    Sinon, enregistre le trade dans l'historique (mode simulation).
+    """
     # 1. Vérifier si un trade est déjà actif sur cette paire
     if pair in active_trades:
         logger.info(f"🚫 Trade déjà actif sur {pair}. Aucun nouveau trade ouvert.")
         return None
+
+    # 2. Vérification des paramètres
     if None in [entry_price, stop_loss_price, direction, atr, account_balance]:
-        logger.error("Paramètres manquants pour le trade")
+        logger.error("❌ Paramètres manquants pour le trade.")
         return None
 
-    # 2. Conversion spécifique pour certaines paires (exemple : GBP_JPY)
-    PAIR_SETTINGS = {
+    # 3. Paramètres spécifiques à chaque paire
+    PAIR_DECIMAL_SETTINGS = {
         "XAU_USD": {"decimal": 2, "min_distance": 0.5},
         "XAG_USD": {"decimal": 2, "min_distance": 0.1},
         "EUR_USD": {"decimal": 5, "min_distance": 0.0005},
         "GBP_JPY": {"decimal": 3, "min_distance": 0.05},
         "USD_JPY": {"decimal": 3, "min_distance": 0.05},
-        "DEFAULT": {"decimal": 5, "min_distance": 0.0005}  # Valeur par défaut
+        "DEFAULT": {"decimal": 5, "min_distance": 0.0005}
     }
-    settings = PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
+    settings = PAIR_DECIMAL_SETTINGS.get(pair, PAIR_DECIMAL_SETTINGS["DEFAULT"])
+    decimal_places = settings["decimal"]
+    min_distance = settings["min_distance"]
 
-    # Appliquer l'arrondi spécifique à chaque paire
-    entry_price = round(entry_price, settings["decimal"])
-    stop_loss_price = round(stop_loss_price, settings["decimal"])
+    # 4. Arrondir les prix selon la paire
+    entry_price = round(entry_price, decimal_places)
+    stop_loss_price = round(stop_loss_price, decimal_places)
 
-    # 3. Calcul de la taille de position
+    # 5. Calculer le take profit
+    take_profit_price = entry_price + (ATR_MULTIPLIER_TP * atr if direction == "buy" else -ATR_MULTIPLIER_TP * atr)
+    take_profit_price = round(take_profit_price, decimal_places)
+
+    # 6. Vérifier la distance minimale SL
+    actual_sl_distance = abs(entry_price - stop_loss_price)
+    if actual_sl_distance < min_distance:
+        logger.warning(f"Distance SL ({actual_sl_distance}) < min ({min_distance}). Ajustement automatique.")
+        stop_loss_price = entry_price - min_distance if direction == "buy" else entry_price + min_distance
+        stop_loss_price = round(stop_loss_price, decimal_places)
+
+    # 7. Calculer la taille de la position
     units = calculate_position_size(account_balance, entry_price, stop_loss_price, pair)
     if units <= 0:
-        logger.error(f"❌ Taille de position invalide ({units}). Aucun trade exécuté.")
+        logger.error("❌ Taille de position invalide. Trade annulé.")
         return None
 
-    # 4. Calcul des niveaux de Stop Loss et Take Profit
-    take_profit_price = round(
-        entry_price + (ATR_MULTIPLIER_TP * atr if direction == "buy" else -ATR_MULTIPLIER_TP * atr),
-        settings["decimal"]
-    )
-
-    # Validation de la distance minimale pour le Stop Loss
-    min_distance = settings["min_distance"]
-    if abs(entry_price - stop_loss_price) < min_distance:
-        logger.warning(f"Distance SL trop faible (<{min_distance}), ajustement automatique.")
-        stop_loss_price = round(
-            entry_price - (min_distance if direction == "buy" else -min_distance),
-            settings["decimal"]
-        )
-
-    # 5. Validation de la distance initiale du Trailing Stop Loss
-    trailing_stop_loss_distance = TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001
-    validated_trailing_distance = validate_trailing_stop_loss_distance(pair, trailing_stop_loss_distance)
-
-    # 6. Préparation des données pour l'ordre
+    # 8. Préparer les données d’ordre
     order_data = {
         "order": {
             "instrument": pair,
@@ -1425,62 +1273,61 @@ def place_trade(*args, **kwargs):
             "type": "MARKET",
             "positionFill": "DEFAULT",
             "stopLossOnFill": {
-                "price": f"{stop_loss_price:.{settings['decimal']}f}"
+                "price": f"{stop_loss_price:.{decimal_places}f}",
+                "timeInForce": "GTC"
             },
             "takeProfitOnFill": {
-                "price": f"{take_profit_price:.{settings['decimal']}f}"
-            },
-            "trailingStopLossOnFill": {
-                "distance": f"{validated_trailing_distance:.5f}",
+                "price": f"{take_profit_price:.{decimal_places}f}",
                 "timeInForce": "GTC"
             }
         }
     }
 
-    # Journalisation des détails du trade
-    logger.info(f"""
-    📈 SIGNAL CONFIRMÉ - {pair} {direction.upper()} ✅
-    ░ Entrée: {entry_price:.5f}
-    ░ SL: {stop_price:.5f} (Distance: {abs(entry_price-stop_price):.2f} pips)
-    ░ TP: {take_profit:.5f} (RR: {(take_profit-entry_price)/(entry_price-stop_price):.1f}:1)
-    ░ ATR H1: {atr_h1:.5f}
-    ░ Alignement tendances: {is_trend_aligned(pair, direction)}
-    ░ Régime marché: {'Trending' if not is_ranging(pair) else 'Range'}
-    """)
-    # 7. Exécution en mode réel
+    # 9. Ajouter un Trailing Stop Loss si activé
+    trailing_distance_pips = TRAILING_ACTIVATION_THRESHOLD_PIPS
+    pip_value = 0.01 if "_JPY" in pair else 0.0001
+    trailing_distance_price = trailing_distance_pips * pip_value
+    validated_trailing = validate_trailing_stop_loss_distance(pair, trailing_distance_price)
+    order_data["order"]["trailingStopLossOnFill"] = {
+        "distance": f"{validated_trailing:.5f}",
+        "timeInForce": "GTC"
+    }
+
+    # 10. Exécution ou simulation
     if not SIMULATION_MODE:
+        logger.info(f"📤 Envoi d’un ordre réel sur {pair} ({direction.upper()})...")
         try:
             r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
             response = client.request(r)
-            
             if 'orderCreateTransaction' in response:
                 trade_id = response['orderCreateTransaction']['id']
-                logger.info(f"✅ Trade exécuté (ID: {trade_id})")
+                active_trades.add(pair)
+                logger.info(f"✅ Trade exécuté avec succès — ID: {trade_id}")
                 return trade_id
             else:
-                logger.error(f"❌ Réponse OANDA anormale: {response}")
+                logger.error(f"❌ Réponse inattendue de l’API : {response}")
                 return None
-
         except oandapyV20.exceptions.V20Error as e:
-            error_details = e.msg if hasattr(e, "msg") else str(e)
-            logger.error(f"Erreur OANDA: {error_details}")
-            
-            # Si l'erreur est liée à la distance minimale
-            if "TRAILING_STOP_LOSS_ON_FILL_PRICE_DISTANCE_MINIMUM_NOT_MET" in error_details:
-                logger.warning("La distance minimale du Trailing Stop Loss n'est pas respectée. Réessayer avec une distance ajustée.")
-                adjusted_distance = validate_trailing_stop_loss_distance(pair, validated_trailing_distance * 2)
-                order_data["order"]["trailingStopLossOnFill"]["distance"] = f"{adjusted_distance:.5f}"
-                
+            logger.error(f"❌ Erreur OANDA API : {e.msg}")
+            # Tentative de fallback sans trailing stop
+            if "TRAILING_STOP_LOSS" in str(e):
+                logger.warning("Tentative sans trailing stop loss...")
+                order_data["order"].pop("trailingStopLossOnFill", None)
                 try:
-                    response = client.request(orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data))
-                    logger.info(f"Trade exécuté après ajustement: {response}")
-                    return response['orderCreateTransaction']['id']
-                except Exception as e:
-                    logger.error(f"Échec de l'exécution après ajustement: {e}")
+                    r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+                    response = client.request(r)
+                    trade_id = response['orderCreateTransaction']['id']
+                    active_trades.add(pair)
+                    logger.info(f"✅ Trade exécuté sans trailing — ID: {trade_id}")
+                    return trade_id
+                except Exception as e2:
+                    logger.error(f"❌ Échec même sans trailing : {e2}")
                     return None
-
-    # 8. Mode simulation
+        except Exception as e:
+            logger.error(f"❌ Erreur inattendue lors de l’exécution : {e}")
+            return None
     else:
+        # Mode simulation
         trade_info = {
             "timestamp": datetime.utcnow().isoformat(),
             "pair": pair,
@@ -1493,8 +1340,10 @@ def place_trade(*args, **kwargs):
         }
         trade_history.append(trade_info)
         active_trades.add(pair)
-        logger.info("📊 Trade simulé (non exécuté)")
+        logger.info("🧪 Trade simulé (mode simulation activé).")
         return f"SIM_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+
         
 def validate_numeric(value, name):
     """Valide qu'une valeur est numérique."""
@@ -1626,25 +1475,6 @@ class LiquidityHunter:
             "DEFAULT": 0.0001
         }
 
-    def _get_volume_data(self, pair):
-        """Récupère les données de volume historiques"""
-        try:
-            params = {"granularity": "H1", "count": 20}
-            r = instruments.InstrumentsCandles(instrument=pair, params=params)
-            candles = client.request(r)["candles"]
-            
-            volumes = [float(c['volume']) for c in candles if c['complete']]
-            
-            return {
-                "last": volumes[-1] if volumes else 0,
-                "average": np.mean(volumes) if volumes else 0,
-                "max": np.max(volumes) if volumes else 0,
-                "min": np.min(volumes) if volumes else 0
-            }
-        except Exception as e:
-            logger.error(f"Erreur récupération volume {pair}: {str(e)}")
-            return {"last": 0, "average": 0, "max": 0, "min": 0}
-            
     def _is_london_session(self):
         """Vérifie si c'est la session londonienne (8h-17h CET)"""
         now = datetime.utcnow()
@@ -1699,49 +1529,34 @@ class LiquidityHunter:
         return False
     
     def analyze_htf_liquidity(self, pair):
-        """Analyse des zones de liquidité haute timeframe"""
+        """Analyse approfondie des zones de liquidité HTF"""
         try:
-            # Récupération des données avec timeout
-            params = {"granularity": "H4", "count": 100, "price": "M"}
-            candles = fetch_candles(pair, "H4", params)
+            # Récupération des FVG et Order Blocks
+            ob_zones = analyze_htf(pair)
         
-            if not isinstance(candles, list):
-                logger.error(f"Type de bougies invalide pour {pair}: {type(candles)}")
-                return False
-
-            # Validation des données
-            if len(candles) < 50:
-                logger.warning(f"Données insuffisantes pour {pair} ({len(candles)} bougies)")
-                return False
-
-            # Traitement des volumes
-            volumes = []
-            closes = []
-            for c in candles:
-                if isinstance(c, dict) and c.get('complete', False):
-                    try:
-                        volumes.append(float(c['volume']))
-                        closes.append(float(c['mid']['c']))
-                    except (KeyError, ValueError) as e:
-                        logger.warning(f"Erreur traitement bougie: {e}")
-
-            # Détection des zones de volume
-            high_volume_zones = [
-                closes[i] 
-                for i in range(len(volumes)) 
-                if volumes[i] > np.mean(volumes) * 1.5
-            ]
-
-            # Mise à jour du cache
+            # Récupération des données de volume
+            htf_params  = {"granularity": "H4", "count": 100, "price": "M"}
+            candles = fetch_candles(pair, "H4", htf_params)  # Ajout de `params`
+        
+            volumes = [float(c['volume']) for c in candles if c['complete']]
+            closes = [float(c['mid']['c']) for c in candles if c['complete']]
+        
+            # Détection des zones de volume élevé
+            high_volume_zones = []
+            avg_volume = np.mean(volumes)
+            for i in range(len(volumes)):
+                if volumes[i] > avg_volume * 2:  # Volume 2x supérieur à la moyenne
+                     high_volume_zones.append(closes[i])
+        
+            # Enregistrement des zones
             self.liquidity_zones[pair] = {
-                'volume_zones': high_volume_zones,
+                'ob': ob_zones,
+                'volume': high_volume_zones,
                 'last_update': datetime.utcnow()
             }
-
             return True
-
         except Exception as e:
-            logger.error(f"Erreur analyse liquidité HTF {pair}: {str(e)}")
+            logger.error(f"Erreur analyse liquidité HTF {pair}: {e}")
             return False
     
     def _is_price_near_zone(self, price, zone, pair):
@@ -2015,32 +1830,6 @@ class LiquidityHunter:
         except Exception as e:
             logger.error(f"ERREUR CRITIQUE confiance {pair}: {str(e)}", exc_info=True)
             return 0
-def initialize_pair_data(pair):
-    """Initialisation sécurisée des données par paire"""
-    try:
-        # Vérification du type de réponse
-        params = {"granularity": "H1", "count": HISTORY_LENGTH}
-        candles = fetch_candles(pair, "H1", params)
-        
-        if not isinstance(candles, list):
-            raise TypeError(f"Type inattendu pour candles: {type(candles)}")
-
-        # Traitement des closes
-        valid_closes = []
-        for c in candles:
-            if isinstance(c, dict) and 'mid' in c:
-                try:
-                    valid_closes.append(float(c['mid']['c']))
-                except (KeyError, ValueError):
-                    continue
-
-        CLOSES_HISTORY[pair] = valid_closes[-HISTORY_LENGTH:]
-        logger.info(f"Données initialisées pour {pair}: {len(valid_closes)} closes valides")
-
-    except Exception as e:
-        logger.error(f"Erreur initialisation {pair}: {str(e)}")
-        CLOSES_HISTORY[pair] = []
-
     def calculate_vwap(pair, timeframe="H1", period=20):
         """Calcule le VWAP pour une paire donnée."""
         try:
@@ -2214,86 +2003,70 @@ def analyze_pair(pair):
     try:
         # Récupération des données historiques
         params = {"granularity": "H1", "count": HISTORY_LENGTH, "price": "M"}
-        #candles = fetch_candles(pair, params["granularity"], params)
+        candles = fetch_candles(pair, params["granularity"], params)
         
-        candles = []
-        try:
-            if SIMULATION_MODE:
-                candles = [{
-                    'time': datetime.datetime(2023, 10, 25, h).isoformat() + "Z",
-                    'mid': {'c': CLOSES_HISTORY[pair][h]},
-                    'complete': True
-                } for h in range(24)]
-            else:
-                candles = fetch_candles(pair)  # Appel réel        
-
-        # Filtrage des bougies valides
-        valid_closes = []
-        for c in candles:
-            if isinstance(c, dict) and 'mid' in c and 'c' in c['mid'] and c.get('complete', False):
-                valid_closes.append(float(c['mid']['c']))
-            else:
-                logger.warning(f"Bougie mal formatée ignorée pour {pair}: {c}")
-
         # Mise à jour de l'historique
-        CLOSES_HISTORY[pair] = (CLOSES_HISTORY[pair] + valid_closes)[-HISTORY_LENGTH:]
+        new_closes = [float(c['mid']['c']) for c in candles if c['complete']]
+        CLOSES_HISTORY[pair] = (CLOSES_HISTORY[pair] + new_closes)[-HISTORY_LENGTH:]
 
         # Vérifier la qualité des données
         if len(CLOSES_HISTORY[pair]) < 50:
             logger.warning(f"Données insuffisantes pour {pair} ({len(CLOSES_HISTORY[pair])} bougies)")
             return
 
-        # Calcul des RSI glissants
-        rsi_values = [calculate_rsi(CLOSES_HISTORY[pair][i-14:i]) for i in range(14, len(CLOSES_HISTORY[pair]))]
-        divergence = check_rsi_divergence(CLOSES_HISTORY[pair][-len(rsi_values):], rsi_values)
+        # Calcul des indicateurs
+        rsi_values = [calculate_rsi(closes[-14:]) for closes in CLOSES_HISTORY[pair]]
+        divergence = check_rsi_divergence(CLOSES_HISTORY[pair], rsi_values)
 
     except Exception as e:
         logger.error(f"Erreur initialisation données {pair}: {str(e)}")
         return
 
-    # Vérifiez le prix actuel
+    # 1. Vérifiez les prix
     price = get_current_price(pair)
     if price is None:
         logger.error(f"Impossible de récupérer le prix pour {pair}")
         return
     logger.info(f"Prix actuel: {price}")
     
-    # Vérifiez les indicateurs
+    # 2. Vérifiez les indicateurs
     atr = calculate_atr_for_pair(pair)
     logger.info(f"ATR: {atr if atr else 'Erreur de calcul'}")
     
-    # Vérifiez les tendances
+    # 3. Vérifiez les tendances
     logger.info(f"Tendance H1 alignée BUY: {is_trend_aligned(pair, 'buy')}")
     logger.info(f"Tendance H1 alignée SELL: {is_trend_aligned(pair, 'sell')}")    
     
-    # Vérification divergence
+    # 4. Vérification divergence
     if divergence == 'bearish':
         logger.warning("Divergence baissière détectée - annulation signal")
         return
-
+    
     hunter = LiquidityHunter()
-
+    
     try:
-        # Récupération des données brutes
+        # 5. Récupération des données brutes
         r = instruments.InstrumentsCandles(
             instrument=pair,
             params={"granularity": "H1", "count": 50}
         )
         response = client.request(r)
-
+        
+        # Validation de la structure de réponse
         if not isinstance(response, dict) or 'candles' not in response:
             logger.error(f"Réponse API invalide pour {pair}: {type(response)}")
             logger.debug(f"Contenu de la réponse: {response}")
             return
-
+            
         candles = response['candles']
         logger.info(f"Données reçues pour {pair}: {len(candles)} bougies")
-
+        
     except Exception as e:
         logger.error(f"ERREUR CRITIQUE lors de la récupération des bougies: {str(e)}")
         logger.exception(e)
         return
 
+    # 6. Mise à jour des données de base
     if not hunter.update_asian_range(pair):
         logger.warning(f"Échec mise à jour range asiatique pour {pair}")
         return
@@ -2302,6 +2075,7 @@ def analyze_pair(pair):
         logger.warning(f"Échec analyse liquidité HTF pour {pair}")
         return
     
+    # 7. Recherche d'opportunités
     try:
         opportunity = hunter.find_best_opportunity(pair)
     except KeyError as ke:
@@ -2310,11 +2084,12 @@ def analyze_pair(pair):
     except Exception as e:
         logger.error(f"Erreur générique dans find_best_opportunity: {e}")
         return
-
+    
     if not opportunity:
         logger.info(f"Aucune opportunité trouvée pour {pair}")
         return
 
+    # 8. Validation finale
     try:
         if opportunity['confidence'] < 50:
             logger.info(f"Confiance insuffisante ({opportunity['confidence']}%)")
@@ -2324,11 +2099,13 @@ def analyze_pair(pair):
             logger.info(f"Validation finale échouée pour {pair}")
             return
 
+        # Vérification volume
         current_volume = get_current_volume(pair)
         if current_volume < get_average_volume(pair):
             logger.warning("Volume actuel inférieur à la moyenne")
             return
-
+    
+        # 9. Envoi d'alerte
         send_trade_alert(
             pair=opportunity['pair'],
             direction=opportunity['direction'],
@@ -2343,123 +2120,188 @@ def analyze_pair(pair):
             ]
         )
         logger.info(f"✅ Signal envoyé pour {pair} ({opportunity['direction'].upper()}) à {opportunity['entry']:.5f}")
-       # Ajoutez ce logging critique
-        logger.info(f"[BACKTEST] {pair} | Signal à {candle['time']} | Prix: {price}")
+
     except Exception as e:
         logger.error(f"Erreur lors de l'envoi de l'alerte: {e}")
-
 # ... (le reste du code main reste similaire mais utilise la nouvelle analyse_pair)
 
 if __name__ == "__main__":
-    logger.info("🚀 Backtest journalier en cours...")
+    logger.info("🚀 Démarrage du bot de trading OANDA - Mode Sniper Liquidités...")
     
-    # Override de la date pour hier
-    import datetime
-    yesterday = datetime.datetime.utcnow() - datetime.timedelta(days=1)
-    datetime.datetime = lambda: yesterday  # Patch temporel
-
-    # Désactivation des appels API réels
-    SIMULATION_MODE = True
-    client = None  # Désactive OANDA
+    # Initialisation du chasseur de liquidités
+    liquidity_hunter = LiquidityHunter()
     
-    # Exécution ciblée
-    pairs_to_test = ["EUR_USD", "XAU_USD"]  # Paires à tester
-    for pair in pairs_to_test:
-        try:
-            analyze_pair(pair)  # Nouveau paramètre
-        except Exception as e:
-            logger.error(f"Erreur sur {pair}: {str(e)}")
-
-def get_historical_candles(pair, days_back):
-    """Récupère les données de la veille"""
-    end = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0)
-    start = end - datetime.timedelta(days=days_back)
-    
-    params = {
-        "granularity": "H1",
-        "from": start.isoformat() + "Z",
-        "to": end.isoformat() + "Z",
-        "price": "M"
-    }
-    
+    # Vérification initiale de la connexion
     try:
-        r = instruments.InstrumentsCandles(instrument=pair, params=params)
-        return client.request(r)['candles']
+        account_info = accounts.AccountDetails(OANDA_ACCOUNT_ID)
+        client.request(account_info)
+        logger.info(f"✅ Connecté avec succès au compte OANDA: {OANDA_ACCOUNT_ID}")
+        logger.info(f"🔧 Mode simulation: {'ACTIVÉ' if SIMULATION_MODE else 'DÉSACTIVÉ'}")
     except Exception as e:
-        logger.error(f"Erreur historique {pair}: {str(e)}")
-        return []
+        logger.error(f"❌ Échec de la connexion à OANDA: {e}")
+        exit(1)
+    
+    while True:
+        now = datetime.utcnow().time()
+        if SESSION_START <= now <= SESSION_END:
+            clean_historical_data()            
+            logger.info("⏱ Session active - Chasse aux liquidités en cours...")
 
-def load_historical_data(pair):
-    """Charge les données du 24/10/2023 au 25/10/2023"""
-    # Exemple pour EUR_USD
-    return [
-        1.0578, 1.0582, 1.0591, ...,  # Données du 24/10
-        1.0632, 1.0628, 1.0615, ...    # Données du 25/10
-    ] 
+            try:
+                for pair in sorted(PAIRS, key=lambda x: 0 if x == "XAU_USD" else 1):
+                    try:
+                        # Mise à jour des données de base
+                        liquidity_hunter.update_asian_range(pair)
+                        liquidity_hunter.analyze_htf_liquidity(pair)
+                        
+                        if pair == "XAU_USD":
+                            analyze_gold()  # Analyse spécifique pour l'or
+                        else:
+                            # Utilisation de analyze_pair() qui intègre déjà find_best_opportunity()
+                            analyze_pair(pair)
+                    except Exception as e:
+                        logger.error(f"Erreur analyse {pair}: {str(e)}")
+                        continue
+                
+                # Gestion des trades existants
+                update_closed_trades()
+                for pair in list(active_trades):
+                    try:
+                        manage_open_trade(pair)
+                    except Exception as e:
+                        logger.error(f"Erreur gestion trade {pair}: {e}")
+            except Exception as e:
+                logger.error(f"Erreur majeure: {str(e)}")
+            
+            time.sleep(15)
+        else:
+            logger.info("🛑 Session inactive. Prochaine vérification dans 5 minutes...")
+            time.sleep(300)
+
 
 def manage_open_trade(pair):
-    """Gère les trades ouverts avec trailing stop et prise de profits partiels"""
+    """
+    Gère les trades ouverts :
+    - Met à jour le trailing stop **uniquement si marché trendant**
+    - Ferme partiellement la position en cas de profit élevé
+    - Désactive le trailing si le marché est en range (mode safe)
+    """
     try:
-        # Récupération du prix actuel
-        params = {"granularity": "M5", "count": 1, "price": "M"}
-        candles = client.request(instruments.InstrumentsCandles(instrument=pair, params=params))['candles']
-        current_price = float(candles[0]['mid']['c'])
-        
-        # Récupération des détails de la position
-        r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
-        position = client.request(r)
-        
-        # Vérification de la direction
-        if float(position['position']['long']['units']) > 0:
-            direction = 'buy'
-            entry_price = float(position['position']['long']['averagePrice'])
-            current_sl = float(position['position']['long']['stopLossOrder']['price'])
-        elif float(position['position']['short']['units']) < 0:
-            direction = 'sell'
-            entry_price = float(position['position']['short']['averagePrice'])
-            current_sl = float(position['position']['short']['stopLossOrder']['price'])
-        else:
+        current_price = get_current_price(pair)
+        if current_price is None:
+            logger.warning(f"Prix actuel indisponible pour {pair}")
             return
-        
-        # Calcul du profit actuel
-        profit_pips = (current_price - entry_price) * (1 if direction == 'buy' else -1)
-        
-        # Gestion du trailing stop
-        if profit_pips > TRAILING_ACTIVATION_THRESHOLD_PIPS * 0.0001:
-            new_sl = entry_price + (0.0001 if direction == 'buy' else -0.0001)  # Break-even
-            if (direction == 'buy' and new_sl > current_sl) or (direction == 'sell' and new_sl < current_sl):
-                update_stop_loss(position['position'][direction]['tradeIDs'][0], new_sl)
-        
-        # Prise de profit partielle (pour les trades très profitants)
-        if profit_pips > 50 * 0.0001:  # +50 pips
-            close_partial_position(pair, direction, percentage=0.5)  # Ferme 50% de la position
-    
-    except Exception as e:
-        logger.error(f"Erreur gestion trade {pair}: {e}")
-        raise
 
-def close_partial_position(pair, direction, percentage):
-    """Ferme un pourcentage de la position"""
-    try:
-        units = int(float(get_position_size(pair)) * percentage)
-        if direction == 'sell':
-            units = -units  # Inversion pour les positions short
+        # Récupérer la position
+        r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
+        resp = client.request(r)
+        pos = resp.get("position", {})
+
+        long_units = float(pos.get("long", {}).get("units", 0))
+        short_units = float(pos.get("short", {}).get("units", 0))
+
+        if long_units == 0 and short_units == 0:
+            logger.info(f"Aucune position ouverte pour {pair} → sortie")
+            if pair in active_trades:
+                active_trades.discard(pair)
+            return
+
+        # Déterminer direction, prix d’entrée et SL actuel
+        if long_units > 0:
+            direction = "buy"
+            entry_price = float(pos["long"]["averagePrice"])
+            current_sl = float(pos["long"].get("stopLossOrder", {}).get("price", entry_price - 1))
+            trade_ids = pos["long"].get("tradeIDs", [])
+        else:
+            direction = "sell"
+            entry_price = float(pos["short"]["averagePrice"])
+            current_sl = float(pos["short"].get("stopLossOrder", {}).get("price", entry_price + 1))
+            trade_ids = pos["short"].get("tradeIDs", [])
+
+        if not trade_ids:
+            logger.warning(f"Aucun Trade ID trouvé pour {pair}")
+            return
+
+        trade_id = trade_ids[0]
+
+        # Calcul du profit en pips
+        pip_value = 0.01 if "_JPY" in pair else 0.0001
+        profit_pips = (current_price - entry_price) / pip_value
+        if direction == "sell":
+            profit_pips = -profit_pips
+
+        logger.debug(f"{pair} | Direction: {direction} | Profit: {profit_pips:.1f} pips | SL: {current_sl}")
+
+        # 🔒 MODE SAFE : DÉSACTIVER LE TRAILING EN MARCHÉ RANGE
+        is_market_ranging = is_ranging(pair)  # Utilise votre fonction existante
+
+        if profit_pips >= TRAILING_ACTIVATION_THRESHOLD_PIPS:
+            if not is_market_ranging:
+                # → Trailing activé uniquement en tendance
+                if direction == "buy":
+                    new_sl = current_price - (TRAILING_ACTIVATION_THRESHOLD_PIPS * pip_value * 0.5)
+                    new_sl = max(new_sl, current_sl + 1e-5)  # Ne jamais reculer
+                else:
+                    new_sl = current_price + (TRAILING_ACTIVATION_THRESHOLD_PIPS * pip_value * 0.5)
+                    new_sl = min(new_sl, current_sl - 1e-5)
+
+                # Arrondir
+                decimal_places = 3 if "_JPY" in pair else 5
+                new_sl = round(new_sl, decimal_places)
+
+                # Mise à jour seulement si amélioration
+                should_update = (direction == "buy" and new_sl > current_sl) or (direction == "sell" and new_sl < current_sl)
+                if should_update:
+                    update_stop_loss(trade_id, new_sl)
+                    logger.info(f"✅ Trailing SL mis à jour pour {pair} → {new_sl}")
+            else:
+                # → Marché en range : NE PAS TOUCHER AU SL
+                logger.info(f"🛡️ MODE SAFE ACTIF : Trailing désactivé (marché en range) pour {pair}")
+
+        # Prise de profit partielle (> 30 pips)
+        if profit_pips >= 30:
+            close_partial_position(pair, direction, percentage=0.5)
+
+    except oandapyV20.exceptions.V20Error as e:
+        if "NOT_FOUND" in str(e):
+            logger.info(f"Position fermée manuellement pour {pair}")
+            active_trades.discard(pair)
+        else:
+            logger.error(f"Erreur OANDA dans manage_open_trade({pair}): {e.msg}")
+    except Exception as e:
+        logger.error(f"Erreur inattendue dans manage_open_trade({pair}): {e}")
+        logger.exception(e)
         
-        data = {
+
+def close_partial_position(pair, direction, percentage=0.5):
+    """Ferme un pourcentage de la position (ex: 50%)"""
+    try:
+        r = positions.PositionDetails(accountID=OANDA_ACCOUNT_ID, instrument=pair)
+        pos = client.request(r)["position"]
+
+        if direction == "buy":
+            units = float(pos["long"]["units"])
+        else:
+            units = -float(pos["short"]["units"])
+
+        close_units = int(abs(units) * percentage)
+        if direction == "sell":
+            close_units = -close_units
+
+        order_data = {
             "order": {
-                "units": str(units),
                 "instrument": pair,
+                "units": str(-close_units),  # Sens opposé pour réduire
                 "type": "MARKET",
                 "positionFill": "REDUCE_ONLY"
             }
         }
-        
-        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=data)
-        response = client.request(r)
-        logger.info(f"Prise de profit partielle sur {pair}: {units} unités")
-    
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+        client.request(r)
+        logger.info(f"🎯 Prise de profit partielle: {abs(close_units)} unités sur {pair}")
     except Exception as e:
-        logger.error(f"Échec prise de profit partielle {pair}: {e}")
+        logger.error(f"❌ Erreur fermeture partielle {pair}: {e}")
+        
 
 def get_position_size(pair):
     """Récupère la taille de la position ouverte"""
@@ -2470,42 +2312,3 @@ def get_position_size(pair):
     elif float(position['position']['short']['units']) < 0:
         return position['position']['short']['units']
     return 0
-
-def mock_utcnow():
-    return datetime.datetime(2023, 10, 25, 12, 0)
-
-def initialize_test_data():
-    """Initialise les données de test pour le backtest"""
-    for pair in ["EUR_USD", "XAU_USD"]:
-        # Créer des données M5 fictives (24 bougies)
-        closes = [1.0632 + i*0.0001 for i in range(24)] if pair == "EUR_USD" else [1800.50 + i*0.25 for i in range(24)]
-        CLOSES_HISTORY[pair] = closes
-
-class MockDatetime:
-    @classmethod
-    def utcnow(cls):
-        return datetime.datetime(2023, 10, 25, 12, 0)  # Date fixe pour le test
-
-if __name__ == "__main__":
-    logger.info("🚀 Backtest journalier en cours...")
-    
-    # Patch temporel
-    def mock_utcnow():
-        return datetime.datetime(2023, 10, 25, 12, 0)
-    datetime.datetime.utcnow = mock_utcnow
-    
-    # Configuration du backtest
-    SIMULATION_MODE = True
-    initialize_test_data()
-    
-    logger.info("=== MODE BACKTEST ===")
-    logger.info(f"Simulation date: {datetime.datetime.utcnow().isoformat()}")
-    
-    # Exécution pour les paires cibles
-    for pair in ["EUR_USD", "XAU_USD"]:
-        try:
-            logger.info(f"\n{'='*40}")
-            logger.info(f"Analyzing {pair}")
-            analyze_pair(pair)  # ❌ Plus d'argument days_back
-        except Exception as e:
-            logger.error(f"Erreur {pair}: {str(e)}")
