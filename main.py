@@ -2015,8 +2015,19 @@ def analyze_pair(pair):
             return
 
         # Calcul des indicateurs
-        rsi_values = [calculate_rsi(closes[-14:]) for closes in CLOSES_HISTORY[pair]]
-        divergence = check_rsi_divergence(CLOSES_HISTORY[pair], rsi_values)
+        # Calcul du RSI sur les 14 dernières bougies
+        recent_closes = CLOSES_HISTORY[pair][-14:]
+        if len(recent_closes) >= 14:
+            rsi_current = calculate_rsi(recent_closes)
+            # Pour la divergence, on a besoin d'une série de RSI sur plusieurs points
+            # On va donc recalculer RSI sur une fenêtre glissante (ex: 20 derniers points)
+            rsi_series = []
+            prices_for_div = CLOSES_HISTORY[pair][-30:]  # 30 derniers prix pour générer 16+ RSI
+            for i in range(14, len(prices_for_div) + 1):
+                rsi_series.append(calculate_rsi(prices_for_div[i-14:i]))
+            divergence = check_rsi_divergence(prices_for_div, rsi_series)
+        else:
+            divergence = None
 
     except Exception as e:
         logger.error(f"Erreur initialisation données {pair}: {str(e)}")
