@@ -35,10 +35,10 @@ EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "false").lower() == "true"
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment=OANDA_ENVIRONMENT)
 
 # =========================================================
-# STRATEGIE V67.1 - OANDA HYBRID SNIPER
+# STRATEGIE V68 - OANDA SCORING SNIPER
 # Exécution OANDA V67 + détection V63/V65 rééquilibrée
 # Setups: FVG_RETEST_PERFECT, NESTED_FVG, WICK_REJECTION
-# Veto qualité: spread, H1 EMA50, rejet M15, RR, anti-doublon
+# Scoring qualité: spread, H1 EMA50, rejet M15, RR, anti-doublon. Hard-block seulement sur risque extrême.
 # =========================================================
 PAIR_LIST = [
     "EUR_USD", "GBP_USD", "USD_JPY", "USD_CAD",
@@ -62,7 +62,7 @@ RSI_PERIOD = 14
 ADX_PERIOD = 14
 
 # Seuil de score : score minimum sur 15 pour prendre un trade
-MIN_SEQUENCE_SCORE = 10  # score mini équilibré pour retrouver des signaux type V63 sans ouvrir les B setups
+MIN_SEQUENCE_SCORE = int(os.getenv("MIN_SEQUENCE_SCORE", "13"))  # V68: score mini final, plus de vetos trop durs
 
 # Filtres paramètres (resserrés par rapport à V66)
 MIN_FVG_ATR_RATIO = 0.28            # Zone FVG doit faire ≥ 40% ATR (était 0.25)
@@ -85,13 +85,15 @@ NY_OPEN_END = dtime(17, 0)
 SIGNAL_KEY_TTL_HOURS = 8
 
 MAX_SPREAD_PIPS = {
-    "XAU_USD": 10.0,   # Était 35.0 - beaucoup trop lâche
-    "GBP_JPY": 3.5,
-    "AUD_JPY": 3.0,
-    "AUD_CAD": 2.2,
-    "USD_JPY": 2.0,
-    "GBP_USD": 2.0,
-    "DEFAULT": 1.8,
+    "XAU_USD": 90.0,   # OANDA exprime ici le spread XAU en pips de 0.01: 73p = 0.73$
+    "EUR_USD": 2.2,
+    "GBP_USD": 2.5,
+    "USD_CAD": 2.5,
+    "GBP_JPY": 4.0,
+    "AUD_JPY": 3.5,
+    "AUD_CAD": 3.0,
+    "USD_JPY": 2.2,
+    "DEFAULT": 2.2,
 }
 
 PAIR_DECIMALS = {
@@ -120,9 +122,9 @@ MIN_UNITS = {
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v67_1_hybrid_sniper.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v68_scoring_sniper.log")],
 )
-logger = logging.getLogger("OANDA-V67.1-Hybrid-Sniper")
+logger = logging.getLogger("OANDA-V68-Scoring-Sniper")
 
 # Dict signal_key -> timestamp pour expiration TTL (fix: était un set() infini)
 last_signal_key: Dict[tuple, datetime] = {}
@@ -651,16 +653,119 @@ def score_zone(base_score: int, zone: FVGZone, df_h4: pd.DataFrame, df_h1: pd.Da
     return score, details
 
 def spread_ok(pair: str) -> Tuple[bool, str, Optional[float]]:
+    """Ancienne compatibilité: True seulement si spread <= seuil."""
+    status, msg, spread_pips, _ = spread_quality(pair)
+    return status != "BLOCK", msg, spread_pips
+
+
+def spread_quality(pair: str) -> Tuple[str, str, Optional[float], int]:
+    """
+    V68: le spread n'est plus un veto sauf extrême.
+    - OK: +1
+    - HIGH: -1, mais le setup peut survivre si score A+
+    - BLOCK: spread indisponible ou > 2x seuil
+    """
     prices = fetch_pricing_spread(pair)
     if not prices:
-        # Fix : on bloque si spread indisponible (était ignoré = risque ouverture en pic de spread)
-        return False, "spread indisponible - trade bloqué par sécurité", None
+        return "BLOCK", "spread indisponible - trade bloqué par sécurité", None, -99
     bid, ask, _ = prices
     spread_pips = price_to_pips(pair, ask - bid)
     max_spread = MAX_SPREAD_PIPS.get(pair, MAX_SPREAD_PIPS["DEFAULT"])
+    if spread_pips > max_spread * 2.0:
+        return "BLOCK", f"spread extrême {spread_pips:.1f}p > {max_spread*2.0:.1f}p", spread_pips, -99
     if spread_pips > max_spread:
-        return False, f"spread trop élevé {spread_pips:.1f}p > {max_spread:.1f}p", spread_pips
-    return True, f"spread OK {spread_pips:.1f}p", spread_pips
+        return "HIGH", f"spread élevé mais toléré {spread_pips:.1f}p > {max_spread:.1f}p (-1)", spread_pips, -1
+    return "OK", f"spread OK {spread_pips:.1f}p (+1)", spread_pips, 1
+
+
+def m15_rejection_score(pair: str, df_m15: pd.DataFrame, zone: FVGZone) -> Tuple[int, str]:
+    """
+    V68: transforme le rejet M15 en score au lieu de hard veto.
+    Cela évite de tuer un bon setup juste parce que le corps est à 0.30 au lieu de 0.45.
+    Score typique: -3 à +5.
+    """
+    df = add_indicators(df_m15)
+    if len(df) < 10:
+        return -3, "M15 données insuffisantes (-3)"
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
+    total = max(last["high"] - last["low"], 1e-9)
+    body = abs(last["close"] - last["open"])
+    body_ratio = body / total
+    upper_wick = last["high"] - max(last["close"], last["open"])
+    lower_wick = min(last["close"], last["open"]) - last["low"]
+    rsi = float(df["rsi"].iloc[-1])
+    adx_val = float(df["adx"].iloc[-1]) if not np.isnan(df["adx"].iloc[-1]) else 0.0
+
+    pts = 0
+    reasons = []
+
+    if zone.direction == "BUY":
+        if last["close"] > last["open"]:
+            pts += 1; reasons.append("bougie BUY(+1)")
+        else:
+            pts -= 2; reasons.append("bougie non BUY(-2)")
+
+        if body_ratio >= MIN_REJECTION_BODY_RATIO:
+            pts += 1; reasons.append(f"corps fort {body_ratio:.2f}(+1)")
+        elif body_ratio >= 0.25:
+            reasons.append(f"corps moyen {body_ratio:.2f}(0)")
+        else:
+            pts -= 1; reasons.append(f"corps faible {body_ratio:.2f}(-1)")
+
+        if lower_wick >= upper_wick * 0.8:
+            pts += 1; reasons.append("mèche basse rejet(+1)")
+        if last["close"] > prev["high"]:
+            pts += 1; reasons.append("cassure high M15(+1)")
+        elif last["close"] > prev["close"]:
+            pts += 0; reasons.append("progression M15(0)")
+        else:
+            pts -= 1; reasons.append("pas de cassure M15(-1)")
+        if rsi >= RSI_BUY_MIN:
+            pts += 1; reasons.append(f"RSI={rsi:.1f}(+1)")
+        else:
+            pts -= 1; reasons.append(f"RSI faible {rsi:.1f}(-1)")
+        if (prev["close"] > prev["open"]) or (prev2["close"] > prev2["open"]):
+            pts += 1; reasons.append("momentum récent(+1)")
+
+    elif zone.direction == "SELL":
+        if last["close"] < last["open"]:
+            pts += 1; reasons.append("bougie SELL(+1)")
+        else:
+            pts -= 2; reasons.append("bougie non SELL(-2)")
+
+        if body_ratio >= MIN_REJECTION_BODY_RATIO:
+            pts += 1; reasons.append(f"corps fort {body_ratio:.2f}(+1)")
+        elif body_ratio >= 0.25:
+            reasons.append(f"corps moyen {body_ratio:.2f}(0)")
+        else:
+            pts -= 1; reasons.append(f"corps faible {body_ratio:.2f}(-1)")
+
+        if upper_wick >= lower_wick * 0.8:
+            pts += 1; reasons.append("mèche haute rejet(+1)")
+        if last["close"] < prev["low"]:
+            pts += 1; reasons.append("cassure low M15(+1)")
+        elif last["close"] < prev["close"]:
+            pts += 0; reasons.append("progression M15(0)")
+        else:
+            pts -= 1; reasons.append("pas de cassure M15(-1)")
+        if rsi <= RSI_SELL_MAX:
+            pts += 1; reasons.append(f"RSI={rsi:.1f}(+1)")
+        else:
+            pts -= 1; reasons.append(f"RSI élevé {rsi:.1f}(-1)")
+        if (prev["close"] < prev["open"]) or (prev2["close"] < prev2["open"]):
+            pts += 1; reasons.append("momentum récent(+1)")
+
+    if adx_val >= MIN_ADX:
+        pts += 1; reasons.append(f"ADX={adx_val:.1f}(+1)")
+    elif adx_val < 12:
+        pts -= 1; reasons.append(f"ADX faible {adx_val:.1f}(-1)")
+    else:
+        reasons.append(f"ADX neutre {adx_val:.1f}(0)")
+
+    return int(pts), " | ".join(reasons)
 
 
 def calculate_units(pair: str, entry: float, stop: float, balance: float) -> int:
@@ -726,7 +831,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 
     rr_actual = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
     logger.info(
-        f"SIGNAL V67.1 HYBRID {pair} {direction} | "
+        f"SIGNAL V68 SCORING {pair} {direction} | "
         f"entry≈{entry:.{decimals(pair)}f} SL={stop:.{decimals(pair)}f} TP={tp:.{decimals(pair)}f} "
         f"RR={rr_actual:.2f} score={score}/15 units={units} | {reason}"
     )
@@ -744,7 +849,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
         )
         logger.info(f"ORDRE RÉEL ENVOYÉ {pair} | ID={trade_id}")
         send_email(
-            f"V67.1 {pair} {direction} score={score}/15",
+            f"V68 {pair} {direction} score={score}/15",
             (
                 f"Paire: {pair}\nDirection: {direction}\n"
                 f"Entrée: {entry:.{decimals(pair)}f}\nSL: {stop:.{decimals(pair)}f}\n"
@@ -762,11 +867,11 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 # ANALYSE PRINCIPALE AVEC SYSTÈME DE SCORE RÉEL (0-15)
 # =========================================================
 def analyze_pair(pair: str) -> None:
-    logger.info(f"\nV67.1 HYBRID analyse {pair}")
+    logger.info(f"\nV68 SCORING analyse {pair}")
     try:
-        spread_valid, spread_msg, _ = spread_ok(pair)
+        spread_status, spread_msg, _, spread_pts = spread_quality(pair)
         logger.info(f"{pair} · {spread_msg}")
-        if not spread_valid:
+        if spread_status == "BLOCK":
             return
 
         df_d1 = fetch_candles(pair, "D", 300)
@@ -781,21 +886,26 @@ def analyze_pair(pair: str) -> None:
         score = 0
         details: List[str] = []
 
-        # D1 = bonus seulement, pas blocage permanent sauf conflit fort explicite.
-        d1_b = daily_bias(df_d1) if not df_d1.empty else None
-        if d1_b:
-            score += 2
-            details.append(f"D1={d1_b}(+2)")
+        # Spread devient un composant du score, plus un blocage léger.
+        score += spread_pts
+        details.append(spread_msg)
 
+        d1_b = daily_bias(df_d1) if not df_d1.empty else None
         bias = market_bias(df_h4, df_h1)
         if not bias:
             logger.info(f"{pair}: pas d'alignement H4/H1 exploitable.")
             return
 
-        if d1_b and d1_b != bias:
-            # V63 pouvait trader sans D1, mais on garde ce veto pour éviter les vrais contresens HTF.
-            logger.info(f"{pair}: conflit biais D1={d1_b} vs H4/H1={bias}. Trade bloqué.")
-            return
+        # V68: D1 contraire = malus, pas veto. D1 neutre = 0.
+        if d1_b == bias:
+            score += 2
+            details.append(f"D1={d1_b}(+2)")
+        elif d1_b and d1_b != bias:
+            score -= 2
+            details.append(f"D1 conflit {d1_b} vs {bias}(-2)")
+            logger.info(f"{pair}: conflit D1={d1_b} vs H4/H1={bias}, converti en malus V68.")
+        else:
+            details.append("D1 neutre(0)")
 
         score += 3
         details.append(f"H4/H1={bias}(+3)")
@@ -806,39 +916,52 @@ def analyze_pair(pair: str) -> None:
         if h4_adx >= MIN_ADX:
             score += 1
             details.append(f"ADX_H4={h4_adx:.1f}(+1)")
+        elif h4_adx < 12:
+            score -= 1
+            details.append(f"ADX_H4 faible={h4_adx:.1f}(-1)")
         else:
-            logger.info(f"{pair}: ADX H4 faible {h4_adx:.1f}, autorisé mais sans bonus.")
+            details.append(f"ADX_H4 neutre={h4_adx:.1f}(0)")
 
         zones = collect_hybrid_zones(pair, df_h4, df_h1, df_m15, bias)
         if not zones:
-            logger.info(f"{pair}: aucune zone V63/V67.1 exploitable.")
+            logger.info(f"{pair}: aucune zone V63/V68 exploitable.")
             return
 
-        best = None
         best_payload = None
 
         for zone in zones:
             z_score, z_details = score_zone(score, zone, df_h4, df_h1, df_m15, bias)
             all_details = details + z_details
 
+            # La zone/retest reste obligatoire: sinon l'entrée est trop anticipée.
             if not price_retraced_to_zone(pair, df_m15, zone):
                 logger.info(f"{pair}: {zone.setup_type} ignoré, prix pas encore en zone.")
                 continue
-            all_details.append("prix_en_zone")
+            z_score += 1
+            all_details.append("prix_en_zone(+1)")
 
-            ok_reject, reject_reason = rejection_confirmed(pair, df_m15, zone)
-            if not ok_reject:
-                logger.info(f"{pair}: {zone.setup_type} rejeté, M15 refusé: {reject_reason}")
+            # Rejet M15 devient du scoring.
+            reject_pts, reject_reason = m15_rejection_score(pair, df_m15, zone)
+            z_score += reject_pts
+            all_details.append(f"M15_score={reject_pts} [{reject_reason}]")
+
+            # Hard safety: un M15 vraiment contraire empêche seulement les scores faibles.
+            if reject_pts <= -3 and z_score < (MIN_SEQUENCE_SCORE + 3):
+                logger.info(f"{pair}: {zone.setup_type} M15 trop contraire: {reject_reason} | score provisoire={z_score}")
                 continue
-            z_score += 2
-            all_details.append("rejet_M15(+2)")
 
             current_price = df_m15["close"].iloc[-1]
             stop, tp = build_trade_levels(pair, zone, current_price, df_m15)
             risk = abs(current_price - stop)
             reward = abs(tp - current_price)
             rr = reward / risk if risk > 0 else 0
-            if rr < 1.8:
+            if rr >= 2.5:
+                z_score += 2
+                all_details.append(f"RR={rr:.2f}(+2)")
+            elif rr >= 1.8:
+                z_score += 1
+                all_details.append(f"RR={rr:.2f}(+1)")
+            else:
                 logger.info(f"{pair}: {zone.setup_type} RR insuffisant {rr:.2f}")
                 continue
 
@@ -849,12 +972,11 @@ def analyze_pair(pair: str) -> None:
                 continue
 
             payload = (zone, current_price, stop, tp, z_score, reject_reason, rr, all_details)
-            if best is None or z_score > best_payload[4] or (z_score == best_payload[4] and rr > best_payload[6]):
-                best = zone
+            if best_payload is None or z_score > best_payload[4] or (z_score == best_payload[4] and rr > best_payload[6]):
                 best_payload = payload
 
         if best_payload is None:
-            logger.info(f"{pair}: aucun finaliste après vetos qualité.")
+            logger.info(f"{pair}: aucun finaliste après scoring V68.")
             return
 
         zone, current_price, stop, tp, final_score, reject_reason, rr, all_details = best_payload
@@ -866,19 +988,18 @@ def analyze_pair(pair: str) -> None:
             return
         last_signal_key[key] = datetime.utcnow()
 
-        logger.info(f"{pair}: FINALISTE {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
+        logger.info(f"{pair}: FINALISTE V68 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
         place_trade(pair, zone.direction, current_price, stop, tp, final_score, f"{zone.setup_type} | {reject_reason}")
 
     except Exception as exc:
         logger.exception(f"Erreur analyse {pair}: {exc}")
 
-
 def main() -> None:
-    logger.info("Démarrage OANDA V67.1 Hybrid Sniper")
+    logger.info("Démarrage OANDA V68 Scoring Sniper")
     logger.info(f"Compte: {OANDA_ACCOUNT_ID} | env={OANDA_ENVIRONMENT} | EXECUTE_TRADES={EXECUTE_TRADES}")
     balance = get_account_balance()
     logger.info(f"Solde: {balance:.2f} | Paires: {', '.join(PAIR_LIST)}")
-    logger.info(f"Score min: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk: {RISK_PERCENTAGE}%")
+    logger.info(f"Score min V68: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk: {RISK_PERCENTAGE}%")
 
     while True:
         now = datetime.utcnow().time()
