@@ -35,13 +35,14 @@ EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "false").lower() == "true"
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment=OANDA_ENVIRONMENT)
 
 # =========================================================
-# STRATEGIE V67 - SEQUENCE SNIPER ENHANCED
-# D1 biais + H4/H1 alignement + FVG impulsion + ADX + volume
-# + rejet M15 strict + RSI calibré + score confluence réel
+# STRATEGIE V67.1 - OANDA HYBRID SNIPER
+# Exécution OANDA V67 + détection V63/V65 rééquilibrée
+# Setups: FVG_RETEST_PERFECT, NESTED_FVG, WICK_REJECTION
+# Veto qualité: spread, H1 EMA50, rejet M15, RR, anti-doublon
 # =========================================================
 PAIR_LIST = [
     "EUR_USD", "GBP_USD", "USD_JPY", "USD_CAD",
-    "AUD_USD", "AUD_JPY", "XAU_USD", "GBP_JPY"
+    "AUD_USD", "AUD_CAD", "AUD_JPY", "XAU_USD", "GBP_JPY"
 ]
 
 SESSION_START = dtime(7, 0)
@@ -61,17 +62,17 @@ RSI_PERIOD = 14
 ADX_PERIOD = 14
 
 # Seuil de score : score minimum sur 15 pour prendre un trade
-MIN_SEQUENCE_SCORE = 10
+MIN_SEQUENCE_SCORE = 10  # score mini équilibré pour retrouver des signaux type V63 sans ouvrir les B setups
 
 # Filtres paramètres (resserrés par rapport à V66)
-MIN_FVG_ATR_RATIO = 0.40            # Zone FVG doit faire ≥ 40% ATR (était 0.25)
-MAX_ZONE_AGE_H4_CANDLES = 6        # Zone max 6 candles H4 = ~24H (était 8)
-RETRACE_TOLERANCE_ATR = 0.12       # Tolérance autour zone (était 0.15)
-MIN_REJECTION_BODY_RATIO = 0.58    # Corps de la bougie de rejet (était 0.45)
-MIN_IMPULSE_ATR_MULTIPLIER = 1.50  # Impulsion forte requise (était 1.20)
-MIN_ADX = 22.0                      # Filtre trend : ADX > 22
-RSI_BUY_MIN = 52.0                  # RSI M15 minimum pour BUY (était 48)
-RSI_SELL_MAX = 48.0                 # RSI M15 maximum pour SELL (était 52)
+MIN_FVG_ATR_RATIO = 0.28            # Zone FVG doit faire ≥ 40% ATR (était 0.25)
+MAX_ZONE_AGE_H4_CANDLES = 10        # Zone max 6 candles H4 = ~24H (était 8)
+RETRACE_TOLERANCE_ATR = 0.18       # Tolérance autour zone (était 0.15)
+MIN_REJECTION_BODY_RATIO = 0.45    # Corps de la bougie de rejet (était 0.45)
+MIN_IMPULSE_ATR_MULTIPLIER = 1.15  # Impulsion forte requise (était 1.20)
+MIN_ADX = 18.0                      # Filtre trend : ADX > 22
+RSI_BUY_MIN = 48.0                  # RSI M15 minimum pour BUY (était 48)
+RSI_SELL_MAX = 52.0                 # RSI M15 maximum pour SELL (était 52)
 MIN_VOLUME_RATIO = 1.20             # Volume impulsion > 1.2x moyenne
 
 # Sessions haute qualité UTC
@@ -87,6 +88,7 @@ MAX_SPREAD_PIPS = {
     "XAU_USD": 10.0,   # Était 35.0 - beaucoup trop lâche
     "GBP_JPY": 3.5,
     "AUD_JPY": 3.0,
+    "AUD_CAD": 2.2,
     "USD_JPY": 2.0,
     "GBP_USD": 2.0,
     "DEFAULT": 1.8,
@@ -97,6 +99,7 @@ PAIR_DECIMALS = {
     "USD_JPY": 3,
     "GBP_JPY": 3,
     "AUD_JPY": 3,
+    "AUD_CAD": 5,
     "DEFAULT": 5,
 }
 
@@ -105,6 +108,7 @@ PIP_VALUE = {
     "USD_JPY": 0.01,
     "GBP_JPY": 0.01,
     "AUD_JPY": 0.01,
+    "AUD_CAD": 0.0001,
     "DEFAULT": 0.0001,
 }
 
@@ -116,9 +120,9 @@ MIN_UNITS = {
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v67_sequence_sniper.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v67_1_hybrid_sniper.log")],
 )
-logger = logging.getLogger("OANDA-V67-Sequence-Sniper")
+logger = logging.getLogger("OANDA-V67.1-Hybrid-Sniper")
 
 # Dict signal_key -> timestamp pour expiration TTL (fix: était un set() infini)
 last_signal_key: Dict[tuple, datetime] = {}
@@ -134,6 +138,7 @@ class FVGZone:
     size: float
     impulse_strength: float
     volume_confirmed: bool = False
+    setup_type: str = "FVG_RETEST_PERFECT"
 
 
 # =========================================================
@@ -305,27 +310,30 @@ def daily_bias(df_d1: pd.DataFrame) -> Optional[str]:
 
 
 def market_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Optional[str]:
-    """Biais H4+H1 : alignement EMA50/200 + pente sur 6 candles."""
+    """
+    Biais H4+H1 hybride.
+    V67 était trop strict avec EMA200, donc on garde un biais sniper mais plus proche V63:
+    - prix H4 et H1 du même côté EMA50
+    - pente EMA50 H4/H1 cohérente
+    - EMA200 donne un bonus ailleurs, mais n'est plus bloquante.
+    """
     h4 = add_indicators(df_h4)
     h1 = add_indicators(df_h1)
-    if len(h4) < 210 or len(h1) < 210:
+    if len(h4) < 80 or len(h1) < 80:
         return None
 
     h4_last = h4.iloc[-1]
     h1_last = h1.iloc[-1]
-    # Pente EMA50 sur 8 candles pour plus de stabilité (était 6)
     h4_slope = h4["ema50"].iloc[-1] - h4["ema50"].iloc[-8]
     h1_slope = h1["ema50"].iloc[-1] - h1["ema50"].iloc[-8]
 
     buy = (
         h4_last["close"] > h4_last["ema50"] and
-        h4_last["ema50"] > h4_last["ema200"] and
         h1_last["close"] > h1_last["ema50"] and
         h4_slope > 0 and h1_slope > 0
     )
     sell = (
         h4_last["close"] < h4_last["ema50"] and
-        h4_last["ema50"] < h4_last["ema200"] and
         h1_last["close"] < h1_last["ema50"] and
         h4_slope < 0 and h1_slope < 0
     )
@@ -335,6 +343,20 @@ def market_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Optional[str]:
         return "SELL"
     return None
 
+
+def ema200_bonus(df_h4: pd.DataFrame, df_h1: pd.DataFrame, bias: str) -> bool:
+    """Bonus si le biais est aussi aligné EMA200, sans en faire un blocage."""
+    h4 = add_indicators(df_h4)
+    h1 = add_indicators(df_h1)
+    if len(h4) < 210 or len(h1) < 210:
+        return False
+    h4_last = h4.iloc[-1]
+    h1_last = h1.iloc[-1]
+    if bias == "BUY":
+        return bool(h4_last["ema50"] > h4_last["ema200"] and h1_last["close"] > h1_last["ema200"])
+    if bias == "SELL":
+        return bool(h4_last["ema50"] < h4_last["ema200"] and h1_last["close"] < h1_last["ema200"])
+    return False
 
 def h1_candle_confirms(df_h1: pd.DataFrame, bias: str) -> bool:
     """La dernière bougie H1 fermée doit être dans le sens du bias."""
@@ -481,6 +503,153 @@ def rejection_confirmed(pair: str, df_m15: pd.DataFrame, zone: FVGZone) -> Tuple
     return False, "direction inconnue"
 
 
+
+def detect_fvg_candidates(df: pd.DataFrame, bias: str, pair: str, timeframe_label: str, max_age: int, min_atr_ratio: float, min_impulse: float) -> List[FVGZone]:
+    """Détecte plusieurs FVG récents, moins strict que V67, pour retrouver la richesse V63."""
+    df = add_indicators(df)
+    if len(df) < 30:
+        return []
+    candidates: List[FVGZone] = []
+    vol_avg20 = df["volume"].rolling(20).mean()
+    start = max(2, len(df) - max_age - 2)
+    for i in range(start, len(df) - 1):
+        prev = df.iloc[i - 1]
+        curr = df.iloc[i]
+        nxt = df.iloc[i + 1]
+        atr = float(df["atr"].iloc[i])
+        if np.isnan(atr) or atr <= 0:
+            continue
+        body = abs(curr["close"] - curr["open"])
+        impulse_strength = body / atr
+        if impulse_strength < min_impulse:
+            continue
+        vol_avg = float(vol_avg20.iloc[i]) if not np.isnan(vol_avg20.iloc[i]) else 0
+        vol_confirmed = vol_avg > 0 and curr["volume"] >= vol_avg * MIN_VOLUME_RATIO
+        if bias == "BUY" and nxt["low"] > prev["high"]:
+            low, high = prev["high"], nxt["low"]
+            size = high - low
+            if size / atr < min_atr_ratio:
+                continue
+            age = len(df) - 1 - i
+            z = FVGZone("BUY", low, high, (low + high) / 2, age, size, impulse_strength, vol_confirmed, "FVG_RETEST_PERFECT" if timeframe_label == "H4" else "NESTED_FVG")
+            candidates.append(z)
+        if bias == "SELL" and nxt["high"] < prev["low"]:
+            low, high = nxt["high"], prev["low"]
+            size = high - low
+            if size / atr < min_atr_ratio:
+                continue
+            age = len(df) - 1 - i
+            z = FVGZone("SELL", low, high, (low + high) / 2, age, size, impulse_strength, vol_confirmed, "FVG_RETEST_PERFECT" if timeframe_label == "H4" else "NESTED_FVG")
+            candidates.append(z)
+    return candidates
+
+
+def detect_wick_rejection_candidate(df_m15: pd.DataFrame, bias: str, pair: str) -> Optional[FVGZone]:
+    """Réactive le Wick Rejection V63, mais uniquement sur la dernière bougie M15 et dans le sens du biais."""
+    df = add_indicators(df_m15)
+    if len(df) < 30:
+        return None
+    last = df.iloc[-1]
+    atr = float(df["atr"].iloc[-1]) if not np.isnan(df["atr"].iloc[-1]) else 0.0
+    total = max(last["high"] - last["low"], 1e-9)
+    body = abs(last["close"] - last["open"])
+    upper = last["high"] - max(last["close"], last["open"])
+    lower = min(last["close"], last["open"]) - last["low"]
+    body_ratio = body / total
+
+    if atr <= 0:
+        return None
+
+    # SELL : mèche haute claire + clôture rouge ou cassure du précédent low.
+    if bias == "SELL":
+        if upper >= max(body * 1.3, lower * 1.2) and body_ratio >= 0.25 and last["close"] < df.iloc[-2]["low"]:
+            low = max(last["open"], last["close"])
+            high = last["high"]
+            z = FVGZone("SELL", low, high, (low + high) / 2, 0, high - low, max(body / atr, 1.0), True, "WICK_REJECTION")
+            return z
+
+    # BUY : mèche basse claire + clôture verte ou cassure du précédent high.
+    if bias == "BUY":
+        if lower >= max(body * 1.3, upper * 1.2) and body_ratio >= 0.25 and last["close"] > df.iloc[-2]["high"]:
+            low = last["low"]
+            high = min(last["open"], last["close"])
+            z = FVGZone("BUY", low, high, (low + high) / 2, 0, high - low, max(body / atr, 1.0), True, "WICK_REJECTION")
+            return z
+    return None
+
+
+def cluster_zones(zones: List[FVGZone], pair: str) -> List[FVGZone]:
+    """Fusionne les zones proches et garde la plus qualitative pour éviter le bruit V63."""
+    if not zones:
+        return []
+    threshold = 3 * pip_value(pair) if pair != "XAU_USD" else 0.50
+    zones = sorted(zones, key=lambda z: (-setup_priority(z.setup_type), -z.impulse_strength, z.age))
+    kept: List[FVGZone] = []
+    for z in zones:
+        if any(z.direction == k.direction and abs(z.midpoint - k.midpoint) <= threshold for k in kept):
+            continue
+        kept.append(z)
+    return kept[:4]
+
+
+def setup_priority(setup_type: str) -> int:
+    return {"FVG_RETEST_PERFECT": 3, "NESTED_FVG": 2, "WICK_REJECTION": 2}.get(setup_type, 1)
+
+
+def collect_hybrid_zones(pair: str, df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_m15: pd.DataFrame, bias: str) -> List[FVGZone]:
+    """Moteur hybride: FVG H4 + Nested H1/M15 + Wick Rejection, puis clustering."""
+    zones: List[FVGZone] = []
+    zones.extend(detect_fvg_candidates(df_h4, bias, pair, "H4", MAX_ZONE_AGE_H4_CANDLES, MIN_FVG_ATR_RATIO, MIN_IMPULSE_ATR_MULTIPLIER))
+    zones.extend(detect_fvg_candidates(df_h1, bias, pair, "H1", 18, 0.18, 0.85))
+    zones.extend(detect_fvg_candidates(df_m15, bias, pair, "M15", 48, 0.12, 0.75))
+    wick = detect_wick_rejection_candidate(df_m15, bias, pair)
+    if wick:
+        zones.append(wick)
+    zones = [z for z in zones if z.direction == bias]
+    clustered = cluster_zones(zones, pair)
+    logger.info(f"{pair}: zones hybrides détectées={len(zones)} → après clustering={len(clustered)}")
+    for z in clustered:
+        logger.info(f"{pair}: zone {z.setup_type} {z.direction} [{z.low:.{decimals(pair)}f}-{z.high:.{decimals(pair)}f}] age={z.age} impulse={z.impulse_strength:.2f}x")
+    return clustered
+
+
+def score_zone(base_score: int, zone: FVGZone, df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_m15: pd.DataFrame, bias: str) -> Tuple[int, List[str]]:
+    """Score hybrid inspiré V63 mais en gardant les vetos V67."""
+    score = base_score
+    details: List[str] = []
+    if zone.setup_type == "FVG_RETEST_PERFECT":
+        score += 3
+        details.append("FVG_PERFECT(+3)")
+    elif zone.setup_type == "NESTED_FVG":
+        score += 2
+        details.append("NESTED_FVG(+2)")
+    elif zone.setup_type == "WICK_REJECTION":
+        score += 2
+        details.append("WICK_REJECTION(+2)")
+
+    if zone.impulse_strength >= 1.7:
+        score += 2
+        details.append("impulse≥1.7(+2)")
+    elif zone.impulse_strength >= 1.15:
+        score += 1
+        details.append("impulse≥1.15(+1)")
+    if zone.age <= 2:
+        score += 1
+        details.append("zone_fraîche(+1)")
+    if zone.volume_confirmed:
+        score += 1
+        details.append("volume(+1)")
+    if h1_candle_confirms(df_h1, bias):
+        score += 1
+        details.append("H1_candle(+1)")
+    if session_quality(datetime.utcnow().time()):
+        score += 1
+        details.append("session(+1)")
+    if ema200_bonus(df_h4, df_h1, bias):
+        score += 1
+        details.append("EMA200_bonus(+1)")
+    return score, details
+
 def spread_ok(pair: str) -> Tuple[bool, str, Optional[float]]:
     prices = fetch_pricing_spread(pair)
     if not prices:
@@ -557,7 +726,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 
     rr_actual = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
     logger.info(
-        f"SIGNAL V67 {pair} {direction} | "
+        f"SIGNAL V67.1 HYBRID {pair} {direction} | "
         f"entry≈{entry:.{decimals(pair)}f} SL={stop:.{decimals(pair)}f} TP={tp:.{decimals(pair)}f} "
         f"RR={rr_actual:.2f} score={score}/15 units={units} | {reason}"
     )
@@ -575,7 +744,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
         )
         logger.info(f"ORDRE RÉEL ENVOYÉ {pair} | ID={trade_id}")
         send_email(
-            f"V67 {pair} {direction} score={score}/15",
+            f"V67.1 {pair} {direction} score={score}/15",
             (
                 f"Paire: {pair}\nDirection: {direction}\n"
                 f"Entrée: {entry:.{decimals(pair)}f}\nSL: {stop:.{decimals(pair)}f}\n"
@@ -593,149 +762,119 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 # ANALYSE PRINCIPALE AVEC SYSTÈME DE SCORE RÉEL (0-15)
 # =========================================================
 def analyze_pair(pair: str) -> None:
-    logger.info(f"\nV67 analyse {pair}")
+    logger.info(f"\nV67.1 HYBRID analyse {pair}")
     try:
-        # --- Filtre spread (bloque si indisponible) ---
         spread_valid, spread_msg, _ = spread_ok(pair)
         logger.info(f"{pair} · {spread_msg}")
         if not spread_valid:
             return
 
-        # --- Récupération des données ---
-        # Plus de candles pour stabiliser EMA200 (était H1/H4=260, insuffisant pour EMA200)
         df_d1 = fetch_candles(pair, "D", 300)
         df_h4 = fetch_candles(pair, "H4", 310)
         df_h1 = fetch_candles(pair, "H1", 310)
-        df_m15 = fetch_candles(pair, "M15", 200)
+        df_m15 = fetch_candles(pair, "M15", 220)
 
         if df_h4.empty or df_h1.empty or df_m15.empty:
             logger.warning(f"{pair}: données insuffisantes.")
             return
 
-        # --- Score de confluence (0-15) ---
         score = 0
         details: List[str] = []
 
-        # 1. Biais D1 (2 pts) - timeframe supérieur
+        # D1 = bonus seulement, pas blocage permanent sauf conflit fort explicite.
         d1_b = daily_bias(df_d1) if not df_d1.empty else None
         if d1_b:
             score += 2
             details.append(f"D1={d1_b}(+2)")
 
-        # 2. Biais H4/H1 (3 pts) - requis, early return si absent
         bias = market_bias(df_h4, df_h1)
         if not bias:
-            logger.info(f"{pair}: pas d'alignement H4/H1.")
+            logger.info(f"{pair}: pas d'alignement H4/H1 exploitable.")
             return
 
-        # Conflit D1 vs H4/H1 = trade trop risqué
         if d1_b and d1_b != bias:
-            logger.info(f"{pair}: conflit biais D1={d1_b} vs H4/H1={bias}.")
+            # V63 pouvait trader sans D1, mais on garde ce veto pour éviter les vrais contresens HTF.
+            logger.info(f"{pair}: conflit biais D1={d1_b} vs H4/H1={bias}. Trade bloqué.")
             return
 
         score += 3
         details.append(f"H4/H1={bias}(+3)")
-        logger.info(f"{pair}: bias = {bias} | D1={d1_b}")
+        logger.info(f"{pair}: bias={bias} | D1={d1_b}")
 
-        # 3. ADX H4 > seuil (1 pt)
         df_h4_ind = add_indicators(df_h4)
         h4_adx = float(df_h4_ind["adx"].iloc[-1]) if not np.isnan(df_h4_ind["adx"].iloc[-1]) else 0.0
         if h4_adx >= MIN_ADX:
             score += 1
             details.append(f"ADX_H4={h4_adx:.1f}(+1)")
         else:
-            logger.info(f"{pair}: ADX H4 faible {h4_adx:.1f}")
+            logger.info(f"{pair}: ADX H4 faible {h4_adx:.1f}, autorisé mais sans bonus.")
 
-        # 4. FVG + impulsion H4 (requis, early return si absent)
-        zone = detect_impulse_and_fvg(df_h4, bias)
-        if not zone:
-            logger.info(f"{pair}: aucun FVG/impulsion H4 valide.")
+        zones = collect_hybrid_zones(pair, df_h4, df_h1, df_m15, bias)
+        if not zones:
+            logger.info(f"{pair}: aucune zone V63/V67.1 exploitable.")
             return
 
-        score += 2
-        details.append(f"FVG+impulse(+2)")
+        best = None
+        best_payload = None
 
-        # Bonus impulsion forte
-        if zone.impulse_strength >= 2.0:
-            score += 2
-            details.append(f"impulse≥2x(+2)")
-        elif zone.impulse_strength >= 1.7:
-            score += 1
-            details.append(f"impulse≥1.7x(+1)")
+        for zone in zones:
+            z_score, z_details = score_zone(score, zone, df_h4, df_h1, df_m15, bias)
+            all_details = details + z_details
 
-        # Bonus zone fraîche
-        if zone.age <= 2:
-            score += 1
-            details.append(f"zone fraîche âge={zone.age}(+1)")
+            if not price_retraced_to_zone(pair, df_m15, zone):
+                logger.info(f"{pair}: {zone.setup_type} ignoré, prix pas encore en zone.")
+                continue
+            all_details.append("prix_en_zone")
 
-        # Bonus volume confirmé sur l'impulsion
-        if zone.volume_confirmed:
-            score += 1
-            details.append("volume_impulse(+1)")
+            ok_reject, reject_reason = rejection_confirmed(pair, df_m15, zone)
+            if not ok_reject:
+                logger.info(f"{pair}: {zone.setup_type} rejeté, M15 refusé: {reject_reason}")
+                continue
+            z_score += 2
+            all_details.append("rejet_M15(+2)")
 
-        logger.info(
-            f"{pair}: FVG {zone.direction} [{zone.low:.{decimals(pair)}f}-{zone.high:.{decimals(pair)}f}] "
-            f"âge={zone.age}H4 impulse={zone.impulse_strength:.2f}x vol={zone.volume_confirmed}"
-        )
+            current_price = df_m15["close"].iloc[-1]
+            stop, tp = build_trade_levels(pair, zone, current_price, df_m15)
+            risk = abs(current_price - stop)
+            reward = abs(tp - current_price)
+            rr = reward / risk if risk > 0 else 0
+            if rr < 1.8:
+                logger.info(f"{pair}: {zone.setup_type} RR insuffisant {rr:.2f}")
+                continue
 
-        # 5. Retracement dans la zone (requis)
-        if not price_retraced_to_zone(pair, df_m15, zone):
-            logger.info(f"{pair}: prix pas encore dans la zone FVG.")
-            return
-        details.append("prix_en_zone")
+            logger.info(f"{pair}: CANDIDAT {zone.setup_type} SCORE={z_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
 
-        # 6. H1 dernière bougie confirme (1 pt bonus)
-        if h1_candle_confirms(df_h1, bias):
-            score += 1
-            details.append("H1_candle(+1)")
+            if z_score < MIN_SEQUENCE_SCORE:
+                logger.info(f"{pair}: score {z_score}/15 insuffisant (min={MIN_SEQUENCE_SCORE})")
+                continue
 
-        # 7. Rejet M15 (requis + ajoute RSI/ADX dans le check)
-        ok_reject, reject_reason = rejection_confirmed(pair, df_m15, zone)
-        if not ok_reject:
-            logger.info(f"{pair}: rejet M15 refusé: {reject_reason}")
-            return
-        score += 2
-        details.append(f"rejet_M15(+2)")
+            payload = (zone, current_price, stop, tp, z_score, reject_reason, rr, all_details)
+            if best is None or z_score > best_payload[4] or (z_score == best_payload[4] and rr > best_payload[6]):
+                best = zone
+                best_payload = payload
 
-        # 8. Session premium (1 pt bonus)
-        now_utc = datetime.utcnow().time()
-        if session_quality(now_utc):
-            score += 1
-            details.append("session_premium(+1)")
-
-        # --- Calcul niveaux et filtre RR ---
-        current_price = df_m15["close"].iloc[-1]
-        stop, tp = build_trade_levels(pair, zone, current_price, df_m15)
-        risk = abs(current_price - stop)
-        reward = abs(tp - current_price)
-        rr = reward / risk if risk > 0 else 0
-        if rr < 1.8:
-            logger.info(f"{pair}: RR insuffisant {rr:.2f}")
+        if best_payload is None:
+            logger.info(f"{pair}: aucun finaliste après vetos qualité.")
             return
 
-        logger.info(f"{pair}: SCORE={score}/15 | {' | '.join(details)}")
+        zone, current_price, stop, tp, final_score, reject_reason, rr, all_details = best_payload
 
-        # --- Filtre score minimum ---
-        if score < MIN_SEQUENCE_SCORE:
-            logger.info(f"{pair}: score {score}/15 insuffisant (min={MIN_SEQUENCE_SCORE})")
-            return
-
-        # --- Anti-doublon avec TTL (fix: était un set() sans expiration) ---
         clean_signal_keys()
-        key = (pair, zone.direction, round(zone.midpoint, decimals(pair)))
+        key = (pair, zone.direction, zone.setup_type, round(zone.midpoint, decimals(pair)))
         if key in last_signal_key:
             logger.info(f"{pair}: signal déjà traité sur cette zone (TTL={SIGNAL_KEY_TTL_HOURS}H).")
             return
         last_signal_key[key] = datetime.utcnow()
 
-        place_trade(pair, zone.direction, current_price, stop, tp, score, reject_reason)
+        logger.info(f"{pair}: FINALISTE {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
+        place_trade(pair, zone.direction, current_price, stop, tp, final_score, f"{zone.setup_type} | {reject_reason}")
 
     except Exception as exc:
         logger.exception(f"Erreur analyse {pair}: {exc}")
 
 
 def main() -> None:
-    logger.info("Démarrage OANDA V67 Sequence Sniper Enhanced")
+    logger.info("Démarrage OANDA V67.1 Hybrid Sniper")
     logger.info(f"Compte: {OANDA_ACCOUNT_ID} | env={OANDA_ENVIRONMENT} | EXECUTE_TRADES={EXECUTE_TRADES}")
     balance = get_account_balance()
     logger.info(f"Solde: {balance:.2f} | Paires: {', '.join(PAIR_LIST)}")
