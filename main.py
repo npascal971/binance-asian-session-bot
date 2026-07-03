@@ -35,7 +35,7 @@ EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "false").lower() == "true"
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment=OANDA_ENVIRONMENT)
 
 # =========================================================
-# STRATEGIE V68 - OANDA SCORING SNIPER
+# STRATEGIE V69 - OANDA SCORING SNIPER PRODUCTION
 # Exécution OANDA V67 + détection V63/V65 rééquilibrée
 # Setups: FVG_RETEST_PERFECT, NESTED_FVG, WICK_REJECTION
 # Scoring qualité: spread, H1 EMA50, rejet M15, RR, anti-doublon. Hard-block seulement sur risque extrême.
@@ -122,12 +122,13 @@ MIN_UNITS = {
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v68_scoring_sniper.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v69_scoring_sniper.log")],
 )
-logger = logging.getLogger("OANDA-V68-Scoring-Sniper")
+logger = logging.getLogger("OANDA-V69-Scoring-Sniper")
 
 # Dict signal_key -> timestamp pour expiration TTL (fix: était un set() infini)
 last_signal_key: Dict[tuple, datetime] = {}
+# V69: cache mémoire uniquement. Il repart vide à chaque vrai redémarrage du process.
 
 
 @dataclass
@@ -831,7 +832,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 
     rr_actual = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
     logger.info(
-        f"SIGNAL V68 SCORING {pair} {direction} | "
+        f"SIGNAL V69 SCORING {pair} {direction} | "
         f"entry≈{entry:.{decimals(pair)}f} SL={stop:.{decimals(pair)}f} TP={tp:.{decimals(pair)}f} "
         f"RR={rr_actual:.2f} score={score}/15 units={units} | {reason}"
     )
@@ -849,7 +850,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
         )
         logger.info(f"ORDRE RÉEL ENVOYÉ {pair} | ID={trade_id}")
         send_email(
-            f"V68 {pair} {direction} score={score}/15",
+            f"V69 {pair} {direction} score={score}/15",
             (
                 f"Paire: {pair}\nDirection: {direction}\n"
                 f"Entrée: {entry:.{decimals(pair)}f}\nSL: {stop:.{decimals(pair)}f}\n"
@@ -867,7 +868,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 # ANALYSE PRINCIPALE AVEC SYSTÈME DE SCORE RÉEL (0-15)
 # =========================================================
 def analyze_pair(pair: str) -> None:
-    logger.info(f"\nV68 SCORING analyse {pair}")
+    logger.info(f"\nV69 SCORING analyse {pair}")
     try:
         spread_status, spread_msg, _, spread_pts = spread_quality(pair)
         logger.info(f"{pair} · {spread_msg}")
@@ -986,20 +987,34 @@ def analyze_pair(pair: str) -> None:
         if key in last_signal_key:
             logger.info(f"{pair}: signal déjà traité sur cette zone (TTL={SIGNAL_KEY_TTL_HOURS}H).")
             return
-        last_signal_key[key] = datetime.utcnow()
 
-        logger.info(f"{pair}: FINALISTE V68 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
-        place_trade(pair, zone.direction, current_price, stop, tp, final_score, f"{zone.setup_type} | {reject_reason}")
+        logger.info(f"{pair}: FINALISTE V69 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
+
+        trade_id = place_trade(
+            pair=pair,
+            direction=zone.direction,
+            entry=current_price,
+            stop=stop,
+            tp=tp,
+            score=final_score,
+            reason=f"{zone.setup_type} | {reject_reason}",
+        )
+
+        if trade_id not in (None, False):
+            last_signal_key[key] = datetime.utcnow()
+            logger.info(f"{pair}: zone enregistrée ({zone.setup_type}) pour {SIGNAL_KEY_TTL_HOURS}H. trade_id={trade_id}")
+        else:
+            logger.info(f"{pair}: ordre non exécuté, zone NON enregistrée.")
 
     except Exception as exc:
         logger.exception(f"Erreur analyse {pair}: {exc}")
 
 def main() -> None:
-    logger.info("Démarrage OANDA V68 Scoring Sniper")
+    logger.info("Démarrage OANDA V69 Scoring Sniper Production")
     logger.info(f"Compte: {OANDA_ACCOUNT_ID} | env={OANDA_ENVIRONMENT} | EXECUTE_TRADES={EXECUTE_TRADES}")
     balance = get_account_balance()
     logger.info(f"Solde: {balance:.2f} | Paires: {', '.join(PAIR_LIST)}")
-    logger.info(f"Score min V68: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk: {RISK_PERCENTAGE}%")
+    logger.info(f"Score min V69: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk: {RISK_PERCENTAGE}%")
 
     while True:
         now = datetime.utcnow().time()
