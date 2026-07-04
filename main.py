@@ -36,7 +36,7 @@ EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "false").lower() == "true"
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment=OANDA_ENVIRONMENT)
 
 # =========================================================
-# STRATEGIE V70 - OANDA SCORING SNIPER PRODUCTION
+# STRATEGIE V70.1 - OANDA SCORING SNIPER PRODUCTION + RISK FIX
 # Exécution OANDA V67 + détection V63/V65 rééquilibrée
 # Setups: FVG_RETEST_PERFECT, NESTED_FVG, WICK_REJECTION
 # Scoring qualité: spread, H1 EMA50, rejet M15, RR, anti-doublon. Hard-block seulement sur risque extrême.
@@ -55,6 +55,17 @@ MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "100"))
 RISK_REWARD = float(os.getenv("RISK_REWARD", "2.0"))
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "3"))
 ONE_TRADE_PER_PAIR = True
+
+# Risk guard production
+MAX_DAILY_RISK_PERCENT = float(os.getenv("MAX_DAILY_RISK_PERCENT", "3.0"))
+MAX_WEEKLY_LOSS_PERCENT = float(os.getenv("MAX_WEEKLY_LOSS_PERCENT", "6.0"))
+
+# Variables mémoire: réinitialisées au redémarrage.
+# Elles servent à couper le bot si la perte réalisée journalière / hebdo dépasse le seuil.
+RISK_GUARD_DAY = None
+RISK_GUARD_WEEK = None
+RISK_GUARD_DAILY_START_BALANCE = None
+RISK_GUARD_WEEKLY_START_BALANCE = None
 
 EMA_FAST = 50
 EMA_SLOW = 200
@@ -115,7 +126,14 @@ PIP_VALUE = {
     "DEFAULT": 0.0001,
 }
 
-MIN_UNITS = {
+# Taille minimale / pas d'arrondi des unités.
+# Pour respecter strictement le risque, on ARRONDIT TOUJOURS vers le bas.
+UNIT_STEP = {
+    "XAU_USD": 1,
+    "DEFAULT": 1000,
+}
+
+MIN_TRADE_UNITS = {
     "XAU_USD": 1,
     "DEFAULT": 1000,
 }
@@ -123,9 +141,9 @@ MIN_UNITS = {
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v70_scoring_sniper.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v70_1_scoring_sniper.log")],
 )
-logger = logging.getLogger("OANDA-V70-Scoring-Sniper")
+logger = logging.getLogger("OANDA-V70.1-Scoring-Sniper")
 
 # Dict signal_key -> timestamp pour expiration TTL (fix: était un set() infini)
 last_signal_key: Dict[tuple, datetime] = {}
@@ -189,6 +207,114 @@ def get_account_balance() -> float:
     resp = get_account_summary()
     return float(resp["account"]["balance"])
 
+
+
+def get_mid_price(pair: str) -> Optional[float]:
+    """Récupère un prix mid récent pour convertir les devises de cotation en USD."""
+    prices = fetch_pricing_spread(pair)
+    if prices:
+        return float(prices[2])
+    try:
+        df = fetch_candles(pair, "M1", 2)
+        if not df.empty:
+            return float(df["close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def quote_currency(pair: str) -> str:
+    """EUR_USD -> USD, USD_JPY -> JPY, XAU_USD -> USD."""
+    return pair.split("_")[-1]
+
+
+def quote_to_usd_factor(pair: str, entry_price: float) -> Optional[float]:
+    """
+    Convertit 1 unité de devise de cotation en USD.
+    Exemple:
+    - EUR_USD: quote USD -> 1
+    - USD_JPY: 1 JPY -> 1 / USD_JPY USD
+    - USD_CAD/AUD_CAD: 1 CAD -> 1 / USD_CAD USD
+    - GBP_JPY/AUD_JPY: 1 JPY -> 1 / USD_JPY USD
+    """
+    quote = quote_currency(pair)
+
+    if quote == "USD":
+        return 1.0
+
+    # Si la paire est USD_XXX, le prix d'entrée permet déjà de convertir XXX -> USD.
+    # Exemple USD_JPY=161 => 1 JPY = 1/161 USD.
+    if pair.startswith("USD_"):
+        if entry_price <= 0:
+            return None
+        return 1.0 / entry_price
+
+    # Cas croisés : AUD_JPY, GBP_JPY => utiliser USD_JPY.
+    usd_quote_pair = f"USD_{quote}"
+    mid = get_mid_price(usd_quote_pair)
+    if mid and mid > 0:
+        return 1.0 / mid
+
+    # Cas éventuel EUR_GBP -> GBP_USD si disponible.
+    quote_usd_pair = f"{quote}_USD"
+    mid = get_mid_price(quote_usd_pair)
+    if mid and mid > 0:
+        return mid
+
+    logger.error(f"Impossible de convertir la devise de cotation {quote} en USD pour {pair}.")
+    return None
+
+
+def get_risk_guard_state(balance: Optional[float] = None) -> Dict[str, float]:
+    """Initialise/réinitialise les seuils daily/weekly et retourne l'état courant."""
+    global RISK_GUARD_DAY, RISK_GUARD_WEEK, RISK_GUARD_DAILY_START_BALANCE, RISK_GUARD_WEEKLY_START_BALANCE
+
+    now = datetime.utcnow()
+    today = now.date()
+    week = now.isocalendar()[:2]  # (year, week)
+    if balance is None:
+        balance = get_account_balance()
+
+    if RISK_GUARD_DAY != today or RISK_GUARD_DAILY_START_BALANCE is None:
+        RISK_GUARD_DAY = today
+        RISK_GUARD_DAILY_START_BALANCE = balance
+        logger.info(f"RISK GUARD daily reset | start_balance={balance:.2f}")
+
+    if RISK_GUARD_WEEK != week or RISK_GUARD_WEEKLY_START_BALANCE is None:
+        RISK_GUARD_WEEK = week
+        RISK_GUARD_WEEKLY_START_BALANCE = balance
+        logger.info(f"RISK GUARD weekly reset | start_balance={balance:.2f}")
+
+    daily_dd_pct = 0.0
+    weekly_dd_pct = 0.0
+    if RISK_GUARD_DAILY_START_BALANCE > 0:
+        daily_dd_pct = max(0.0, (RISK_GUARD_DAILY_START_BALANCE - balance) / RISK_GUARD_DAILY_START_BALANCE * 100)
+    if RISK_GUARD_WEEKLY_START_BALANCE > 0:
+        weekly_dd_pct = max(0.0, (RISK_GUARD_WEEKLY_START_BALANCE - balance) / RISK_GUARD_WEEKLY_START_BALANCE * 100)
+
+    return {
+        "balance": balance,
+        "daily_start": RISK_GUARD_DAILY_START_BALANCE,
+        "weekly_start": RISK_GUARD_WEEKLY_START_BALANCE,
+        "daily_dd_pct": daily_dd_pct,
+        "weekly_dd_pct": weekly_dd_pct,
+    }
+
+
+def risk_guard_allows_new_trade(balance: Optional[float] = None) -> bool:
+    """Bloque l'ouverture si la perte réalisée journalière/hebdo dépasse le seuil configuré."""
+    state = get_risk_guard_state(balance)
+    logger.info(
+        f"RISK GUARD | balance={state['balance']:.2f} | daily_dd={state['daily_dd_pct']:.2f}%/{MAX_DAILY_RISK_PERCENT:.2f}% | "
+        f"weekly_dd={state['weekly_dd_pct']:.2f}%/{MAX_WEEKLY_LOSS_PERCENT:.2f}%"
+    )
+    if state["daily_dd_pct"] >= MAX_DAILY_RISK_PERCENT:
+        logger.warning("RISK GUARD: limite de perte journalière atteinte, nouveau trade bloqué.")
+        return False
+    if state["weekly_dd_pct"] >= MAX_WEEKLY_LOSS_PERCENT:
+        logger.warning("RISK GUARD: limite de perte hebdomadaire atteinte, nouveau trade bloqué.")
+        return False
+    return True
 
 def get_open_trades(log_raw: bool = False) -> List[Dict]:
     """Lecture officielle OpenTrades + logs de diagnostic compte/env."""
@@ -845,21 +971,60 @@ def m15_rejection_score(pair: str, df_m15: pd.DataFrame, zone: FVGZone) -> Tuple
 
 
 def calculate_units(pair: str, entry: float, stop: float, balance: float) -> int:
+    """
+    Calcule la taille de position pour que le risque ne dépasse pas RISK_PERCENTAGE du compte.
+
+    Correction V70.1:
+    - EUR_USD / GBP_USD / XAU_USD / AUD_USD: distance déjà en USD.
+    - USD_JPY / GBP_JPY / AUD_JPY: distance en JPY -> conversion via USD_JPY.
+    - USD_CAD / AUD_CAD: distance en CAD -> conversion via USD_CAD.
+    - Arrondi toujours vers le bas pour ne jamais dépasser le risque.
+    """
     risk_usd = min(balance * (RISK_PERCENTAGE / 100), MAX_RISK_USD)
-    distance = abs(entry - stop)
-    if distance <= 0:
+    distance_quote = abs(entry - stop)
+    if distance_quote <= 0:
         return 0
 
-    units_float = risk_usd / distance
-    min_units = MIN_UNITS.get(pair, MIN_UNITS["DEFAULT"])
+    q_to_usd = quote_to_usd_factor(pair, entry)
+    if q_to_usd is None or q_to_usd <= 0:
+        logger.error(f"{pair}: conversion devise impossible, trade bloqué.")
+        return 0
 
-    if pair == "XAU_USD":
-        units = int(max(round(units_float, 0), min_units))
-    else:
-        units = int(max(round(units_float / min_units) * min_units, min_units))
+    risk_per_unit_usd = distance_quote * q_to_usd
+    if risk_per_unit_usd <= 0:
+        return 0
+
+    raw_units = risk_usd / risk_per_unit_usd
+    step = UNIT_STEP.get(pair, UNIT_STEP["DEFAULT"])
+    min_trade_units = MIN_TRADE_UNITS.get(pair, MIN_TRADE_UNITS["DEFAULT"])
+
+    # Arrondi vers le bas = respect strict du risque. Ne jamais forcer au minimum si ça dépasse le risque.
+    units = int(np.floor(raw_units / step) * step)
+
+    if units < min_trade_units:
+        estimated_min_risk = min_trade_units * risk_per_unit_usd
+        logger.warning(
+            f"{pair}: taille calculée trop faible units={units} < min={min_trade_units}. "
+            f"Risque min estimé=${estimated_min_risk:.2f}, risque autorisé=${risk_usd:.2f}. Trade bloqué."
+        )
+        return 0
+
+    estimated_risk = units * risk_per_unit_usd
+    estimated_risk_pct = (estimated_risk / balance * 100) if balance > 0 else 0
+    logger.info(
+        f"RISK LOT {pair} | balance=${balance:.2f} | risk_cap=${risk_usd:.2f} ({RISK_PERCENTAGE:.2f}%) | "
+        f"entry={entry:.{decimals(pair)}f} stop={stop:.{decimals(pair)}f} | "
+        f"distance={price_to_pips(pair, distance_quote):.1f}p | quote_to_usd={q_to_usd:.8f} | "
+        f"risk_per_unit=${risk_per_unit_usd:.8f} | raw_units={raw_units:.2f} | units={units} | "
+        f"estimated_risk=${estimated_risk:.2f} ({estimated_risk_pct:.2f}%)"
+    )
+
+    # Protection finale: si l'arrondi ou la conversion dépasse de plus de 1%, on bloque.
+    if estimated_risk > risk_usd * 1.01:
+        logger.error(f"{pair}: risque estimé ${estimated_risk:.2f} > risque autorisé ${risk_usd:.2f}. Trade bloqué.")
+        return 0
 
     return units
-
 
 def build_trade_levels(pair: str, zone: FVGZone, entry: float, df_m15: pd.DataFrame) -> Tuple[float, float]:
     df = add_indicators(df_m15)
@@ -900,6 +1065,9 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
         return None
 
     balance = get_account_balance()
+    if not risk_guard_allows_new_trade(balance):
+        return None
+
     units = calculate_units(pair, entry, stop, balance)
     if units <= 0:
         logger.warning(f"{pair}: taille position invalide.")
@@ -919,7 +1087,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 
     rr_actual = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
     logger.info(
-        f"SIGNAL V70 SCORING {pair} {direction} | "
+        f"SIGNAL V70.1 SCORING {pair} {direction} | "
         f"entry≈{entry:.{decimals(pair)}f} SL={stop:.{decimals(pair)}f} TP={tp:.{decimals(pair)}f} "
         f"RR={rr_actual:.2f} score={score}/15 units={units} signed_units={signed_units} | {reason}"
     )
@@ -955,7 +1123,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
             logger.warning(f"ATTENTION {pair}: ordre accepté mais OpenTrades ne montre pas encore la position.")
 
         send_email(
-            f"V70 {pair} {direction} score={score}/15",
+            f"V70.1 {pair} {direction} score={score}/15",
             (
                 f"Paire: {pair}\nDirection: {direction}\n"
                 f"Entrée: {entry:.{decimals(pair)}f}\nSL: {stop:.{decimals(pair)}f}\n"
@@ -974,7 +1142,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 # ANALYSE PRINCIPALE AVEC SYSTÈME DE SCORE RÉEL (0-15)
 # =========================================================
 def analyze_pair(pair: str) -> None:
-    logger.info(f"\nV70 SCORING analyse {pair}")
+    logger.info(f"\nV70.1 SCORING analyse {pair}")
     try:
         spread_status, spread_msg, _, spread_pts = spread_quality(pair)
         logger.info(f"{pair} · {spread_msg}")
@@ -1094,7 +1262,7 @@ def analyze_pair(pair: str) -> None:
             logger.info(f"{pair}: signal déjà traité sur cette zone (TTL={SIGNAL_KEY_TTL_HOURS}H).")
             return
 
-        logger.info(f"{pair}: FINALISTE V70 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
+        logger.info(f"{pair}: FINALISTE V70.1 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
 
         trade_id = place_trade(
             pair=pair,
@@ -1116,11 +1284,12 @@ def analyze_pair(pair: str) -> None:
         logger.exception(f"Erreur analyse {pair}: {exc}")
 
 def main() -> None:
-    logger.info("Démarrage OANDA V70 Scoring Sniper Production")
+    logger.info("Démarrage OANDA V70.1 Scoring Sniper Production")
     logger.info(f"Compte: {OANDA_ACCOUNT_ID} | env={OANDA_ENVIRONMENT} | EXECUTE_TRADES={EXECUTE_TRADES}")
     balance = get_account_balance()
     logger.info(f"Solde: {balance:.2f} | Paires: {', '.join(PAIR_LIST)}")
-    logger.info(f"Score min V70: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk: {RISK_PERCENTAGE}%")
+    logger.info(f"Score min V70.1: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk/trade: {RISK_PERCENTAGE}% | Daily max: {MAX_DAILY_RISK_PERCENT}% | Weekly max: {MAX_WEEKLY_LOSS_PERCENT}%")
+    get_risk_guard_state(balance)
 
     while True:
         now = datetime.utcnow().time()
