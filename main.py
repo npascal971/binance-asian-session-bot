@@ -36,7 +36,7 @@ EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "false").lower() == "true"
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment=OANDA_ENVIRONMENT)
 
 # =========================================================
-# STRATEGIE V70.1 - OANDA SCORING SNIPER PRODUCTION + RISK FIX
+# STRATEGIE V71 - OANDA SCORING SNIPER PRODUCTION + MARKET HOURS + RISK FIX
 # Exécution OANDA V67 + détection V63/V65 rééquilibrée
 # Setups: FVG_RETEST_PERFECT, NESTED_FVG, WICK_REJECTION
 # Scoring qualité: spread, H1 EMA50, rejet M15, RR, anti-doublon. Hard-block seulement sur risque extrême.
@@ -46,8 +46,8 @@ PAIR_LIST = [
     "AUD_USD", "AUD_CAD", "AUD_JPY", "XAU_USD", "GBP_JPY"
 ]
 
-SESSION_START = dtime(7, 0)
-SESSION_END = dtime(21, 0)
+FOREX_OPEN_UTC = dtime(21, 0)   # Dimanche ouverture approximative FX/OANDA
+FOREX_CLOSE_UTC = dtime(21, 0)  # Vendredi fermeture approximative FX/OANDA
 LOOP_SECONDS = 60
 
 RISK_PERCENTAGE = float(os.getenv("RISK_PERCENTAGE", "1.0"))
@@ -141,12 +141,51 @@ MIN_TRADE_UNITS = {
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v70_1_scoring_sniper.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v71_scoring_sniper.log")],
 )
-logger = logging.getLogger("OANDA-V70.1-Scoring-Sniper")
+logger = logging.getLogger("OANDA-V71-Scoring-Sniper")
 
 # Dict signal_key -> timestamp pour expiration TTL (fix: était un set() infini)
 last_signal_key: Dict[tuple, datetime] = {}
+
+
+def is_market_open_utc(now_dt: datetime) -> bool:
+    """
+    True quand le marché Forex/OANDA est censé être ouvert.
+    - Lundi -> jeudi : ouvert toute la journée
+    - Vendredi : ouvert jusqu'à 21:00 UTC
+    - Samedi : fermé
+    - Dimanche : fermé avant 21:00 UTC, ouvert après
+    
+    Important : cela respecte les week-ends tout en analysant dès l'ouverture du marché,
+    sans limiter le bot à Londres/NY.
+    """
+    weekday = now_dt.weekday()  # lundi=0 ... dimanche=6
+    current_time = now_dt.time()
+
+    if weekday == 5:  # samedi
+        return False
+
+    if weekday == 6 and current_time < FOREX_OPEN_UTC:  # dimanche avant ouverture
+        return False
+
+    if weekday == 4 and current_time >= FOREX_CLOSE_UTC:  # vendredi après fermeture
+        return False
+
+    return True
+
+
+def market_status_text(now_dt: datetime) -> str:
+    if is_market_open_utc(now_dt):
+        return "Marché Forex : OUVERT"
+    weekday = now_dt.weekday()
+    if weekday == 5:
+        return "Marché Forex : FERMÉ samedi"
+    if weekday == 6:
+        return f"Marché Forex : FERMÉ dimanche avant {FOREX_OPEN_UTC.strftime('%H:%M')} UTC"
+    if weekday == 4:
+        return f"Marché Forex : FERMÉ vendredi après {FOREX_CLOSE_UTC.strftime('%H:%M')} UTC"
+    return "Marché Forex : FERMÉ"
 # V70: cache mémoire uniquement. Il repart vide à chaque vrai redémarrage du process.
 
 
@@ -1262,7 +1301,7 @@ def analyze_pair(pair: str) -> None:
             logger.info(f"{pair}: signal déjà traité sur cette zone (TTL={SIGNAL_KEY_TTL_HOURS}H).")
             return
 
-        logger.info(f"{pair}: FINALISTE V70.1 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
+        logger.info(f"{pair}: FINALISTE V71 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
 
         trade_id = place_trade(
             pair=pair,
@@ -1284,24 +1323,26 @@ def analyze_pair(pair: str) -> None:
         logger.exception(f"Erreur analyse {pair}: {exc}")
 
 def main() -> None:
-    logger.info("Démarrage OANDA V70.1 Scoring Sniper Production")
+    logger.info("Démarrage OANDA V71 Scoring Sniper Production")
     logger.info(f"Compte: {OANDA_ACCOUNT_ID} | env={OANDA_ENVIRONMENT} | EXECUTE_TRADES={EXECUTE_TRADES}")
+    logger.info(f"Trading hours: marché FX ouvert dimanche {FOREX_OPEN_UTC.strftime('%H:%M')} UTC -> vendredi {FOREX_CLOSE_UTC.strftime('%H:%M')} UTC")
     balance = get_account_balance()
     logger.info(f"Solde: {balance:.2f} | Paires: {', '.join(PAIR_LIST)}")
-    logger.info(f"Score min V70.1: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk/trade: {RISK_PERCENTAGE}% | Daily max: {MAX_DAILY_RISK_PERCENT}% | Weekly max: {MAX_WEEKLY_LOSS_PERCENT}%")
+    logger.info(f"Score min V71: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk/trade: {RISK_PERCENTAGE}% | Daily max: {MAX_DAILY_RISK_PERCENT}% | Weekly max: {MAX_WEEKLY_LOSS_PERCENT}%")
     get_risk_guard_state(balance)
 
     while True:
-        now = datetime.utcnow().time()
-        logger.info(f"\n===== {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC =====")
+        now_dt = datetime.utcnow()
+        logger.info(f"\n===== {now_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC =====")
+        logger.info(market_status_text(now_dt))
         try:
-            if SESSION_START <= now <= SESSION_END:
+            if is_market_open_utc(now_dt):
                 for pair in PAIR_LIST:
                     analyze_pair(pair)
                     time.sleep(0.3)
                 time.sleep(LOOP_SECONDS)
             else:
-                logger.info("Hors session. Attente 5 min.")
+                logger.info("Week-end / marché fermé. Attente 5 min.")
                 time.sleep(300)
         except Exception as exc:
             logger.exception(f"Erreur boucle principale: {exc}")
