@@ -76,7 +76,8 @@ RSI_PERIOD = 14
 ADX_PERIOD = 14
 
 # Seuil de score : score minimum sur 15 pour prendre un trade
-MIN_SEQUENCE_SCORE = int(os.getenv("MIN_SEQUENCE_SCORE", "13"))  # V72: score mini final, plus de vetos trop durs
+MIN_SEQUENCE_SCORE = int(os.getenv("MIN_SEQUENCE_SCORE", "13"))  # Score strict pour NESTED/WICK
+V74_CORE_FVG_MIN_SCORE = int(os.getenv("V74_CORE_FVG_MIN_SCORE", "10"))  # Reprise logique V63: FVG perfect propre dès 10/15
 
 # Filtres paramètres (resserrés par rapport à V66)
 MIN_FVG_ATR_RATIO = 0.28            # Zone FVG doit faire ≥ 40% ATR (était 0.25)
@@ -420,7 +421,7 @@ def log_account_snapshot(label: str) -> None:
 
 
 def has_open_trade(pair: str) -> bool:
-    """V73: vérifie les trades ouverts ET les positions ouvertes, avec preuve dans les logs."""
+    """V74: vérifie les trades ouverts ET les positions ouvertes, avec preuve dans les logs."""
     open_trades = get_open_trades(log_raw=True)
     trade_exists = any(
         t.get("instrument") == pair and abs(float(t.get("currentUnits", 0))) > 0
@@ -1214,7 +1215,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 
     rr_actual = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
     logger.info(
-        f"SIGNAL V73 SCORING {pair} {direction} | "
+        f"SIGNAL V74 SCORING {pair} {direction} | "
         f"entry≈{entry:.{decimals(pair)}f} SL={stop:.{decimals(pair)}f} TP={tp:.{decimals(pair)}f} "
         f"RR={rr_actual:.2f} score={score}/15 units={units} signed_units={signed_units} | {reason}"
     )
@@ -1276,11 +1277,37 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
         return None
 
 
+
+def is_v74_core_fvg_trade(zone: FVGZone, score: int, rr: float, reject_pts: int) -> Tuple[bool, str]:
+    """
+    Décision V74 inspirée V63.
+    On garde l'exécution/risk V73, mais on évite de refuser un FVG PERFECT propre
+    juste parce que le score global reste à 10-12/15.
+
+    Conditions obligatoires:
+    - setup FVG_RETEST_PERFECT uniquement
+    - prix déjà dans la zone (déjà vérifié avant l'appel)
+    - RR >= 1.8
+    - score >= V74_CORE_FVG_MIN_SCORE
+    - M15 pas catastrophique (reject_pts > -3)
+
+    Les NESTED_FVG et WICK_REJECTION restent soumis au score strict MIN_SEQUENCE_SCORE.
+    """
+    if zone.setup_type != "FVG_RETEST_PERFECT":
+        return False, "pas core FVG"
+    if rr < 1.8:
+        return False, f"RR trop faible {rr:.2f}"
+    if score < V74_CORE_FVG_MIN_SCORE:
+        return False, f"score core insuffisant {score}/{V74_CORE_FVG_MIN_SCORE}"
+    if reject_pts <= -3:
+        return False, f"M15 trop contraire reject_pts={reject_pts}"
+    return True, f"V74_CORE_FVG_ACCEPT score={score}/15 min_core={V74_CORE_FVG_MIN_SCORE} RR={rr:.2f} reject_pts={reject_pts}"
+
 # =========================================================
 # ANALYSE PRINCIPALE AVEC SYSTÈME DE SCORE RÉEL (0-15)
 # =========================================================
 def analyze_pair(pair: str) -> None:
-    logger.info(f"\nV73 SCORING analyse {pair}")
+    logger.info(f"\nV74 SCORING analyse {pair}")
     try:
         spread_status, spread_msg, _, spread_pts = spread_quality(pair)
         logger.info(f"{pair} · {spread_msg}")
@@ -1337,7 +1364,7 @@ def analyze_pair(pair: str) -> None:
 
         zones = collect_hybrid_zones(pair, df_h4, df_h1, df_m15, bias)
         if not zones:
-            logger.info(f"{pair}: aucune zone V63/V73 exploitable.")
+            logger.info(f"{pair}: aucune zone V63/V74 exploitable.")
             return
 
         best_payload = None
@@ -1378,18 +1405,26 @@ def analyze_pair(pair: str) -> None:
                 logger.info(f"{pair}: {zone.setup_type} RR insuffisant {rr:.2f}")
                 continue
 
+            core_ok, core_reason = is_v74_core_fvg_trade(zone, z_score, rr, reject_pts)
             logger.info(f"{pair}: CANDIDAT {zone.setup_type} SCORE={z_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
 
-            if z_score < MIN_SEQUENCE_SCORE:
-                logger.info(f"{pair}: score {z_score}/15 insuffisant (min={MIN_SEQUENCE_SCORE})")
+            if z_score < MIN_SEQUENCE_SCORE and not core_ok:
+                logger.info(
+                    f"{pair}: score {z_score}/15 insuffisant (min={MIN_SEQUENCE_SCORE}) "
+                    f"et pas accepté core V74 ({core_reason})"
+                )
                 continue
+
+            if core_ok and z_score < MIN_SEQUENCE_SCORE:
+                all_details.append(core_reason)
+                logger.info(f"{pair}: accepté par règle V74 core FVG malgré score {z_score}/15 < {MIN_SEQUENCE_SCORE}")
 
             payload = (zone, current_price, stop, tp, z_score, reject_reason, rr, all_details)
             if best_payload is None or z_score > best_payload[4] or (z_score == best_payload[4] and rr > best_payload[6]):
                 best_payload = payload
 
         if best_payload is None:
-            logger.info(f"{pair}: aucun finaliste après scoring V73.")
+            logger.info(f"{pair}: aucun finaliste après scoring V74.")
             return
 
         zone, current_price, stop, tp, final_score, reject_reason, rr, all_details = best_payload
@@ -1400,7 +1435,7 @@ def analyze_pair(pair: str) -> None:
             logger.info(f"{pair}: signal déjà traité sur cette zone (TTL={SIGNAL_KEY_TTL_HOURS}H).")
             return
 
-        logger.info(f"{pair}: FINALISTE V73 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
+        logger.info(f"{pair}: FINALISTE V74 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
         logger.info(
             f"DEBUG EXECUTION DECISION | pair={pair} direction={zone.direction} setup={zone.setup_type} "
             f"score={final_score}/15 rr={rr:.2f} key={key} execute={EXECUTE_TRADES} "
@@ -1427,12 +1462,12 @@ def analyze_pair(pair: str) -> None:
         logger.exception(f"Erreur analyse {pair}: {exc}")
 
 def main() -> None:
-    logger.info("Démarrage OANDA V73 OANDA Execution Lock + Full Audit")
+    logger.info("Démarrage OANDA V74 OANDA V63 Decision + Execution Audit")
     logger.info(f"Compte: {OANDA_ACCOUNT_ID} | env={OANDA_ENVIRONMENT} | EXECUTE_TRADES={EXECUTE_TRADES}")
     logger.info(f"Trading hours: marché FX ouvert dimanche {FOREX_OPEN_UTC.strftime('%H:%M')} UTC -> vendredi {FOREX_CLOSE_UTC.strftime('%H:%M')} UTC")
     balance = get_account_balance()
     logger.info(f"Solde: {balance:.2f} | Paires: {', '.join(PAIR_LIST)}")
-    logger.info(f"Score min V73: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk/trade: {RISK_PERCENTAGE}% | Daily max: {MAX_DAILY_RISK_PERCENT}% | Weekly max: {MAX_WEEKLY_LOSS_PERCENT}%")
+    logger.info(f"Score min V74: strict={MIN_SEQUENCE_SCORE}/15 | core_fvg={V74_CORE_FVG_MIN_SCORE}/15 | RR: {RISK_REWARD} | Risk/trade: {RISK_PERCENTAGE}% | Daily max: {MAX_DAILY_RISK_PERCENT}% | Weekly max: {MAX_WEEKLY_LOSS_PERCENT}%")
     get_risk_guard_state(balance)
 
     while True:
