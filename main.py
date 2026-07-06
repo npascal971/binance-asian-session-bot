@@ -17,6 +17,7 @@ import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.trades as trades
 import oandapyV20.endpoints.transactions as transactions
+import oandapyV20.endpoints.positions as positions
 
 load_dotenv()
 
@@ -37,7 +38,7 @@ EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "false").lower() == "true"
 client = oandapyV20.API(access_token=OANDA_API_KEY, environment=OANDA_ENVIRONMENT)
 
 # =========================================================
-# STRATEGIE V72 - OANDA SCORING SNIPER PRODUCTION + MARKET HOURS + RISK FIX
+# STRATEGIE V73 - OANDA SCORING SNIPER PRODUCTION + MARKET HOURS + RISK FIX
 # Exécution OANDA V67 + détection V63/V65 rééquilibrée
 # Setups: FVG_RETEST_PERFECT, NESTED_FVG, WICK_REJECTION
 # Scoring qualité: spread, H1 EMA50, rejet M15, RR, anti-doublon. Hard-block seulement sur risque extrême.
@@ -222,7 +223,7 @@ def price_to_pips(pair: str, distance: float) -> float:
     return abs(distance) / pip_value(pair)
 
 
-def compact_json(obj, max_len: int = 3500) -> str:
+def compact_json(obj, max_len: int = 6000) -> str:
     """Log JSON compact pour diagnostiquer les réponses OANDA sans exploser les logs Render."""
     try:
         text = json.dumps(obj, ensure_ascii=False, default=str)
@@ -375,13 +376,72 @@ def get_open_trades(log_raw: bool = False) -> List[Dict]:
     return open_trades
 
 
+def get_open_positions(log_raw: bool = False) -> List[Dict]:
+    """Lecture des positions ouvertes OANDA pour vérifier l'état réel du compte."""
+    try:
+        r = positions.OpenPositions(accountID=OANDA_ACCOUNT_ID)
+        resp = client.request(r)
+        open_positions = resp.get("positions", [])
+        logger.info(
+            f"DEBUG OPEN POSITIONS | account={OANDA_ACCOUNT_ID} env={OANDA_ENVIRONMENT} count={len(open_positions)}"
+        )
+        if log_raw:
+            logger.info(f"DEBUG OPEN POSITIONS RAW={compact_json(resp)}")
+        for p in open_positions:
+            long_units = p.get("long", {}).get("units")
+            short_units = p.get("short", {}).get("units")
+            logger.info(
+                f"DEBUG POSITION | instrument={p.get('instrument')} long_units={long_units} short_units={short_units} "
+                f"pl={p.get('pl')} resettablePL={p.get('resettablePL')}"
+            )
+        return open_positions
+    except Exception as exc:
+        logger.exception(f"DEBUG OPEN POSITIONS impossible: {exc}")
+        return []
+
+
+def log_account_snapshot(label: str) -> None:
+    """Snapshot complet compte/trades/positions pour éviter toute zone d'ombre avant exécution."""
+    logger.info(f"========== OANDA ACCOUNT SNAPSHOT {label} ==========")
+    try:
+        summary = get_account_summary()
+        acc = summary.get("account", {})
+        logger.info(
+            f"SNAPSHOT SUMMARY | id={acc.get('id')} balance={acc.get('balance')} NAV={acc.get('NAV')} "
+            f"marginUsed={acc.get('marginUsed')} marginAvailable={acc.get('marginAvailable')} "
+            f"openTradeCount={acc.get('openTradeCount')} openPositionCount={acc.get('openPositionCount')} "
+            f"lastTransactionID={summary.get('lastTransactionID') or acc.get('lastTransactionID')}"
+        )
+    except Exception as exc:
+        logger.exception(f"SNAPSHOT SUMMARY impossible: {exc}")
+    get_open_trades(log_raw=True)
+    get_open_positions(log_raw=True)
+    logger.info(f"========== FIN SNAPSHOT {label} ==========")
+
+
 def has_open_trade(pair: str) -> bool:
+    """V73: vérifie les trades ouverts ET les positions ouvertes, avec preuve dans les logs."""
     open_trades = get_open_trades(log_raw=True)
-    exists = any(
+    trade_exists = any(
         t.get("instrument") == pair and abs(float(t.get("currentUnits", 0))) > 0
         for t in open_trades
     )
-    logger.info(f"{pair}: has_open_trade={exists}")
+
+    open_positions = get_open_positions(log_raw=True)
+    position_exists = False
+    for p in open_positions:
+        if p.get("instrument") != pair:
+            continue
+        long_units = float(p.get("long", {}).get("units", 0) or 0)
+        short_units = float(p.get("short", {}).get("units", 0) or 0)
+        if abs(long_units) > 0 or abs(short_units) > 0:
+            position_exists = True
+            break
+
+    exists = trade_exists or position_exists
+    logger.info(
+        f"{pair}: has_open_trade={exists} | trade_exists={trade_exists} | position_exists={position_exists}"
+    )
     return exists
 
 
@@ -1118,6 +1178,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
         f"stop={stop:.{decimals(pair)}f} tp={tp:.{decimals(pair)}f} score={score} reason={reason}"
     )
     log_recent_oanda_transactions("BEFORE_PLACE_TRADE")
+    log_account_snapshot("BEFORE_PLACE_TRADE")
 
     if ONE_TRADE_PER_PAIR and has_open_trade(pair):
         logger.info(f"{pair}: trade déjà ouvert détecté par OANDA, aucun nouvel ordre.")
@@ -1126,7 +1187,8 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 
     total_open = open_trade_count()
     if total_open >= MAX_TRADES_TOTAL:
-        logger.info(f"Limite trades ouverts atteinte ({total_open}/{MAX_TRADES_TOTAL}).")
+        logger.info(f"Limite trades ouverts atteinte ({total_open}/{MAX_TRADES_TOTAL}). Aucun ordre POST /orders ne sera envoyé.")
+        log_account_snapshot("BLOCKED_MAX_TRADES_TOTAL")
         return None
 
     balance = get_account_balance()
@@ -1152,7 +1214,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 
     rr_actual = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
     logger.info(
-        f"SIGNAL V72 SCORING {pair} {direction} | "
+        f"SIGNAL V73 SCORING {pair} {direction} | "
         f"entry≈{entry:.{decimals(pair)}f} SL={stop:.{decimals(pair)}f} TP={tp:.{decimals(pair)}f} "
         f"RR={rr_actual:.2f} score={score}/15 units={units} signed_units={signed_units} | {reason}"
     )
@@ -1164,8 +1226,10 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
         return "SIMULATION"
 
     try:
+        logger.info(f"DEBUG POST /orders START | pair={pair} account={OANDA_ACCOUNT_ID} env={OANDA_ENVIRONMENT}")
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         resp = client.request(r)
+        logger.info(f"DEBUG POST /orders END | pair={pair}")
         log_oanda_order_response(pair, resp)
         log_recent_oanda_transactions("AFTER_ORDER_CREATE")
 
@@ -1186,6 +1250,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
         logger.info(f"DEBUG EXECUTION RESULT | status=CONFIRMED | pair={pair} trade_or_order_id={trade_id}")
 
         # Vérification juste après envoi: on relit OpenTrades pour éviter les faux positifs.
+        log_account_snapshot("AFTER_ORDER_CREATE")
         open_after = get_open_trades(log_raw=True)
         opened_for_pair = [t for t in open_after if t.get("instrument") == pair]
         if opened_for_pair:
@@ -1194,7 +1259,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
             logger.warning(f"ATTENTION {pair}: ordre accepté mais OpenTrades ne montre pas encore la position.")
 
         send_email(
-            f"V72 {pair} {direction} score={score}/15",
+            f"V73 {pair} {direction} score={score}/15",
             (
                 f"Paire: {pair}\nDirection: {direction}\n"
                 f"Entrée: {entry:.{decimals(pair)}f}\nSL: {stop:.{decimals(pair)}f}\n"
@@ -1215,7 +1280,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 # ANALYSE PRINCIPALE AVEC SYSTÈME DE SCORE RÉEL (0-15)
 # =========================================================
 def analyze_pair(pair: str) -> None:
-    logger.info(f"\nV72 SCORING analyse {pair}")
+    logger.info(f"\nV73 SCORING analyse {pair}")
     try:
         spread_status, spread_msg, _, spread_pts = spread_quality(pair)
         logger.info(f"{pair} · {spread_msg}")
@@ -1251,7 +1316,7 @@ def analyze_pair(pair: str) -> None:
         elif d1_b and d1_b != bias:
             score -= 2
             details.append(f"D1 conflit {d1_b} vs {bias}(-2)")
-            logger.info(f"{pair}: conflit D1={d1_b} vs H4/H1={bias}, converti en malus V72.")
+            logger.info(f"{pair}: conflit D1={d1_b} vs H4/H1={bias}, converti en malus V73.")
         else:
             details.append("D1 neutre(0)")
 
@@ -1272,7 +1337,7 @@ def analyze_pair(pair: str) -> None:
 
         zones = collect_hybrid_zones(pair, df_h4, df_h1, df_m15, bias)
         if not zones:
-            logger.info(f"{pair}: aucune zone V63/V72 exploitable.")
+            logger.info(f"{pair}: aucune zone V63/V73 exploitable.")
             return
 
         best_payload = None
@@ -1324,7 +1389,7 @@ def analyze_pair(pair: str) -> None:
                 best_payload = payload
 
         if best_payload is None:
-            logger.info(f"{pair}: aucun finaliste après scoring V72.")
+            logger.info(f"{pair}: aucun finaliste après scoring V73.")
             return
 
         zone, current_price, stop, tp, final_score, reject_reason, rr, all_details = best_payload
@@ -1335,7 +1400,7 @@ def analyze_pair(pair: str) -> None:
             logger.info(f"{pair}: signal déjà traité sur cette zone (TTL={SIGNAL_KEY_TTL_HOURS}H).")
             return
 
-        logger.info(f"{pair}: FINALISTE V72 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
+        logger.info(f"{pair}: FINALISTE V73 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
         logger.info(
             f"DEBUG EXECUTION DECISION | pair={pair} direction={zone.direction} setup={zone.setup_type} "
             f"score={final_score}/15 rr={rr:.2f} key={key} execute={EXECUTE_TRADES} "
@@ -1362,12 +1427,12 @@ def analyze_pair(pair: str) -> None:
         logger.exception(f"Erreur analyse {pair}: {exc}")
 
 def main() -> None:
-    logger.info("Démarrage OANDA V72 Debug Execution Scoring Sniper Production")
+    logger.info("Démarrage OANDA V73 OANDA Execution Lock + Full Audit")
     logger.info(f"Compte: {OANDA_ACCOUNT_ID} | env={OANDA_ENVIRONMENT} | EXECUTE_TRADES={EXECUTE_TRADES}")
     logger.info(f"Trading hours: marché FX ouvert dimanche {FOREX_OPEN_UTC.strftime('%H:%M')} UTC -> vendredi {FOREX_CLOSE_UTC.strftime('%H:%M')} UTC")
     balance = get_account_balance()
     logger.info(f"Solde: {balance:.2f} | Paires: {', '.join(PAIR_LIST)}")
-    logger.info(f"Score min V72: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk/trade: {RISK_PERCENTAGE}% | Daily max: {MAX_DAILY_RISK_PERCENT}% | Weekly max: {MAX_WEEKLY_LOSS_PERCENT}%")
+    logger.info(f"Score min V73: {MIN_SEQUENCE_SCORE}/15 | RR: {RISK_REWARD} | Risk/trade: {RISK_PERCENTAGE}% | Daily max: {MAX_DAILY_RISK_PERCENT}% | Weekly max: {MAX_WEEKLY_LOSS_PERCENT}%")
     get_risk_guard_state(balance)
 
     while True:
