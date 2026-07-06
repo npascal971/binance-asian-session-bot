@@ -58,6 +58,18 @@ RISK_REWARD = float(os.getenv("RISK_REWARD", "2.0"))
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "3"))
 ONE_TRADE_PER_PAIR = True
 
+# =========================================================
+# V75 - Gestion active des trades ouverts
+# =========================================================
+ENABLE_SMART_TRAILING = os.getenv("ENABLE_SMART_TRAILING", "true").lower() == "true"
+BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "1.0"))
+TRAILING_START_R = float(os.getenv("TRAILING_START_R", "1.5"))
+BREAKEVEN_OFFSET_PIPS = float(os.getenv("BREAKEVEN_OFFSET_PIPS", "1.0"))
+TRAIL_SWING_LOOKBACK = int(os.getenv("TRAIL_SWING_LOOKBACK", "30"))
+TRAIL_BUFFER_PIPS = float(os.getenv("TRAIL_BUFFER_PIPS", "2.0"))
+MIN_SL_UPDATE_PIPS = float(os.getenv("MIN_SL_UPDATE_PIPS", "1.0"))
+
+
 # Risk guard production
 MAX_DAILY_RISK_PERCENT = float(os.getenv("MAX_DAILY_RISK_PERCENT", "3.0"))
 MAX_WEEKLY_LOSS_PERCENT = float(os.getenv("MAX_WEEKLY_LOSS_PERCENT", "6.0"))
@@ -144,9 +156,9 @@ MIN_TRADE_UNITS = {
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v71_scoring_sniper.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("oanda_v75_scoring_sniper.log")],
 )
-logger = logging.getLogger("OANDA-V72-Scoring-Sniper")
+logger = logging.getLogger("OANDA-V75-Scoring-Sniper")
 
 # Dict signal_key -> timestamp pour expiration TTL (fix: était un set() infini)
 last_signal_key: Dict[tuple, datetime] = {}
@@ -1215,7 +1227,7 @@ def place_trade(pair: str, direction: str, entry: float, stop: float, tp: float,
 
     rr_actual = abs(tp - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
     logger.info(
-        f"SIGNAL V74 SCORING {pair} {direction} | "
+        f"SIGNAL V75 SCORING {pair} {direction} | "
         f"entry≈{entry:.{decimals(pair)}f} SL={stop:.{decimals(pair)}f} TP={tp:.{decimals(pair)}f} "
         f"RR={rr_actual:.2f} score={score}/15 units={units} signed_units={signed_units} | {reason}"
     )
@@ -1303,11 +1315,215 @@ def is_v74_core_fvg_trade(zone: FVGZone, score: int, rr: float, reject_pts: int)
         return False, f"M15 trop contraire reject_pts={reject_pts}"
     return True, f"V74_CORE_FVG_ACCEPT score={score}/15 min_core={V74_CORE_FVG_MIN_SCORE} RR={rr:.2f} reject_pts={reject_pts}"
 
+
+# =========================================================
+# V75 - BREAK-EVEN + TRAILING STRUCTUREL M5
+# =========================================================
+def trade_direction_from_units(units: float) -> Optional[str]:
+    if units > 0:
+        return "BUY"
+    if units < 0:
+        return "SELL"
+    return None
+
+
+def get_current_mid_from_m1(pair: str) -> Optional[float]:
+    price = get_mid_price(pair)
+    if price is not None:
+        return float(price)
+    try:
+        df = fetch_candles(pair, "M1", 3)
+        if not df.empty:
+            return float(df["close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def current_trade_sl_tp(trade: Dict) -> Tuple[Optional[float], Optional[float]]:
+    sl_order = trade.get("stopLossOrder") or {}
+    tp_order = trade.get("takeProfitOrder") or {}
+    sl = float(sl_order["price"]) if sl_order.get("price") else None
+    tp = float(tp_order["price"]) if tp_order.get("price") else None
+    return sl, tp
+
+
+def infer_initial_risk_from_trade(pair: str, trade: Dict, direction: str, entry: float, sl: Optional[float], tp: Optional[float]) -> Optional[float]:
+    """
+    On infère le risque initial depuis le TP car V74/V75 ouvre à RR=RISK_REWARD.
+    C'est plus fiable qu'utiliser le SL courant, qui peut déjà avoir été déplacé au break-even.
+    """
+    if tp is not None and RISK_REWARD > 0:
+        r = abs(tp - entry) / RISK_REWARD
+        if r > 0:
+            return r
+    if sl is not None:
+        r = abs(entry - sl)
+        if r > 0:
+            return r
+    return None
+
+
+def trade_profit_r(direction: str, entry: float, current_price: float, initial_risk: float) -> float:
+    if initial_risk <= 0:
+        return 0.0
+    if direction == "BUY":
+        return (current_price - entry) / initial_risk
+    return (entry - current_price) / initial_risk
+
+
+def find_last_m5_swing(pair: str, direction: str, lookback: int = TRAIL_SWING_LOOKBACK) -> Optional[float]:
+    """Retourne le dernier swing M5 utile: swing low pour BUY, swing high pour SELL."""
+    try:
+        df = fetch_candles(pair, "M5", max(lookback + 10, 40))
+        if df.empty or len(df) < 8:
+            return None
+        df = df.tail(lookback).copy()
+        lows = df["low"].values
+        highs = df["high"].values
+        if direction == "BUY":
+            for i in range(len(df) - 3, 1, -1):
+                if lows[i] < lows[i - 1] and lows[i] < lows[i + 1]:
+                    return float(lows[i])
+        else:
+            for i in range(len(df) - 3, 1, -1):
+                if highs[i] > highs[i - 1] and highs[i] > highs[i + 1]:
+                    return float(highs[i])
+    except Exception as exc:
+        logger.warning(f"{pair}: impossible de calculer swing M5 trailing: {exc}")
+    return None
+
+
+def update_trade_stop_loss(trade_id: str, pair: str, new_sl: float, reason: str) -> bool:
+    """Remplace uniquement le Stop Loss du trade via l'endpoint TradeCRCDO."""
+    if not EXECUTE_TRADES:
+        logger.info(f"V75 TRAILING SIMULATION {pair} trade={trade_id} new_sl={round_price(pair, new_sl)} reason={reason}")
+        return True
+
+    data = {
+        "stopLoss": {
+            "price": round_price(pair, new_sl),
+            "timeInForce": "GTC",
+        }
+    }
+    try:
+        logger.info(f"V75 SL UPDATE PAYLOAD {pair} trade={trade_id} {compact_json(data)}")
+        r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
+        resp = client.request(r)
+        logger.info(f"V75 SL UPDATE RESPONSE {pair} trade={trade_id} {compact_json(resp)}")
+        if resp.get("stopLossOrderRejectTransaction") or resp.get("orderRejectTransaction"):
+            logger.error(f"V75 SL UPDATE REJECTED {pair} trade={trade_id} {compact_json(resp)}")
+            return False
+        logger.info(f"V75 SL UPDATED {pair} trade={trade_id} SL={round_price(pair, new_sl)} | {reason}")
+        return True
+    except Exception as exc:
+        logger.exception(f"V75 SL UPDATE EXCEPTION {pair} trade={trade_id}: {exc}")
+        return False
+
+
+def maybe_update_sl_for_trade(trade: Dict) -> None:
+    pair = trade.get("instrument")
+    trade_id = str(trade.get("id"))
+    if not pair or not trade_id:
+        return
+
+    units = float(trade.get("currentUnits", 0) or 0)
+    direction = trade_direction_from_units(units)
+    if direction is None:
+        return
+
+    entry = float(trade.get("price") or 0)
+    if entry <= 0:
+        return
+
+    current_price = get_current_mid_from_m1(pair)
+    if current_price is None:
+        logger.warning(f"{pair}: prix actuel indisponible pour trailing V75")
+        return
+
+    current_sl, current_tp = current_trade_sl_tp(trade)
+    initial_risk = infer_initial_risk_from_trade(pair, trade, direction, entry, current_sl, current_tp)
+    if initial_risk is None or initial_risk <= 0:
+        logger.info(f"{pair}: risque initial introuvable, trailing ignoré trade={trade_id}")
+        return
+
+    profit_r = trade_profit_r(direction, entry, current_price, initial_risk)
+    pv = pip_value(pair)
+    min_update = MIN_SL_UPDATE_PIPS * pv
+    be_offset = BREAKEVEN_OFFSET_PIPS * pv
+    trail_buffer = TRAIL_BUFFER_PIPS * pv
+
+    logger.info(
+        f"V75 TRADE MANAGER {pair} trade={trade_id} dir={direction} entry={entry:.{decimals(pair)}f} "
+        f"price={current_price:.{decimals(pair)}f} SL={current_sl} TP={current_tp} R={profit_r:.2f}"
+    )
+
+    candidates: List[Tuple[float, str]] = []
+
+    # 1) Break-even intelligent à +1R.
+    if profit_r >= BREAKEVEN_TRIGGER_R:
+        be_sl = entry + be_offset if direction == "BUY" else entry - be_offset
+        candidates.append((be_sl, f"break-even +{BREAKEVEN_OFFSET_PIPS:.1f}p à {profit_r:.2f}R"))
+
+    # 2) Trailing structurel seulement après +1.5R.
+    if profit_r >= TRAILING_START_R:
+        swing = find_last_m5_swing(pair, direction)
+        if swing is not None:
+            if direction == "BUY":
+                swing_sl = swing - trail_buffer
+                # Ne jamais repasser sous BE une fois à +1.5R.
+                swing_sl = max(swing_sl, entry + be_offset)
+            else:
+                swing_sl = swing + trail_buffer
+                swing_sl = min(swing_sl, entry - be_offset)
+            candidates.append((swing_sl, f"trailing swing M5 à {profit_r:.2f}R swing={swing:.{decimals(pair)}f}"))
+
+    if not candidates:
+        return
+
+    # Sélection du SL le plus protecteur.
+    if direction == "BUY":
+        new_sl, reason = max(candidates, key=lambda x: x[0])
+        if current_sl is not None and new_sl <= current_sl + min_update:
+            logger.info(f"{pair}: SL inchangé, amélioration insuffisante BUY new={new_sl:.{decimals(pair)}f} current={current_sl:.{decimals(pair)}f}")
+            return
+        # sécurité: SL doit rester sous le prix actuel
+        if new_sl >= current_price - pv:
+            logger.info(f"{pair}: nouveau SL BUY trop proche/au-dessus du prix, ignoré new={new_sl} price={current_price}")
+            return
+    else:
+        new_sl, reason = min(candidates, key=lambda x: x[0])
+        if current_sl is not None and new_sl >= current_sl - min_update:
+            logger.info(f"{pair}: SL inchangé, amélioration insuffisante SELL new={new_sl:.{decimals(pair)}f} current={current_sl:.{decimals(pair)}f}")
+            return
+        if new_sl <= current_price + pv:
+            logger.info(f"{pair}: nouveau SL SELL trop proche/sous le prix, ignoré new={new_sl} price={current_price}")
+            return
+
+    update_trade_stop_loss(trade_id, pair, new_sl, reason)
+
+
+def manage_open_trades_v75() -> None:
+    """Passe sur tous les trades ouverts et applique BE/trailing structurel."""
+    if not ENABLE_SMART_TRAILING:
+        return
+    try:
+        open_trades = get_open_trades(log_raw=False)
+        if not open_trades:
+            logger.info("V75 TRADE MANAGER: aucun trade ouvert.")
+            return
+        logger.info(f"V75 TRADE MANAGER: gestion de {len(open_trades)} trade(s) ouvert(s).")
+        for trade in open_trades:
+            maybe_update_sl_for_trade(trade)
+            time.sleep(0.15)
+    except Exception as exc:
+        logger.exception(f"V75 TRADE MANAGER erreur globale: {exc}")
+
 # =========================================================
 # ANALYSE PRINCIPALE AVEC SYSTÈME DE SCORE RÉEL (0-15)
 # =========================================================
 def analyze_pair(pair: str) -> None:
-    logger.info(f"\nV74 SCORING analyse {pair}")
+    logger.info(f"\nV75 SCORING analyse {pair}")
     try:
         spread_status, spread_msg, _, spread_pts = spread_quality(pair)
         logger.info(f"{pair} · {spread_msg}")
@@ -1435,7 +1651,7 @@ def analyze_pair(pair: str) -> None:
             logger.info(f"{pair}: signal déjà traité sur cette zone (TTL={SIGNAL_KEY_TTL_HOURS}H).")
             return
 
-        logger.info(f"{pair}: FINALISTE V74 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
+        logger.info(f"{pair}: FINALISTE V75 {zone.setup_type} score={final_score}/15 RR={rr:.2f} | {' | '.join(all_details)}")
         logger.info(
             f"DEBUG EXECUTION DECISION | pair={pair} direction={zone.direction} setup={zone.setup_type} "
             f"score={final_score}/15 rr={rr:.2f} key={key} execute={EXECUTE_TRADES} "
@@ -1462,12 +1678,12 @@ def analyze_pair(pair: str) -> None:
         logger.exception(f"Erreur analyse {pair}: {exc}")
 
 def main() -> None:
-    logger.info("Démarrage OANDA V74 OANDA V63 Decision + Execution Audit")
+    logger.info("Démarrage OANDA V75 OANDA V63 Decision + Smart BE/Trailing")
     logger.info(f"Compte: {OANDA_ACCOUNT_ID} | env={OANDA_ENVIRONMENT} | EXECUTE_TRADES={EXECUTE_TRADES}")
     logger.info(f"Trading hours: marché FX ouvert dimanche {FOREX_OPEN_UTC.strftime('%H:%M')} UTC -> vendredi {FOREX_CLOSE_UTC.strftime('%H:%M')} UTC")
     balance = get_account_balance()
     logger.info(f"Solde: {balance:.2f} | Paires: {', '.join(PAIR_LIST)}")
-    logger.info(f"Score min V74: strict={MIN_SEQUENCE_SCORE}/15 | core_fvg={V74_CORE_FVG_MIN_SCORE}/15 | RR: {RISK_REWARD} | Risk/trade: {RISK_PERCENTAGE}% | Daily max: {MAX_DAILY_RISK_PERCENT}% | Weekly max: {MAX_WEEKLY_LOSS_PERCENT}%")
+    logger.info(f"Score min V75: strict={MIN_SEQUENCE_SCORE}/15 | core_fvg={V74_CORE_FVG_MIN_SCORE}/15 | RR: {RISK_REWARD} | Risk/trade: {RISK_PERCENTAGE}% | Daily max: {MAX_DAILY_RISK_PERCENT}% | Weekly max: {MAX_WEEKLY_LOSS_PERCENT}%")
     get_risk_guard_state(balance)
 
     while True:
@@ -1476,9 +1692,13 @@ def main() -> None:
         logger.info(market_status_text(now_dt))
         try:
             if is_market_open_utc(now_dt):
+                # V75: on protège d'abord les positions déjà ouvertes avant de chercher de nouveaux signaux.
+                manage_open_trades_v75()
                 for pair in PAIR_LIST:
                     analyze_pair(pair)
                     time.sleep(0.3)
+                # V75: second passage après les analyses pour réagir si un ordre vient d'être ouvert.
+                manage_open_trades_v75()
                 time.sleep(LOOP_SECONDS)
             else:
                 logger.info("Week-end / marché fermé. Attente 5 min.")
