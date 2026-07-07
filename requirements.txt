@@ -4,3 +4,4 @@ pandas
 numpy
 python-dotenv
 scipy>=1.10.0
+ta-lib
