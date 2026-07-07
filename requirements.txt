@@ -1,6 +1,7 @@
 numpy
 pandas
-ta
+ta-lib
 python-dotenv
 requests
 oandapyV20
+talib
