@@ -1,7 +1,6 @@
-oandapyV20
-requests
-pandas
 numpy
+pandas
+ta
 python-dotenv
-scipy>=1.10.0
-ta-lib
+requests
+oandapyV20
