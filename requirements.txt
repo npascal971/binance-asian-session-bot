@@ -5,3 +5,4 @@ requests==2.32.5
 oandapyV20==0.7.2
 TA-Lib
 scipy>=1.10.0
+ta
