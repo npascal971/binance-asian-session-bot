@@ -3714,8 +3714,12 @@ def advanced_main():
 
 
 # ============================================================
-# V5 BALANCED BUY/SELL - PATCH ANTI SUR-DETECTION
-# Objectif : maximum 1 BUY + 1 SELL par paire, sans AMD/CRT/TBS/WICK/NESTED.
+# V77 BALANCED BUY/SELL - PATCH PRODUCTION
+# Objectif : maximum 1 BUY + 1 SELL par paire.
+# Correction V77 :
+# - WICK_REJECTION et NESTED_FVG ne sont plus créés puis rejetés.
+# - On garde les filtres sérieux : tendance H1, direction H4,
+#   StochRSI, distance, score, anti-doublon, risk management OANDA.
 # ============================================================
 
 STRICT_ALLOWED_ENTRY_TYPES = {
@@ -3723,6 +3727,9 @@ STRICT_ALLOWED_ENTRY_TYPES = {
     "FVG_RETEST",
     "BISI",
     "BREAKER",
+    "NESTED_FVG",
+    "WICK_REJECTION",
+    "LIQUIDITY_DRAW",
 }
 
 STRICT_MAX_DISTANCE_PIPS = {
@@ -3744,14 +3751,33 @@ def strict_price_distance(pair: str, pips: float) -> float:
 
 
 def strict_entry_type_allowed(entry_type: str) -> bool:
-    """Autorise uniquement les vrais setups directionnels."""
-    et = (entry_type or "").upper()
-    if "NESTED" in et or "WICK" in et or "TBS" in et or "AMD" in et or "CRT" in et:
-        return False
-    if et == "BISI" or et == "BREAKER":
+    """
+    V77 : autorise les vrais setups directionnels du moteur.
+    Correction du bug V76/V5:
+    le moteur ajoutait WICK_REJECTION / NESTED_FVG puis les rejetait
+    immédiatement avec "type non autorisé V77".
+
+    On garde désactivés les setups expérimentaux trop bruyants:
+    TBS / AMD / CRT / PIN.
+    """
+    et = (entry_type or "").upper().strip()
+
+    if et in STRICT_ALLOWED_ENTRY_TYPES:
         return True
+
+    # Compatibilité avec variantes de nommage
     if et.startswith("FVG_RETEST"):
         return True
+    if "NESTED" in et and "FVG" in et:
+        return True
+    if "WICK" in et and "REJECTION" in et:
+        return True
+
+    # Setups expérimentaux toujours exclus
+    blocked_keywords = ("TBS", "AMD", "CRT", "PIN_BUY", "PIN_SELL")
+    if any(k in et for k in blocked_keywords):
+        return False
+
     return False
 
 
@@ -3833,10 +3859,14 @@ def strict_keep_best_per_direction(scored_entries: list) -> list:
         # priorité au score, puis aux FVG perfect/BISI plutôt qu'aux signaux faibles
         priority = 0
         if "PERFECT" in entry_type:
-            priority += 2
+            priority += 3
         if entry_type == "BISI":
-            priority += 2
+            priority += 3
         if entry_type.startswith("FVG_RETEST"):
+            priority += 2
+        if entry_type == "NESTED_FVG":
+            priority += 2
+        if entry_type == "WICK_REJECTION":
             priority += 1
 
         key_score = (score, priority)
@@ -3851,12 +3881,12 @@ def strict_keep_best_per_direction(scored_entries: list) -> list:
 
 
 # ============================================================
-# V5 BALANCED BUY/SELL - PATCH ANTI BIAIS BUY
+# V77 BALANCED BUY/SELL - PATCH ANTI BIAIS BUY
 # Objectif : ne plus bloquer mécaniquement les SELL quand H4 est BUY.
 # On garde le mode tendance, mais on ajoute un mode contre-mouvement contrôlé.
 # ============================================================
 
-def strict_direction_permission_v5(direction: str, bias: str, current_price: float, df_h1: pd.DataFrame, df_m15: pd.DataFrame, entry_type: str) -> tuple:
+def strict_direction_permission_v77(direction: str, bias: str, current_price: float, df_h1: pd.DataFrame, df_m15: pd.DataFrame, entry_type: str) -> tuple:
     """
     Autorise :
     - les trades dans le biais H4,
@@ -3883,28 +3913,38 @@ def strict_direction_permission_v5(direction: str, bias: str, current_price: flo
             return True, f"Direction alignée H4 {bias}"
 
         # Contre-biais autorisé seulement en correction d'extrême.
+        allowed_counter_types = {
+            "BREAKER",
+            "BISI",
+            "FVG_RETEST",
+            "FVG_RETEST_PERFECT",
+            "NESTED_FVG",
+            "WICK_REJECTION",
+        }
+        is_allowed_counter_type = entry_type in allowed_counter_types or entry_type.startswith("FVG_RETEST")
+
         if direction == "SELL" and bias == "BUY":
-            if k_h1 >= 75 and k_m15 <= 70 and (entry_type.startswith("FVG_RETEST") or entry_type in {"BREAKER", "BISI"}):
-                return True, f"SELL contre H4 BUY autorisé: H1 surachat {k_h1:.1f}, M15 refroidit {k_m15:.1f}"
-            return False, f"SELL contre H4 BUY refusé: H1={k_h1:.1f}, M15={k_m15:.1f}"
+            if k_h1 >= 75 and k_m15 <= 70 and is_allowed_counter_type:
+                return True, f"SELL contre H4 BUY autorisé V77: H1 surachat {k_h1:.1f}, M15 refroidit {k_m15:.1f}, type={entry_type}"
+            return False, f"SELL contre H4 BUY refusé: H1={k_h1:.1f}, M15={k_m15:.1f}, type={entry_type}"
 
         if direction == "BUY" and bias == "SELL":
-            if k_h1 <= 25 and k_m15 >= 30 and (entry_type.startswith("FVG_RETEST") or entry_type in {"BREAKER", "BISI"}):
-                return True, f"BUY contre H4 SELL autorisé: H1 survendu {k_h1:.1f}, M15 rebondit {k_m15:.1f}"
-            return False, f"BUY contre H4 SELL refusé: H1={k_h1:.1f}, M15={k_m15:.1f}"
+            if k_h1 <= 25 and k_m15 >= 30 and is_allowed_counter_type:
+                return True, f"BUY contre H4 SELL autorisé V77: H1 survendu {k_h1:.1f}, M15 rebondit {k_m15:.1f}, type={entry_type}"
+            return False, f"BUY contre H4 SELL refusé: H1={k_h1:.1f}, M15={k_m15:.1f}, type={entry_type}"
 
         return False, f"Direction {direction} non autorisée contre biais {bias}"
     except Exception as exc:
         return False, f"permission direction indisponible: {exc}"
 
 
-def strict_trend_veto_v5(direction: str, current_price: float, df_h1: pd.DataFrame, df_h4: pd.DataFrame, bias: str = "NEUTRAL") -> tuple:
+def strict_trend_veto_v77(direction: str, current_price: float, df_h1: pd.DataFrame, df_h4: pd.DataFrame, bias: str = "NEUTRAL") -> tuple:
     """
-    V5 : EMA50 H1 n'est plus un veto absolu pour les SELL.
+    V77 : EMA50 H1 n'est plus un veto absolu pour les SELL.
     Avant : SELL interdit dès que prix > EMA50 H1 -> ça supprimait presque tous les shorts.
     Maintenant :
     - BUY sous EMA50 H1 rejeté sauf H4 BUY très clair,
-    - SELL au-dessus EMA50 H1 accepté si contexte de correction/surachat géré par strict_direction_permission_v5.
+    - SELL au-dessus EMA50 H1 accepté si contexte de correction/surachat géré par strict_direction_permission_v77.
     """
     try:
         ema50_h1 = float(df_h1["close"].ewm(span=50, adjust=False).mean().iloc[-1])
@@ -3924,13 +3964,13 @@ def strict_trend_veto_v5(direction: str, current_price: float, df_h1: pd.DataFra
             if current_price > ema200_h1 and bias == "BUY":
                 return True, f"SELL contre tendance toléré seulement si StochRSI extrême"
 
-        return True, "Trend H1 OK V5"
+        return True, "Trend H1 OK V77"
     except Exception as exc:
         return False, f"EMA H1 indisponible: {exc}"
 
 def advanced_main():
     """
-    V5 BALANCED BUY/SELL.
+    V77 BALANCED BUY/SELL.
     - conserve ton moteur de données OANDA et tes fonctions existantes,
     - mais filtre agressivement la narrative,
     - supprime les entrées WICK/NESTED/TBS/AMD/CRT,
@@ -3947,7 +3987,7 @@ def advanced_main():
     for pair in PAIR_LIST:
         _reset_log_dedup()
         try:
-            logger.info(f"\n🔍 Début de l'analyse V5 BALANCED BUY/SELL de {pair}")
+            logger.info(f"\n🔍 Début de l'analyse V77 BALANCED BUY/SELL de {pair}")
 
             df_h4 = get_candles_with_retry(api, pair, GRANULARITY_H4, 300)
             df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
@@ -3970,7 +4010,7 @@ def advanced_main():
             )
 
             raw_entries = narrative.get("potential_entries", [])
-            logger.info(f"🧹 V5: entrées brutes narrative: {len(raw_entries)}")
+            logger.info(f"🧹 V77: entrées brutes narrative: {len(raw_entries)}")
 
             breaker = detect_breaker(df_m15)
             scored_entries = []
@@ -3986,19 +4026,19 @@ def advanced_main():
                     continue
 
                 if not strict_entry_type_allowed(entry_type):
-                    logger.info(f"⛔ {pair} rejet {direction} {entry_type}: type désactivé en V5")
+                    logger.info(f"⛔ {pair} rejet {direction} {entry_type}: type non autorisé V77")
                     rejected += 1
                     continue
 
-                # V5 : on ne rejette plus automatiquement les SELL quand H4 est BUY.
+                # V77 : on ne rejette plus automatiquement les SELL quand H4 est BUY.
                 # On autorise les contre-signaux uniquement si le StochRSI H1 est extrême.
-                ok, reason = strict_direction_permission_v5(direction, bias, current_price, df_h1, df_m15, entry_type)
+                ok, reason = strict_direction_permission_v77(direction, bias, current_price, df_h1, df_m15, entry_type)
                 if not ok:
                     logger.info(f"⛔ {pair} rejet {direction} {entry_type}: {reason}")
                     rejected += 1
                     continue
 
-                ok, reason = strict_trend_veto_v5(direction, current_price, df_h1, df_h4, bias)
+                ok, reason = strict_trend_veto_v77(direction, current_price, df_h1, df_h4, bias)
                 if not ok:
                     logger.info(f"⛔ {pair} rejet {direction} {entry_type}: {reason}")
                     rejected += 1
@@ -4037,7 +4077,7 @@ def advanced_main():
 
             finalists = strict_keep_best_per_direction(scored_entries)
             logger.info(
-                f"🧹 V5: candidats scorés={len(scored_entries)}, finalistes={len(finalists)}, rejetés={rejected}"
+                f"🧹 V77: candidats scorés={len(scored_entries)}, finalistes={len(finalists)}, rejetés={rejected}"
             )
 
             nb_envoyes = 0
@@ -4078,7 +4118,7 @@ def advanced_main():
                 enriched_bias["win_rate"] = win_rate
                 enriched_bias["quality_label"] = quality
                 enriched_bias["score_details"] = confidence_result.get("details", {})
-                enriched_bias["v5_filter"] = "Maximum 1 BUY + 1 SELL, contre-signaux autorisés seulement sur StochRSI extrême"
+                enriched_bias["v77_filter"] = "V77: max 1 BUY + 1 SELL, WICK/NESTED autorisés, contre-signaux seulement sur StochRSI extrême"
 
                 rsi_value = get_last_rsi(df_m15["close"])
 
@@ -4122,13 +4162,15 @@ def advanced_main():
             logger.error(traceback.format_exc())
             continue
 
-    logger.info("🏁 Analyse V5 BALANCED BUY/SELL terminée pour toutes les paires")
+    logger.info("🏁 Analyse V77 BALANCED BUY/SELL terminée pour toutes les paires")
 
 
 
 # =========================================================
-# V76 - OANDA EXECUTION + TRADE MANAGER
-# Base: moteur V63/V5 BALANCED BUY/SELL conservé
+# V77 - OANDA EXECUTION + TRADE MANAGER
+# Base V76 prod conservée.
+# Correction V77: WICK_REJECTION + NESTED_FVG autorisés dans le filtre strict.
+# Base: moteur V63/V77 BALANCED BUY/SELL conservé
 # Ajouts: exécution réelle OANDA, sizing risque, 1 trade/pair,
 # MAX 3 trades, break-even +1R, trailing swing M5 à +1.5R,
 # respect week-end Forex.
@@ -4457,7 +4499,7 @@ def manage_open_trades_v76():
 # LANCEMENT
 # =============================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V77 PROD")
     
     api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
     
