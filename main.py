@@ -199,7 +199,7 @@ MAX_PIPS_ACCEPTED = {
 # Configuration du scoring
 # === CONFIGURATION DU SCORING (MISE À JOUR) ===
 SCORING_CONFIG = {
-    "MIN_CONFIDENCE_SCORE": 15,  # V3 strict : seuls les vrais setups A/A+ passent
+    "MIN_CONFIDENCE_SCORE": 10,  # V77.1 équilibré : setups B+/A acceptés si risque OK
     "SIGNAL_WEIGHTS": {
         "BISI": 5,              # Combo fort BOS + FVG
         "NESTED_FVG": 4,
@@ -3222,7 +3222,7 @@ def calculate_signal_confidence(
     """
     score = 0
     details: dict = {}
-    min_required = SCORING_CONFIG.get("MIN_CONFIDENCE_SCORE", 15)
+    min_required = SCORING_CONFIG.get("MIN_CONFIDENCE_SCORE", 10)
 
     direction = (direction or "").upper()
     entry_level = entry.get("entry_level")
@@ -3258,23 +3258,42 @@ def calculate_signal_confidence(
         score += 1
         details["Trend_H4"] = "+1 (Neutre)"
 
-    # === VETO 2 : distance trop éloignée du niveau ===
+    # === V77.1 : distance = malus progressif, plus veto brutal ===
     try:
         distance = abs(float(current_price) - entry_level)
-        max_distance_price = max(float(atr_value) * 0.60, get_pip_value_for_pair(pair) * 5)
-        if distance > max_distance_price:
+        pip = get_pip_value_for_pair(pair)
+        entry_type_max_pips = {
+            "FVG_RETEST_PERFECT": 15.0,
+            "FVG_RETEST": 18.0,
+            "NESTED_FVG": 18.0,
+            "WICK_REJECTION": 15.0,
+            "BISI": 18.0,
+            "BREAKER": 15.0,
+        }
+        max_pips = entry_type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]))
+        max_distance_price = max(float(atr_value) * 1.20, pip * max_pips)
+
+        if distance <= max_distance_price * 0.50:
+            score += 2
+            details["Distance"] = f"+2 proche ({distance:.5f} <= {max_distance_price * 0.50:.5f})"
+        elif distance <= max_distance_price:
+            details["Distance"] = f"0 acceptable ({distance:.5f} <= {max_distance_price:.5f})"
+        elif distance <= max_distance_price * 1.50:
+            score -= 2
+            details["Distance"] = f"-2 un peu loin ({distance:.5f} > {max_distance_price:.5f})"
+        else:
+            # Seul cas où on bloque encore: entrée vraiment trop éloignée.
             return {
                 "passed": False,
                 "total_score": -50,
                 "final_confidence": "LOW",
-                "details": {"VETO": f"Prix trop loin de l'entrée ({distance:.5f} > {max_distance_price:.5f})"},
+                "details": {"VETO": f"Prix vraiment trop loin ({distance:.5f} > {max_distance_price * 1.50:.5f})"},
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
                 "atr_value": atr_value,
             }
-        details["Distance"] = f"OK ({distance:.5f} <= {max_distance_price:.5f})"
-    except Exception:
-        pass
+    except Exception as exc:
+        details["Distance_Error"] = str(exc)
 
     # === VETO 3 : tendance H1 stricte EMA50/EMA200 ===
     try:
@@ -3714,7 +3733,7 @@ def advanced_main():
 
 
 # ============================================================
-# V77 BALANCED BUY/SELL - PATCH PRODUCTION
+# V77.1 BALANCED BUY/SELL - PATCH PRODUCTION
 # Objectif : maximum 1 BUY + 1 SELL par paire.
 # Correction V77 :
 # - WICK_REJECTION et NESTED_FVG ne sont plus créés puis rejetés.
@@ -3733,15 +3752,19 @@ STRICT_ALLOWED_ENTRY_TYPES = {
 }
 
 STRICT_MAX_DISTANCE_PIPS = {
-    "XAU_USD": 15.0,
-    "USD_JPY": 8.0,
-    "GBP_JPY": 10.0,
-    "EUR_USD": 8.0,
-    "GBP_USD": 10.0,
-    "AUD_USD": 7.0,
-    "USD_CAD": 8.0,
-    "NAS100_USD": 25.0,
-    "DEFAULT": 8.0,
+    # V77.1 : distances élargies pour laisser vivre les retests M15/H1.
+    # Le scoring garde ensuite un malus si le prix est loin.
+    "XAU_USD": 35.0,
+    "USD_JPY": 18.0,
+    "GBP_JPY": 22.0,
+    "EUR_USD": 15.0,
+    "GBP_USD": 18.0,
+    "AUD_USD": 15.0,
+    "USD_CAD": 15.0,
+    "AUD_CAD": 15.0,
+    "AUD_JPY": 18.0,
+    "NAS100_USD": 50.0,
+    "DEFAULT": 15.0,
 }
 
 
@@ -3755,7 +3778,7 @@ def strict_entry_type_allowed(entry_type: str) -> bool:
     V77 : autorise les vrais setups directionnels du moteur.
     Correction du bug V76/V5:
     le moteur ajoutait WICK_REJECTION / NESTED_FVG puis les rejetait
-    immédiatement avec "type non autorisé V77".
+    immédiatement avec "type non autorisé V77.1".
 
     On garde désactivés les setups expérimentaux trop bruyants:
     TBS / AMD / CRT / PIN.
@@ -3825,7 +3848,11 @@ def strict_trend_veto(direction: str, current_price: float, df_h1: pd.DataFrame,
 
 
 def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tuple:
-    """Filtre de proximité en vraie distance prix, pas en valeur brute incohérente."""
+    """
+    V77.1 : filtre de proximité assoupli.
+    Il évite seulement les entrées vraiment trop éloignées.
+    La distance fine est ensuite pénalisée/bonifiée dans calculate_signal_confidence().
+    """
     entry_level = entry.get("entry_level")
     if entry_level is None:
         return False, "entry_level manquant"
@@ -3836,15 +3863,28 @@ def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tupl
     zone_end = float(zone_end)
     is_in_zone = min(zone_start, zone_end) <= current_price <= max(zone_start, zone_end)
 
-    max_pips = STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"])
+    entry_type = str(entry.get("type", "")).upper()
+    type_max_pips = {
+        "FVG_RETEST_PERFECT": 18.0,
+        "FVG_RETEST": 20.0,
+        "NESTED_FVG": 20.0,
+        "WICK_REJECTION": 18.0,
+        "BISI": 20.0,
+        "BREAKER": 18.0,
+    }
+
+    max_pips = max(
+        STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]),
+        type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"])),
+    )
     max_price_distance = strict_price_distance(pair, max_pips)
     distance = abs(current_price - entry_level)
 
     if is_in_zone:
         return True, f"dans zone distance={distance:.5f}"
     if distance <= max_price_distance:
-        return True, f"proche distance={distance:.5f} <= {max_price_distance:.5f} ({max_pips:.1f} pips)"
-    return False, f"trop loin distance={distance:.5f} > {max_price_distance:.5f} ({max_pips:.1f} pips)"
+        return True, f"distance acceptable={distance:.5f} <= {max_price_distance:.5f} ({max_pips:.1f} pips)"
+    return False, f"vraiment trop loin distance={distance:.5f} > {max_price_distance:.5f} ({max_pips:.1f} pips)"
 
 
 def strict_keep_best_per_direction(scored_entries: list) -> list:
@@ -3881,7 +3921,7 @@ def strict_keep_best_per_direction(scored_entries: list) -> list:
 
 
 # ============================================================
-# V77 BALANCED BUY/SELL - PATCH ANTI BIAIS BUY
+# V77.1 BALANCED BUY/SELL - PATCH ANTI BIAIS BUY
 # Objectif : ne plus bloquer mécaniquement les SELL quand H4 est BUY.
 # On garde le mode tendance, mais on ajoute un mode contre-mouvement contrôlé.
 # ============================================================
@@ -3925,12 +3965,12 @@ def strict_direction_permission_v77(direction: str, bias: str, current_price: fl
 
         if direction == "SELL" and bias == "BUY":
             if k_h1 >= 75 and k_m15 <= 70 and is_allowed_counter_type:
-                return True, f"SELL contre H4 BUY autorisé V77: H1 surachat {k_h1:.1f}, M15 refroidit {k_m15:.1f}, type={entry_type}"
+                return True, f"SELL contre H4 BUY autorisé V77.1: H1 surachat {k_h1:.1f}, M15 refroidit {k_m15:.1f}, type={entry_type}"
             return False, f"SELL contre H4 BUY refusé: H1={k_h1:.1f}, M15={k_m15:.1f}, type={entry_type}"
 
         if direction == "BUY" and bias == "SELL":
             if k_h1 <= 25 and k_m15 >= 30 and is_allowed_counter_type:
-                return True, f"BUY contre H4 SELL autorisé V77: H1 survendu {k_h1:.1f}, M15 rebondit {k_m15:.1f}, type={entry_type}"
+                return True, f"BUY contre H4 SELL autorisé V77.1: H1 survendu {k_h1:.1f}, M15 rebondit {k_m15:.1f}, type={entry_type}"
             return False, f"BUY contre H4 SELL refusé: H1={k_h1:.1f}, M15={k_m15:.1f}, type={entry_type}"
 
         return False, f"Direction {direction} non autorisée contre biais {bias}"
@@ -3964,16 +4004,69 @@ def strict_trend_veto_v77(direction: str, current_price: float, df_h1: pd.DataFr
             if current_price > ema200_h1 and bias == "BUY":
                 return True, f"SELL contre tendance toléré seulement si StochRSI extrême"
 
-        return True, "Trend H1 OK V77"
+        return True, "Trend H1 OK V77.1"
     except Exception as exc:
         return False, f"EMA H1 indisponible: {exc}"
 
+
+
+def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
+    """
+    V77.1 : supprime les doublons exacts/near-identiques avant scoring.
+    Exemple vu dans les logs: 5 x FVG_RETEST_PERFECT au même prix AUD_USD.
+    """
+    if not entries:
+        return []
+
+    pip = get_pip_value_for_pair(pair)
+    precision_step = max(pip * 0.5, 1e-9)
+
+    def priority(entry: dict) -> tuple:
+        et = str(entry.get("type", "")).upper()
+        score = 0
+        if et == "FVG_RETEST_PERFECT":
+            score += 5
+        elif et.startswith("FVG_RETEST"):
+            score += 4
+        elif et == "BISI":
+            score += 4
+        elif et == "NESTED_FVG":
+            score += 3
+        elif et == "WICK_REJECTION":
+            score += 2
+        try:
+            lvl = float(entry.get("entry_level", 0))
+        except Exception:
+            lvl = 0.0
+        return (score, -abs(lvl))
+
+    seen = {}
+    for entry in entries:
+        try:
+            direction = str(entry.get("direction", "")).upper()
+            et = str(entry.get("type", "")).upper()
+            lvl = float(entry.get("entry_level"))
+        except Exception:
+            continue
+
+        rounded_bucket = round(lvl / precision_step)
+        key = (direction, et, rounded_bucket)
+
+        if key not in seen or priority(entry) > priority(seen[key]):
+            seen[key] = entry
+
+    deduped = list(seen.values())
+    removed = len(entries) - len(deduped)
+    if removed > 0:
+        logger.info(f"🧹 V77.1 dédup {pair}: {removed} doublons supprimés ({len(entries)} -> {len(deduped)})")
+    return deduped
+
 def advanced_main():
     """
-    V77 BALANCED BUY/SELL.
+    V77.1 BALANCED BUY/SELL.
     - conserve ton moteur de données OANDA et tes fonctions existantes,
     - mais filtre agressivement la narrative,
-    - supprime les entrées WICK/NESTED/TBS/AMD/CRT,
+    - conserve WICK/NESTED/FVG mais supprime TBS/AMD/CRT trop bruyants,
     - score tous les candidats propres,
     - envoie maximum 1 BUY + 1 SELL par paire.
     """
@@ -3987,7 +4080,7 @@ def advanced_main():
     for pair in PAIR_LIST:
         _reset_log_dedup()
         try:
-            logger.info(f"\n🔍 Début de l'analyse V77 BALANCED BUY/SELL de {pair}")
+            logger.info(f"\n🔍 Début de l'analyse V77.1 BALANCED BUY/SELL de {pair}")
 
             df_h4 = get_candles_with_retry(api, pair, GRANULARITY_H4, 300)
             df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
@@ -4009,8 +4102,10 @@ def advanced_main():
                 df_m15, bias_analysis, pair, df_h4=df_h4, df_d1=df_d1, df_h1=df_h1
             )
 
-            raw_entries = narrative.get("potential_entries", [])
-            logger.info(f"🧹 V77: entrées brutes narrative: {len(raw_entries)}")
+            raw_entries_raw = narrative.get("potential_entries", [])
+            logger.info(f"🧹 V77.1: entrées brutes narrative: {len(raw_entries_raw)}")
+            raw_entries = dedupe_raw_entries_v771(raw_entries_raw, pair)
+            logger.info(f"🧹 V77.1: entrées après dédup: {len(raw_entries)}")
 
             breaker = detect_breaker(df_m15)
             scored_entries = []
@@ -4026,7 +4121,7 @@ def advanced_main():
                     continue
 
                 if not strict_entry_type_allowed(entry_type):
-                    logger.info(f"⛔ {pair} rejet {direction} {entry_type}: type non autorisé V77")
+                    logger.info(f"⛔ {pair} rejet {direction} {entry_type}: type non autorisé V77.1")
                     rejected += 1
                     continue
 
@@ -4077,7 +4172,7 @@ def advanced_main():
 
             finalists = strict_keep_best_per_direction(scored_entries)
             logger.info(
-                f"🧹 V77: candidats scorés={len(scored_entries)}, finalistes={len(finalists)}, rejetés={rejected}"
+                f"🧹 V77.1: candidats scorés={len(scored_entries)}, finalistes={len(finalists)}, rejetés={rejected}"
             )
 
             nb_envoyes = 0
@@ -4118,7 +4213,7 @@ def advanced_main():
                 enriched_bias["win_rate"] = win_rate
                 enriched_bias["quality_label"] = quality
                 enriched_bias["score_details"] = confidence_result.get("details", {})
-                enriched_bias["v77_filter"] = "V77: max 1 BUY + 1 SELL, WICK/NESTED autorisés, contre-signaux seulement sur StochRSI extrême"
+                enriched_bias["v77_filter"] = "V77.1: max 1 BUY + 1 SELL, WICK/NESTED autorisés, contre-signaux seulement sur StochRSI extrême"
 
                 rsi_value = get_last_rsi(df_m15["close"])
 
@@ -4162,15 +4257,15 @@ def advanced_main():
             logger.error(traceback.format_exc())
             continue
 
-    logger.info("🏁 Analyse V77 BALANCED BUY/SELL terminée pour toutes les paires")
+    logger.info("🏁 Analyse V77.1 BALANCED BUY/SELL terminée pour toutes les paires")
 
 
 
 # =========================================================
-# V77 - OANDA EXECUTION + TRADE MANAGER
+# V77.1 - OANDA EXECUTION + TRADE MANAGER
 # Base V76 prod conservée.
-# Correction V77: WICK_REJECTION + NESTED_FVG autorisés dans le filtre strict.
-# Base: moteur V63/V77 BALANCED BUY/SELL conservé
+# Correction V77.1: WICK_REJECTION + NESTED_FVG autorisés dans le filtre strict.
+# Base: moteur V63/V77.1 BALANCED BUY/SELL conservé
 # Ajouts: exécution réelle OANDA, sizing risque, 1 trade/pair,
 # MAX 3 trades, break-even +1R, trailing swing M5 à +1.5R,
 # respect week-end Forex.
@@ -4499,7 +4594,7 @@ def manage_open_trades_v76():
 # LANCEMENT
 # =============================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V77 PROD")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V77.1 PROD")
     
     api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
     
