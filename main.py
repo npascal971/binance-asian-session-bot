@@ -198,9 +198,9 @@ MAX_PIPS_ACCEPTED = {
 
 # Configuration du scoring
 # === CONFIGURATION DU SCORING (MISE À JOUR) ===
-# V77.2: le filtre EMA50 H1 n'est plus un veto absolu, il devient un malus de score.
+# V77.3: le filtre EMA50 H1 n'est plus un veto absolu, il devient un malus de score.
 SCORING_CONFIG = {
-    "MIN_CONFIDENCE_SCORE": 10,  # V77.2 équilibré : setups B+/A acceptés si risque OK
+    "MIN_CONFIDENCE_SCORE": 10,  # V77.3 équilibré : setups B+/A acceptés si risque OK
     "SIGNAL_WEIGHTS": {
         "BISI": 5,              # Combo fort BOS + FVG
         "NESTED_FVG": 4,
@@ -3259,7 +3259,7 @@ def calculate_signal_confidence(
         score += 1
         details["Trend_H4"] = "+1 (Neutre)"
 
-    # === V77.2 : distance = malus progressif, plus veto brutal ===
+    # === V77.3 : distance = malus progressif, plus veto brutal ===
     try:
         distance = abs(float(current_price) - entry_level)
         pip = get_pip_value_for_pair(pair)
@@ -3734,7 +3734,7 @@ def advanced_main():
 
 
 # ============================================================
-# V77.2 BALANCED BUY/SELL - PATCH PRODUCTION
+# V77.3 BALANCED BUY/SELL - PATCH PRODUCTION
 # Objectif : maximum 1 BUY + 1 SELL par paire.
 # Correction V77 :
 # - WICK_REJECTION et NESTED_FVG ne sont plus créés puis rejetés.
@@ -3753,7 +3753,7 @@ STRICT_ALLOWED_ENTRY_TYPES = {
 }
 
 STRICT_MAX_DISTANCE_PIPS = {
-    # V77.2 : distances élargies pour laisser vivre les retests M15/H1.
+    # V77.3 : distances élargies pour laisser vivre les retests M15/H1.
     # Le scoring garde ensuite un malus si le prix est loin.
     "XAU_USD": 35.0,
     "USD_JPY": 18.0,
@@ -3779,7 +3779,7 @@ def strict_entry_type_allowed(entry_type: str) -> bool:
     V77 : autorise les vrais setups directionnels du moteur.
     Correction du bug V76/V5:
     le moteur ajoutait WICK_REJECTION / NESTED_FVG puis les rejetait
-    immédiatement avec "type non autorisé V77.2".
+    immédiatement avec "type non autorisé V77.3".
 
     On garde désactivés les setups expérimentaux trop bruyants:
     TBS / AMD / CRT / PIN.
@@ -3850,7 +3850,7 @@ def strict_trend_veto(direction: str, current_price: float, df_h1: pd.DataFrame,
 
 def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tuple:
     """
-    V77.2 : filtre de proximité assoupli.
+    V77.3 : filtre de proximité assoupli.
     Il évite seulement les entrées vraiment trop éloignées.
     La distance fine est ensuite pénalisée/bonifiée dans calculate_signal_confidence().
     """
@@ -3922,7 +3922,7 @@ def strict_keep_best_per_direction(scored_entries: list) -> list:
 
 
 # ============================================================
-# V77.2 BALANCED BUY/SELL - PATCH ANTI BIAIS BUY
+# V77.3 BALANCED BUY/SELL - PATCH ANTI BIAIS BUY
 # Objectif : ne plus bloquer mécaniquement les SELL quand H4 est BUY.
 # On garde le mode tendance, mais on ajoute un mode contre-mouvement contrôlé.
 # ============================================================
@@ -3966,12 +3966,12 @@ def strict_direction_permission_v77(direction: str, bias: str, current_price: fl
 
         if direction == "SELL" and bias == "BUY":
             if k_h1 >= 75 and k_m15 <= 70 and is_allowed_counter_type:
-                return True, f"SELL contre H4 BUY autorisé V77.2: H1 surachat {k_h1:.1f}, M15 refroidit {k_m15:.1f}, type={entry_type}"
+                return True, f"SELL contre H4 BUY autorisé V77.3: H1 surachat {k_h1:.1f}, M15 refroidit {k_m15:.1f}, type={entry_type}"
             return False, f"SELL contre H4 BUY refusé: H1={k_h1:.1f}, M15={k_m15:.1f}, type={entry_type}"
 
         if direction == "BUY" and bias == "SELL":
             if k_h1 <= 25 and k_m15 >= 30 and is_allowed_counter_type:
-                return True, f"BUY contre H4 SELL autorisé V77.2: H1 survendu {k_h1:.1f}, M15 rebondit {k_m15:.1f}, type={entry_type}"
+                return True, f"BUY contre H4 SELL autorisé V77.3: H1 survendu {k_h1:.1f}, M15 rebondit {k_m15:.1f}, type={entry_type}"
             return False, f"BUY contre H4 SELL refusé: H1={k_h1:.1f}, M15={k_m15:.1f}, type={entry_type}"
 
         return False, f"Direction {direction} non autorisée contre biais {bias}"
@@ -4005,7 +4005,7 @@ def strict_trend_veto_v77(direction: str, current_price: float, df_h1: pd.DataFr
             if current_price > ema200_h1 and bias == "BUY":
                 return True, f"SELL contre tendance toléré seulement si StochRSI extrême"
 
-        return True, "Trend H1 OK V77.2"
+        return True, "Trend H1 OK V77.3"
     except Exception as exc:
         return False, f"EMA H1 indisponible: {exc}"
 
@@ -4013,7 +4013,7 @@ def strict_trend_veto_v77(direction: str, current_price: float, df_h1: pd.DataFr
 
 def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     """
-    V77.2 : supprime les doublons exacts/near-identiques avant scoring.
+    V77.3 : supprime les doublons exacts/near-identiques avant scoring.
     Exemple vu dans les logs: 5 x FVG_RETEST_PERFECT au même prix AUD_USD.
     """
     if not entries:
@@ -4059,12 +4059,12 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     deduped = list(seen.values())
     removed = len(entries) - len(deduped)
     if removed > 0:
-        logger.info(f"🧹 V77.2 dédup {pair}: {removed} doublons supprimés ({len(entries)} -> {len(deduped)})")
+        logger.info(f"🧹 V77.3 dédup {pair}: {removed} doublons supprimés ({len(entries)} -> {len(deduped)})")
     return deduped
 
 def advanced_main():
     """
-    V77.2 BALANCED BUY/SELL.
+    V77.3 BALANCED BUY/SELL.
     - conserve ton moteur de données OANDA et tes fonctions existantes,
     - mais filtre agressivement la narrative,
     - conserve WICK/NESTED/FVG mais supprime TBS/AMD/CRT trop bruyants,
@@ -4081,7 +4081,7 @@ def advanced_main():
     for pair in PAIR_LIST:
         _reset_log_dedup()
         try:
-            logger.info(f"\n🔍 Début de l'analyse V77.2 BALANCED BUY/SELL de {pair}")
+            logger.info(f"\n🔍 Début de l'analyse V77.3 BALANCED BUY/SELL de {pair}")
 
             df_h4 = get_candles_with_retry(api, pair, GRANULARITY_H4, 300)
             df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
@@ -4104,9 +4104,9 @@ def advanced_main():
             )
 
             raw_entries_raw = narrative.get("potential_entries", [])
-            logger.info(f"🧹 V77.2: entrées brutes narrative: {len(raw_entries_raw)}")
+            logger.info(f"🧹 V77.3: entrées brutes narrative: {len(raw_entries_raw)}")
             raw_entries = dedupe_raw_entries_v771(raw_entries_raw, pair)
-            logger.info(f"🧹 V77.2: entrées après dédup: {len(raw_entries)}")
+            logger.info(f"🧹 V77.3: entrées après dédup: {len(raw_entries)}")
 
             breaker = detect_breaker(df_m15)
             scored_entries = []
@@ -4122,7 +4122,7 @@ def advanced_main():
                     continue
 
                 if not strict_entry_type_allowed(entry_type):
-                    logger.info(f"⛔ {pair} rejet {direction} {entry_type}: type non autorisé V77.2")
+                    logger.info(f"⛔ {pair} rejet {direction} {entry_type}: type non autorisé V77.3")
                     rejected += 1
                     continue
 
@@ -4173,7 +4173,7 @@ def advanced_main():
 
             finalists = strict_keep_best_per_direction(scored_entries)
             logger.info(
-                f"🧹 V77.2: candidats scorés={len(scored_entries)}, finalistes={len(finalists)}, rejetés={rejected}"
+                f"🧹 V77.3: candidats scorés={len(scored_entries)}, finalistes={len(finalists)}, rejetés={rejected}"
             )
 
             nb_envoyes = 0
@@ -4214,7 +4214,7 @@ def advanced_main():
                 enriched_bias["win_rate"] = win_rate
                 enriched_bias["quality_label"] = quality
                 enriched_bias["score_details"] = confidence_result.get("details", {})
-                enriched_bias["v77_filter"] = "V77.2: max 1 BUY + 1 SELL, WICK/NESTED autorisés, contre-signaux seulement sur StochRSI extrême"
+                enriched_bias["v77_filter"] = "V77.3: max 1 BUY + 1 SELL, WICK/NESTED autorisés, contre-signaux seulement sur StochRSI extrême"
 
                 rsi_value = get_last_rsi(df_m15["close"])
 
@@ -4246,7 +4246,7 @@ def advanced_main():
                     mark_signal_sent(pair, direction, entry_level_key, zone_start, zone_end)
                     nb_envoyes += 1
                 else:
-                    logger.info(f"{pair}: V76 ordre non exécuté, zone NON enregistrée.")
+                    logger.info(f"{pair}: V77.3 ordre non exécuté, zone NON enregistrée.")
 
             logger.info(
                 f"🏁 Scan {pair} terminé. Signaux envoyés: {nb_envoyes}. "
@@ -4258,15 +4258,15 @@ def advanced_main():
             logger.error(traceback.format_exc())
             continue
 
-    logger.info("🏁 Analyse V77.2 BALANCED BUY/SELL terminée pour toutes les paires")
+    logger.info("🏁 Analyse V77.3 BALANCED BUY/SELL terminée pour toutes les paires")
 
 
 
 # =========================================================
-# V77.2 - OANDA EXECUTION + TRADE MANAGER
+# V77.3 - OANDA EXECUTION + TRADE MANAGER
 # Base V76 prod conservée.
-# Correction V77.2: WICK_REJECTION + NESTED_FVG autorisés dans le filtre strict.
-# Base: moteur V63/V77.2 BALANCED BUY/SELL conservé
+# Correction V77.3: WICK_REJECTION + NESTED_FVG autorisés dans le filtre strict.
+# Base: moteur V63/V77.3 BALANCED BUY/SELL conservé
 # Ajouts: exécution réelle OANDA, sizing risque, 1 trade/pair,
 # MAX 3 trades, break-even +1R, trailing swing M5 à +1.5R,
 # respect week-end Forex.
@@ -4326,7 +4326,7 @@ def oanda_safe_request_v76(endpoint, label: str = ""):
         api = v76_client()
         return api.request(endpoint)
     except Exception as e:
-        logger.error(f"❌ V76 OANDA exception {label}: {e}")
+        logger.error(f"❌ V77.3 OANDA exception {label}: {e}")
         logger.error(traceback.format_exc())
         return None
 
@@ -4343,9 +4343,43 @@ def get_balance_v76() -> float:
 
 
 def get_open_trades_v76() -> list:
+    """
+    V77.3: lit uniquement les trades réellement ouverts côté OANDA.
+    Correction: éviter qu'un cache ou une réponse ambiguë bloque un nouvel ordre.
+    On ne garde que les trades avec currentUnits non nul.
+    """
     r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
     resp = oanda_safe_request_v76(r, "OpenTrades")
-    return resp.get("trades", []) if resp else []
+
+    if not resp:
+        logger.warning("V77.3 OpenTrades: réponse vide ou erreur API, aucun blocage anti-doublon appliqué.")
+        return []
+
+    raw_trades = resp.get("trades", []) or []
+    live_trades = []
+
+    for t in raw_trades:
+        instrument = t.get("instrument")
+        raw_units = t.get("currentUnits", t.get("units", "0"))
+
+        try:
+            units = float(raw_units)
+        except Exception:
+            units = 0.0
+
+        if instrument and abs(units) > 0:
+            live_trades.append(t)
+
+    if live_trades:
+        details = [
+            f"{t.get('instrument')} units={t.get('currentUnits', t.get('units'))} id={t.get('id')}"
+            for t in live_trades
+        ]
+        logger.info(f"V77.3 OpenTrades OANDA actifs: {len(live_trades)} | " + " ; ".join(details))
+    else:
+        logger.info("V77.3 OpenTrades OANDA: aucun trade actif confirmé.")
+
+    return live_trades
 
 
 def open_trade_count_v76() -> int:
@@ -4353,9 +4387,24 @@ def open_trade_count_v76() -> int:
 
 
 def has_open_trade_v76(pair: str) -> bool:
+    """
+    V77.3: bloque seulement si OANDA confirme un trade actif sur la même paire.
+    Ne se base pas sur un cache interne.
+    """
     for t in get_open_trades_v76():
-        if t.get("instrument") == pair and t.get("state") == "OPEN":
+        instrument = t.get("instrument")
+        raw_units = t.get("currentUnits", t.get("units", "0"))
+
+        try:
+            units = float(raw_units)
+        except Exception:
+            units = 0.0
+
+        if instrument == pair and abs(units) > 0:
+            logger.info(f"{pair}: trade actif confirmé côté OANDA id={t.get('id')} units={raw_units}.")
             return True
+
+    logger.info(f"{pair}: aucun trade actif confirmé côté OANDA, ordre autorisé si autres conditions OK.")
     return False
 
 
@@ -4383,7 +4432,7 @@ def get_fx_rate_to_usd_v76(currency: str) -> float:
                 return 1.0 / float(df["close"].iloc[-1])
     except Exception:
         pass
-    logger.warning(f"⚠️ V76 conversion {currency}->USD inconnue, fallback 1.0")
+    logger.warning(f"⚠️ V77.3 conversion {currency}->USD inconnue, fallback 1.0")
     return 1.0
 
 
@@ -4403,13 +4452,13 @@ def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: floa
 
     if pair == "XAU_USD":
         units = round(max(units_float, MIN_UNITS_V76["XAU_USD"]), 1)
-        logger.info(f"V76 RISK LOT {pair}: risk=${risk_usd:.2f} dist={distance_quote:.5f} units={units}")
+        logger.info(f"V77.3 RISK LOT {pair}: risk=${risk_usd:.2f} dist={distance_quote:.5f} units={units}")
         return units
 
     min_units = MIN_UNITS_V76["DEFAULT"]
     units = int(max(round(units_float / min_units) * min_units, min_units))
     logger.info(
-        f"V76 RISK LOT {pair}: risk=${risk_usd:.2f} dist_quote={distance_quote:.5f} "
+        f"V77.3 RISK LOT {pair}: risk=${risk_usd:.2f} dist_quote={distance_quote:.5f} "
         f"quote_to_usd={quote_to_usd:.6f} units={units}"
     )
     return units
@@ -4425,10 +4474,10 @@ def get_recent_m5_price_v76(pair: str) -> float:
 
 def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_loss: float,
                             take_profit: float, score: int, entry_type: str) -> str | None:
-    logger.info(f"V76 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"V77.3 EXECUTION START {pair} {direction} type={entry_type} score={score}")
 
     if ONE_TRADE_PER_PAIR and has_open_trade_v76(pair):
-        logger.info(f"{pair}: trade déjà ouvert, aucun nouvel ordre.")
+        logger.info(f"{pair}: trade déjà ouvert confirmé OANDA, aucun nouvel ordre.")
         return None
 
     count = open_trade_count_v76()
@@ -4438,12 +4487,12 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
 
     balance = get_balance_v76()
     if balance <= 0:
-        logger.error("V76: balance invalide, ordre annulé.")
+        logger.error("V77.3: balance invalide, ordre annulé.")
         return None
 
     units = calculate_units_v76(pair, entry_price, stop_loss, balance)
     if not units or float(units) <= 0:
-        logger.error(f"V76: units invalides pour {pair}: {units}")
+        logger.error(f"V77.3: units invalides pour {pair}: {units}")
         return None
 
     signed_units = units if direction == "BUY" else -units
@@ -4543,7 +4592,7 @@ def modify_trade_sl_v76(trade_id: str, pair: str, new_sl: float) -> bool:
 def manage_open_trades_v76():
     open_trades = get_open_trades_v76()
     if not open_trades:
-        logger.info("V76 TRADE MANAGER: aucun trade ouvert.")
+        logger.info("V77.3 TRADE MANAGER: aucun trade ouvert.")
         return
 
     for t in open_trades:
@@ -4560,7 +4609,7 @@ def manage_open_trades_v76():
             if current_r is None:
                 continue
 
-            logger.info(f"V76 TRADE MANAGER {pair} id={trade_id} dir={direction} R={current_r:.2f} SL={current_sl}")
+            logger.info(f"V77.3 TRADE MANAGER {pair} id={trade_id} dir={direction} R={current_r:.2f} SL={current_sl}")
             pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
 
             # Break-even à +1R
@@ -4595,7 +4644,7 @@ def manage_open_trades_v76():
 # LANCEMENT
 # =============================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V77.2 PROD")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V77.3 PROD")
     
     api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
     
