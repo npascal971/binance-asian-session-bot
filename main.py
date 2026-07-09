@@ -4382,7 +4382,7 @@ EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
 
 RISK_PERCENTAGE = float(os.getenv("RISK_PERCENTAGE", "1.0"))
 MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "1250"))
-MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "3"))
+MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "9"))
 ONE_TRADE_PER_PAIR = os.getenv("ONE_TRADE_PER_PAIR", "true").lower() == "true"
 
 BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "1.0"))
