@@ -107,7 +107,7 @@ last_reset_time = datetime.utcnow()
 load_dotenv()
 
 # Liste des paires incluant XAU_USD (Or)
-PAIR_LIST = ["XAU_USD", "EUR_USD", "GBP_USD", "USD_JPY", "USD_CAD", "AUD_USD", "AUD_CAD", "AUD_JPY", "GBP_JPY"]
+PAIR_LIST = ["EUR_USD", "GBP_USD", "USD_CAD", "AUD_USD", "AUD_CAD"]
 
 GRANULARITY_D1 = "D"  # Pour analyse de bias
 GRANULARITY_H4 = "H4"  # Pour narrative et orderflow principal
