@@ -369,25 +369,9 @@ def detect_breaker(df: pd.DataFrame, lookback: int = 10) -> dict:
 
 def validate_trend_alignment(direction, df_h1, df_h4):
     """
-    Vérifie l'alignement H1/H4. 
-    Si H4 est BUY mais H1 est en forte baisse (sous EMA 50), on annule le BUY.
+    Compatibilité historique: l'EMA50 H1 n'est plus un veto.
+    L'information de tendance est maintenant scorée par score_ema_trend().
     """
-    # Calcul des EMA H1
-    ema50_h1 = df_h1['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-    current_price = df_h1['close'].iloc[-1]
-
-    # RÈGLE : Si on veut ACHETER (BUY)
-    if direction == "BUY":
-        # INTERDIT si le prix est SOUS la EMA 50 H1 (momentum baissier court terme)
-        if current_price < ema50_h1:
-            return False 
-            
-    # RÈGLE : Si on veut VENDRE (SELL)
-    elif direction == "SELL":
-        # INTERDIT si le prix est AU-DESSUS de la EMA 50 H1 (momentum haussier court terme)
-        if current_price > ema50_h1:
-            return False
-            
     return True
 
 def detect_dealing_range(df: pd.DataFrame, lookback: int = 50) -> dict:
@@ -1567,6 +1551,101 @@ def validate_volume_confirmation(df: pd.DataFrame, fvg: dict) -> bool:
 def ema(series: pd.Series, period: int) -> pd.Series:
    
     return series.ewm(span=period, adjust=False).mean()
+
+def _directional_score(raw_score: int, direction: str) -> int:
+    """Convertit un score de biais (+ haussier / - baissier) en score pour BUY/SELL."""
+    return int(raw_score) if (direction or "").upper() == "BUY" else -int(raw_score)
+
+def score_ema_trend(df_h1: pd.DataFrame) -> int:
+    """
+    Score EMA50 H1 non bloquant, borné à [-3, +3].
+    Positif = contexte haussier, négatif = contexte baissier.
+    """
+    if df_h1 is None or df_h1.empty or "close" not in df_h1 or len(df_h1) < 2:
+        return 0
+
+    ema50 = df_h1["close"].ewm(span=EMA_MEDIUM, adjust=False).mean()
+    if len(ema50.dropna()) < 2:
+        return 0
+
+    price = float(df_h1["close"].iloc[-1])
+    score = 2 if price > float(ema50.iloc[-1]) else -1
+    score += 1 if float(ema50.iloc[-1]) > float(ema50.iloc[-2]) else -2
+    return max(-3, min(3, int(score)))
+
+def score_market_structure(df_h1: pd.DataFrame) -> int:
+    """
+    Score structurel H1, borné à [-3, +3].
+    HH+HL => +3, HH seul => +1, LH+LL => -3, LL seul => -1, sinon 0.
+    """
+    if df_h1 is None or df_h1.empty or len(df_h1) < 10:
+        return 0
+
+    try:
+        swing_highs, swing_lows = detect_swing_points_advanced(df_h1, min(SWING_LOOKBACK, max(1, len(df_h1) // 10)))
+        recent_highs = sorted(swing_highs, key=lambda x: x["index"])[-2:]
+        recent_lows = sorted(swing_lows, key=lambda x: x["index"])[-2:]
+    except Exception:
+        recent_highs, recent_lows = [], []
+
+    if len(recent_highs) < 2:
+        highs = df_h1["high"].tail(20)
+        split = max(2, len(highs) // 2)
+        recent_highs = [{"price": highs.iloc[:split].max()}, {"price": highs.iloc[split:].max()}]
+    if len(recent_lows) < 2:
+        lows = df_h1["low"].tail(20)
+        split = max(2, len(lows) // 2)
+        recent_lows = [{"price": lows.iloc[:split].min()}, {"price": lows.iloc[split:].min()}]
+
+    higher_high = float(recent_highs[-1]["price"]) > float(recent_highs[-2]["price"])
+    lower_high = float(recent_highs[-1]["price"]) < float(recent_highs[-2]["price"])
+    higher_low = float(recent_lows[-1]["price"]) > float(recent_lows[-2]["price"])
+    lower_low = float(recent_lows[-1]["price"]) < float(recent_lows[-2]["price"])
+
+    if higher_high and higher_low:
+        return 3
+    if higher_high:
+        return 1
+    if lower_high and lower_low:
+        return -3
+    if lower_low:
+        return -1
+    return 0
+
+def score_higher_timeframe_alignment(direction: str, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> int:
+    """Bonus/malus si les structures H1 et H4 sont alignées/opposées dans le sens du trade."""
+    h1 = _directional_score(score_market_structure(df_h1), direction)
+    h4 = _directional_score(score_market_structure(df_h4), direction)
+    if h1 > 0 and h4 > 0:
+        return 2
+    if h1 < 0 and h4 < 0:
+        return -2
+    return 0
+
+def compute_final_score(score_components: dict) -> int:
+    """Addition centralisée des composantes du score final."""
+    return int(sum(int(v or 0) for v in score_components.values()))
+
+def log_score_detail(score_components: dict, total: int, decision: str) -> None:
+    """Log détaillé demandé pour chaque signal scoré."""
+    labels = [
+        ("ICT", "ICT"),
+        ("EMA", "EMA"),
+        ("Structure_H1", "Structure H1"),
+        ("Liquidity", "Liquidity"),
+        ("Order_Block", "Order Block"),
+        ("Imbalance", "Imbalance"),
+        ("Stochastic", "Stochastic"),
+        ("HTF_Alignment", "HTF Alignment"),
+        ("Risk_RR_Distance", "Risk/RR/Distance"),
+        ("Secondary", "Secondary"),
+    ]
+    logger.info("===== SCORE DETAIL =====")
+    for key, label in labels:
+        if key in score_components:
+            logger.info(f"{label:<19}: {int(score_components[key]):+d}")
+    logger.info(f"TOTAL = {int(total):+d}")
+    logger.info(f"Decision = {decision}")
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
     """Calcule le RSI complet sur la série de prix."""
@@ -2868,18 +2947,7 @@ def determine_advanced_narrative(
             if fvg_direction not in {"BUY", "SELL"}:
                 continue
 
-            # === 2. APPLICATION DU FILTRE TENDANCE H1 ===
-            # Si EMA H1 calculée, on l'utilise pour filtrer les contresens violents
-            if ema50_h1 is not None:
-                if fvg_direction == "BUY" and current_price < float(fvg.get("low_level", 0)):
-                    # On veut acheter mais le prix est SOUS l'EMA 50 H1 -> DANGER
-                    _log_fvg_added_once(pair, "BUY", entry_level, "REJECTED_H1", f"⛔ Ignoré: Signal BUY mais Prix < EMA50 H1 (Tendance baissière forte)")
-                    continue
-                if fvg_direction == "SELL" and current_price > float(fvg.get("high_level", 999999)):
-                    # On veut vendre mais le prix est AU-DESSUS de l'EMA 50 H1 -> DANGER
-                    _log_fvg_added_once(pair, "SELL", entry_level, "REJECTED_H1", f"⛔ Ignoré: Signal SELL mais Prix > EMA50 H1 (Tendance haussière forte)")
-                    continue
-            # ============================================
+            # EMA50 H1 n'est plus un filtre bloquant: elle est prise en compte au scoring final.
 
             if not is_fvg_retest_valid(df_m15, fvg, current_price, pair):
                 _note_invalid_retest(fvg.get('direction'), entry_level)
@@ -2960,13 +3028,7 @@ def determine_advanced_narrative(
             if nfvg_direction not in {"BUY", "SELL"}:
                 continue
 
-            # === FILTRE H1 AUSSI POUR NESTED ===
-            if ema50_h1 is not None:
-                if nfvg_direction == "BUY" and current_price < ema50_h1:
-                     continue
-                if nfvg_direction == "SELL" and current_price > ema50_h1:
-                     continue
-            # ===================================
+            # EMA50 H1 n'est plus un filtre bloquant pour les Nested FVG.
 
             fake_fvg = {
                 "direction": nfvg["direction"],
@@ -3353,6 +3415,18 @@ def calculate_signal_confidence(
     Cette version privilégie :
     tendance H4/H1 + pullback propre + momentum pas étendu + rejet M15.
     """
+    score_components = {
+        "ICT": 0,
+        "EMA": 0,
+        "Structure_H1": 0,
+        "Liquidity": 0,
+        "Order_Block": 0,
+        "Imbalance": 0,
+        "Stochastic": 0,
+        "HTF_Alignment": 0,
+        "Risk_RR_Distance": 0,
+        "Secondary": 0,
+    }
     score = 0
     details: dict = {}
     min_required = SCORING_CONFIG.get("MIN_CONFIDENCE_SCORE", 10)
@@ -3378,18 +3452,15 @@ def calculate_signal_confidence(
         fvg_data=fvg_data,
     )
 
-    # === VETO 1 : H4 opposé ===
-    if direction == "BUY" and bias == "SELL":
-        return {"passed": False, "total_score": -100, "final_confidence": "LOW", "details": {"VETO": "BUY contre bias H4 SELL"}, "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value}
-    if direction == "SELL" and bias == "BUY":
-        return {"passed": False, "total_score": -100, "final_confidence": "LOW", "details": {"VETO": "SELL contre bias H4 BUY"}, "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value}
-
     if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
-        score += 3
+        score_components["ICT"] += 3
         details["Trend_H4"] = "+3 (Aligné)"
     elif bias == "NEUTRAL":
-        score += 1
+        score_components["ICT"] += 1
         details["Trend_H4"] = "+1 (Neutre)"
+    else:
+        score_components["ICT"] -= 2
+        details["Trend_H4"] = "-2 (H4 opposé, non bloquant)"
 
     # === V78 : distance = malus progressif, plus veto brutal ===
     try:
@@ -3407,12 +3478,12 @@ def calculate_signal_confidence(
         max_distance_price = max(float(atr_value) * 1.20, pip * max_pips)
 
         if distance <= max_distance_price * 0.50:
-            score += 2
+            score_components["Risk_RR_Distance"] += 2
             details["Distance"] = f"+2 proche ({distance:.5f} <= {max_distance_price * 0.50:.5f})"
         elif distance <= max_distance_price:
             details["Distance"] = f"0 acceptable ({distance:.5f} <= {max_distance_price:.5f})"
         elif distance <= max_distance_price * 1.50:
-            score -= 2
+            score_components["Risk_RR_Distance"] -= 2
             details["Distance"] = f"-2 un peu loin ({distance:.5f} > {max_distance_price:.5f})"
         else:
             # Seul cas où on bloque encore: entrée vraiment trop éloignée.
@@ -3428,30 +3499,17 @@ def calculate_signal_confidence(
     except Exception as exc:
         details["Distance_Error"] = str(exc)
 
-    # === VETO 3 : tendance H1 stricte EMA50/EMA200 ===
+    # === Tendance H1 EMA50 scorée (non bloquante) ===
     try:
-        ema50_h1 = df_h1["close"].ewm(span=50, adjust=False).mean().iloc[-1]
-        ema200_h1 = df_h1["close"].ewm(span=200, adjust=False).mean().iloc[-1] if len(df_h1) >= 200 else None
-        h1_close = float(df_h1["close"].iloc[-1])
-
-        if direction == "BUY" and h1_close < ema50_h1:
-            return {"passed": False, "total_score": -100, "final_confidence": "LOW", "details": {"VETO": "BUY sous EMA50 H1"}, "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value}
-        if direction == "SELL" and h1_close > ema50_h1:
-            return {"passed": False, "total_score": -100, "final_confidence": "LOW", "details": {"VETO": "SELL au-dessus EMA50 H1"}, "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value}
-
-        score += 2
-        details["Trend_H1_EMA50"] = "+2 (Aligné EMA50)"
-
-        if ema200_h1 is not None:
-            if direction == "BUY" and ema50_h1 > ema200_h1:
-                score += 1
-                details["Trend_H1_EMA200"] = "+1 (EMA50 > EMA200)"
-            elif direction == "SELL" and ema50_h1 < ema200_h1:
-                score += 1
-                details["Trend_H1_EMA200"] = "+1 (EMA50 < EMA200)"
-            else:
-                score -= 2
-                details["Trend_H1_EMA200"] = "-2 (EMA50/EMA200 non alignées)"
+        ema_score = max(-2, min(2, _directional_score(score_ema_trend(df_h1), direction)))
+        structure_score = _directional_score(score_market_structure(df_h1), direction)
+        htf_score = score_higher_timeframe_alignment(direction, df_h1, df_h4)
+        score_components["EMA"] += ema_score
+        score_components["Structure_H1"] += structure_score
+        score_components["HTF_Alignment"] += htf_score
+        details["EMA"] = f"{ema_score:+d} (EMA50 H1 scorée, non bloquante)"
+        details["Structure_H1"] = f"{structure_score:+d} (HH/HL/LH/LL)"
+        details["HTF_Alignment"] = f"{htf_score:+d} (alignement H1/H4)"
     except Exception as exc:
         details["Trend_H1_Error"] = str(exc)
 
@@ -3464,11 +3522,11 @@ def calculate_signal_confidence(
             if stoch_k_h1 >= 80 or stoch_k_m15 >= 85:
                 return {"passed": False, "total_score": -100, "final_confidence": "LOW", "details": {"VETO": f"BUY trop tardif StochRSI H1={stoch_k_h1:.1f} M15={stoch_k_m15:.1f}"}, "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value}
             if 20 <= stoch_k_m15 <= 60:
-                score += 3
-                details["StochRSI"] = f"+3 (zone idéale BUY M15={stoch_k_m15:.1f})"
+                score_components["Stochastic"] += 1
+                details["StochRSI"] = f"+1 (zone idéale BUY M15={stoch_k_m15:.1f})"
             elif stoch_k_m15 < 20:
-                score += 2
-                details["StochRSI"] = f"+2 (survente BUY M15={stoch_k_m15:.1f})"
+                score_components["Stochastic"] += 1
+                details["StochRSI"] = f"+1 (survente BUY M15={stoch_k_m15:.1f})"
             else:
                 details["StochRSI"] = f"0 (neutre BUY M15={stoch_k_m15:.1f})"
 
@@ -3476,32 +3534,38 @@ def calculate_signal_confidence(
             if stoch_k_h1 <= 20 or stoch_k_m15 <= 15:
                 return {"passed": False, "total_score": -100, "final_confidence": "LOW", "details": {"VETO": f"SELL trop tardif StochRSI H1={stoch_k_h1:.1f} M15={stoch_k_m15:.1f}"}, "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value}
             if 40 <= stoch_k_m15 <= 80:
-                score += 3
-                details["StochRSI"] = f"+3 (zone idéale SELL M15={stoch_k_m15:.1f})"
+                score_components["Stochastic"] += 1
+                details["StochRSI"] = f"+1 (zone idéale SELL M15={stoch_k_m15:.1f})"
             elif stoch_k_m15 > 80:
-                score += 2
-                details["StochRSI"] = f"+2 (surachat SELL M15={stoch_k_m15:.1f})"
+                score_components["Stochastic"] += 1
+                details["StochRSI"] = f"+1 (surachat SELL M15={stoch_k_m15:.1f})"
             else:
                 details["StochRSI"] = f"0 (neutre SELL M15={stoch_k_m15:.1f})"
     except Exception as exc:
         details["StochRSI_Error"] = str(exc)
 
     # === Setup / zone d'entrée ===
-    if any(x in entry_type for x in ["FVG", "BISI", "NESTED"]):
-        score += 4
-        details["Setup_Type"] = "+4 (Imbalance/FVG)"
+    if "LIQUIDITY" in entry_type:
+        score_components["Liquidity"] += 3
+        score_components["ICT"] += 1
+        details["Setup_Type"] = "+1 ICT, +3 Liquidity"
+    elif any(x in entry_type for x in ["FVG", "BISI", "NESTED"]):
+        score_components["ICT"] += 4 if "BISI" in entry_type else 3
+        score_components["Imbalance"] += 2
+        details["Setup_Type"] = f"+{4 if 'BISI' in entry_type else 3} ICT, +2 Imbalance/FVG"
     elif "BREAKER" in entry_type:
-        score += 4
-        details["Setup_Type"] = "+4 (Breaker)"
+        score_components["ICT"] += 2
+        score_components["Order_Block"] += 2
+        details["Setup_Type"] = "+2 ICT, +2 Order Block (Breaker)"
     elif "WICK" in entry_type:
-        score += 2
+        score_components["ICT"] += 2
         details["Setup_Type"] = "+2 (Wick rejection)"
     else:
-        score += 1
+        score_components["ICT"] += 1
         details["Setup_Type"] = f"+1 ({entry_type})"
 
     if "PERFECT" in entry_type:
-        score += 1
+        score_components["Imbalance"] = min(2, score_components["Imbalance"] + 1)
         details["Perfect"] = "+1"
 
     # === Rejet M15 réel : dernière bougie doit aller dans le sens du trade ===
@@ -3513,13 +3577,13 @@ def calculate_signal_confidence(
         bullish_reject = float(last["close"]) > float(last["open"]) and body_ratio >= 0.45
         bearish_reject = float(last["close"]) < float(last["open"]) and body_ratio >= 0.45
         if direction == "BUY" and bullish_reject:
-            score += 3
+            score_components["ICT"] += 2
             details["M15_Rejection"] = "+3 (bougie BUY confirmée)"
         elif direction == "SELL" and bearish_reject:
-            score += 3
+            score_components["ICT"] += 2
             details["M15_Rejection"] = "+3 (bougie SELL confirmée)"
         else:
-            score -= 2
+            score_components["ICT"] -= 2
             details["M15_Rejection"] = "-2 (pas de rejet confirmé)"
     except Exception:
         pass
@@ -3531,13 +3595,13 @@ def calculate_signal_confidence(
         dist_tp = abs(take_profit - entry_level)
         rr_ratio = dist_tp / dist_sl if dist_sl > 0 else 0
         if rr_ratio < 1.5:
-            score -= 5
+            score_components["Risk_RR_Distance"] -= 5
             details["RR"] = f"-5 (faible {rr_ratio:.2f})"
         elif rr_ratio >= 2.5:
-            score += 3
+            score_components["Risk_RR_Distance"] += 3
             details["RR"] = f"+3 (excellent {rr_ratio:.2f})"
         else:
-            score += 2
+            score_components["Risk_RR_Distance"] += 2
             details["RR"] = f"+2 (correct {rr_ratio:.2f})"
     except Exception:
         pass
@@ -3547,7 +3611,7 @@ def calculate_signal_confidence(
     try:
         d1_bonus, d1_label = get_d1_trend_bonus(df_d1, direction)
         if d1_bonus > 0:
-            score += 2
+            score_components["Secondary"] += 2
             d1_aligned = True
             details["D1_Trend"] = "+2 (D1 aligné)"
         else:
@@ -3559,7 +3623,7 @@ def calculate_signal_confidence(
     try:
         macd_bonus, macd_label = get_macd_h1_bonus(df_h1, direction)
         if macd_bonus > 0:
-            score += 1
+            score_components["Secondary"] += 1
             macd_confirmed = True
             details["MACD_H1"] = "+1 (confirme)"
         else:
@@ -3570,7 +3634,7 @@ def calculate_signal_confidence(
     try:
         session_bonus, session_label = get_session_quality_bonus(pair)
         if session_bonus > 0:
-            score += 1
+            score_components["Secondary"] += 1
             details["Session"] = "+1 (bonne session)"
         else:
             details["Session"] = session_label
@@ -3578,6 +3642,9 @@ def calculate_signal_confidence(
         pass
 
     # === Verdict ===
+    score = compute_final_score(score_components)
+    decision = direction if score >= min_required else "REJECTED"
+    log_score_detail(score_components, score, decision)
     passed = score >= min_required
     final_confidence = "HIGH" if score >= 18 else "MEDIUM" if score >= min_required else "LOW"
     confluences = {
@@ -3593,6 +3660,7 @@ def calculate_signal_confidence(
     return {
         "total_score": score,
         "details": details,
+        "score_components": score_components,
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "atr_value": atr_value,
@@ -3968,16 +4036,12 @@ def strict_stoch_veto(direction: str, df_h1: pd.DataFrame, df_m15: pd.DataFrame)
 
 
 def strict_trend_veto(direction: str, current_price: float, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> tuple:
-    """EMA50 H1 et biais H4 deviennent des garde-fous."""
+    """Compatibilité: aucun veto EMA50, la tendance est scorée ailleurs."""
     try:
         ema50_h1 = df_h1["close"].ewm(span=50, adjust=False).mean().iloc[-1]
-        if direction == "BUY" and current_price < ema50_h1:
-            return False, f"BUY interdit: prix {current_price:.5f} sous EMA50 H1 {ema50_h1:.5f}"
-        if direction == "SELL" and current_price > ema50_h1:
-            return False, f"SELL interdit: prix {current_price:.5f} au-dessus EMA50 H1 {ema50_h1:.5f}"
+        return True, f"EMA50 H1 scorée sans veto (prix={current_price:.5f}, EMA50={ema50_h1:.5f})"
     except Exception as exc:
-        return False, f"EMA50 H1 indisponible: {exc}"
-    return True, "Trend H1 OK"
+        return True, f"EMA50 H1 indisponible, aucun veto: {exc}"
 
 
 def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tuple:
@@ -4113,33 +4177,14 @@ def strict_direction_permission_v77(direction: str, bias: str, current_price: fl
 
 def strict_trend_veto_v77(direction: str, current_price: float, df_h1: pd.DataFrame, df_h4: pd.DataFrame, bias: str = "NEUTRAL") -> tuple:
     """
-    V77 : EMA50 H1 n'est plus un veto absolu pour les SELL.
-    Avant : SELL interdit dès que prix > EMA50 H1 -> ça supprimait presque tous les shorts.
-    Maintenant :
-    - BUY sous EMA50 H1 rejeté sauf H4 BUY très clair,
-    - SELL au-dessus EMA50 H1 accepté si contexte de correction/surachat géré par strict_direction_permission_v77.
+    V83 : EMA50 H1 n'est plus un veto pour BUY ni SELL.
+    La fonction reste pour compatibilité avec le pipeline strict, mais elle ne bloque plus.
     """
     try:
         ema50_h1 = float(df_h1["close"].ewm(span=50, adjust=False).mean().iloc[-1])
-        ema200_h1 = float(df_h1["close"].ewm(span=200, adjust=False).mean().iloc[-1])
-        bias = (bias or "NEUTRAL").upper()
-
-        if direction == "BUY":
-            if current_price < ema50_h1 and bias != "BUY":
-                return False, f"BUY interdit: prix {current_price:.5f} sous EMA50 H1 {ema50_h1:.5f} sans biais H4 BUY"
-            if current_price < ema200_h1 and bias == "SELL":
-                return False, f"BUY interdit: prix sous EMA200 H1 avec biais H4 SELL"
-
-        if direction == "SELL":
-            if current_price > ema50_h1 and bias != "SELL":
-                # Pas de rejet ici : la permission directionnelle + StochRSI décidera.
-                return True, f"SELL au-dessus EMA50 H1 toléré en mode correction ({current_price:.5f} > {ema50_h1:.5f})"
-            if current_price > ema200_h1 and bias == "BUY":
-                return True, f"SELL contre tendance toléré seulement si StochRSI extrême"
-
-        return True, "Trend H1 OK V78"
+        return True, f"EMA50 H1 non bloquante: prix={current_price:.5f}, EMA50={ema50_h1:.5f}"
     except Exception as exc:
-        return False, f"EMA H1 indisponible: {exc}"
+        return True, f"EMA H1 indisponible, aucun veto: {exc}"
 
 
 
