@@ -1,13 +1,15 @@
 # ============================================================
-# main(75).py - Version V86
+# main(75).py - Version V86 (définitive)
 # Modifications V86 :
 # - Suppression de toute la logique de trailing stop gérée en Python
 #   (manage_open_trades_v76, move_sl_to_breakeven_v85, lock_profit_v85,
 #    trail_to_swing_v85, compute_swing_sl, etc.)
-# - Ajout de create_oanda_trailing_stop pour créer un Trailing Stop natif OANDA
-# - Ajout de check_breakeven_simple pour déplacer le SL au BE quand R>=1
-# - Modification de execute_oanda_trade_v76 pour créer le trailing stop après l'ordre
-# - Boucle principale réduite : plus de gestion des trades ouverts, seulement scan + BE
+# - Ajout de check_breakeven_simple : déplace le SL au BE quand R>=1, puis active un trailing stop OANDA
+# - Ajout de create_oanda_trailing_stop pour créer un Trailing Stop natif OANDA (utilise TrailingStopLossOrderRequest)
+# - Ajout de modify_trade_sl_v76 pour modifier le SL (utilisé par le BE)
+# - Modification de execute_oanda_trade_v76 : ne crée plus le trailing immédiatement
+# - Boucle principale : appel de check_breakeven_simple à la place de manage_open_trades
+# - Ajout du set _TRAILING_CREATED_V86 pour ne créer le trailing qu'une fois par trade
 # ============================================================
 
 import os
@@ -4407,8 +4409,7 @@ def advanced_main():
 
                 rsi_value = get_last_rsi(df_m15["close"])
 
-                # V76: exécution réelle OANDA AVANT de marquer la zone comme traitée.
-                # Si OANDA refuse ou si MAX_TRADES_TOTAL bloque, on NE marque PAS le signal.
+                # V86 : exécution via execute_oanda_trade_v76 (modifiée V86)
                 trade_id = execute_oanda_trade_v76(
                     pair=pair,
                     direction=direction,
@@ -4435,7 +4436,7 @@ def advanced_main():
                     mark_signal_sent(pair, direction, entry_level_key, zone_start, zone_end)
                     nb_envoyes += 1
                 else:
-                    logger.info(f"{pair}: V78 ordre non exécuté, zone NON enregistrée.")
+                    logger.info(f"{pair}: V86 ordre non exécuté, zone NON enregistrée.")
 
             logger.info(
                 f"🏁 Scan {pair} terminé. Signaux envoyés: {nb_envoyes}. "
@@ -4447,18 +4448,15 @@ def advanced_main():
             logger.error(traceback.format_exc())
             continue
 
-    logger.info("🏁 Analyse V78 BALANCED BUY/SELL terminée pour toutes les paires")
+    logger.info("🏁 Analyse V86 BALANCED BUY/SELL terminée pour toutes les paires")
 
 
 
 # =========================================================
-# V78 - OANDA EXECUTION + TRADE MANAGER
+# V86 - OANDA EXECUTION + TRADE MANAGER (modifié)
 # Base V76 prod conservée.
-# Correction V78: WICK_REJECTION + NESTED_FVG autorisés dans le filtre strict.
-# Base: moteur V63/V78 BALANCED BUY/SELL conservé
-# Ajouts: exécution réelle OANDA, sizing risque, 1 trade/pair,
-# MAX 3 trades, break-even +1R, trailing swing M5 à +1.5R,
-# respect week-end Forex.
+# Ajouts: exécution réelle OANDA, sizing risque, 1 trade/pair, MAX 9 trades,
+# break-even +1R avec offset, puis création d'un Trailing Stop Loss natif OANDA.
 # =========================================================
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
@@ -4469,11 +4467,8 @@ MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "1250"))
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "9"))
 ONE_TRADE_PER_PAIR = os.getenv("ONE_TRADE_PER_PAIR", "true").lower() == "true"
 
-BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))  # V83
+BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))  # V83 (pas utilisé dans V86)
 BREAKEVEN_OFFSET_PIPS = float(os.getenv("BREAKEVEN_OFFSET_PIPS", "1.0"))
-TRAILING_START_R = float(os.getenv("TRAILING_START_R", "1.5"))  # V85 : déclenchement du trailing à partir de 1.5R
-SWING_LOOKBACK_V76 = int(os.getenv("SWING_LOOKBACK_V76", "3"))
-SWING_BUFFER_PIPS = float(os.getenv("SWING_BUFFER_PIPS", "1.5"))
 
 PIP_SIZE_V76 = {
     "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
@@ -4538,6 +4533,8 @@ OANDA_CACHE_TTL_SECONDS_V83 = float(os.getenv("OANDA_CACHE_TTL_SECONDS_V83", "3.
 _OANDA_CACHE_V83 = {}
 _INITIAL_RISK_BY_TRADE_V83 = {}
 
+# V86 - Set pour mémoriser les trades pour lesquels le trailing a déjà été créé
+_TRAILING_CREATED_V86 = set()
 
 
 def compact_json_v76(obj, max_len: int = 6000) -> str:
@@ -4598,7 +4595,7 @@ def oanda_safe_request_v76(endpoint, label: str = ""):
         resp = api.request(endpoint)
         return resp
     except Exception as e:
-        logger.error(f"❌ V78 OANDA exception {label}: {e}")
+        logger.error(f"❌ V86 OANDA exception {label}: {e}")
         logger.error(traceback.format_exc())
         return None
 
@@ -4648,7 +4645,7 @@ def get_balance_v76() -> float:
 
 def get_open_trades_v76(log_raw: bool = False) -> list:
     """
-    V78: lecture officielle OpenTrades, comme V75.
+    V86: lecture officielle OpenTrades, comme V75.
     Ne bloque que si OANDA renvoie un trade avec currentUnits non nul.
     """
     cache_key = "open_trades_raw"
@@ -4727,7 +4724,7 @@ def get_open_positions_v76(log_raw: bool = False) -> list:
 
 def has_open_trade_v76(pair: str) -> bool:
     """
-    V78: vérifie OpenTrades ET OpenPositions comme la V75.
+    V86: vérifie OpenTrades ET OpenPositions comme la V75.
     Pas de cache interne. Pas de faux blocage si OANDA répond vide.
     """
     open_trades = get_open_trades_v76(log_raw=True)
@@ -4786,7 +4783,7 @@ def log_oanda_order_response_v76(pair: str, resp: dict) -> None:
 
 def has_open_trade_v76(pair: str) -> bool:
     """
-    V78: bloque seulement si OANDA confirme un trade actif sur la même paire.
+    V86: bloque seulement si OANDA confirme un trade actif sur la même paire.
     Ne se base pas sur un cache interne.
     """
     for t in get_open_trades_v76():
@@ -4833,7 +4830,7 @@ def get_fx_rate_to_usd_v76(currency: str) -> float:
                 return float(_cache_set_v83(f"fx_to_usd:{currency}", 1.0 / float(df["close"].iloc[-1])))
     except Exception:
         pass
-    logger.warning(f"⚠️ V78 conversion {currency}->USD inconnue, fallback 1.0")
+    logger.warning(f"⚠️ V86 conversion {currency}->USD inconnue, fallback 1.0")
     return 1.0
 
 
@@ -4857,7 +4854,7 @@ def get_oanda_margin_rate_v78(pair: str) -> float:
             if margin_rate > 0:
                 return margin_rate
     except Exception as exc:
-        logger.warning(f"V78 marginRate indisponible pour {pair}, fallback 0.0333: {exc}")
+        logger.warning(f"V86 marginRate indisponible pour {pair}, fallback 0.0333: {exc}")
     return 0.0333
 
 
@@ -4937,7 +4934,7 @@ def estimate_margin_used_v78(pair: str, units: int, entry_price: float) -> float
 def cap_units_absolute_v78(pair: str, units: int) -> int:
     max_units = MAX_UNITS_BY_PAIR.get(pair, MAX_UNITS_BY_PAIR["DEFAULT"])
     if units > max_units:
-        logger.warning(f"V78 ABS CAP {pair}: units {units} -> {max_units}")
+        logger.warning(f"V86 ABS CAP {pair}: units {units} -> {max_units}")
         return max_units
     return units
 
@@ -4974,7 +4971,7 @@ def cap_units_by_margin_v78(pair: str, units: int, entry_price: float, balance: 
 
 def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: float) -> float:
     """
-    V78: sizing sécurisé.
+    V86: sizing sécurisé.
     Ancien problème: le calcul pouvait produire 1M+ unités.
     Nouveau:
     - risque théorique via distance SL
@@ -4987,7 +4984,7 @@ def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: floa
         entry = float(entry)
         stop_loss = float(stop_loss)
     except Exception:
-        logger.error(f"V78: paramètres sizing invalides pair={pair} entry={entry} stop={stop_loss} balance={balance}")
+        logger.error(f"V86: paramètres sizing invalides pair={pair} entry={entry} stop={stop_loss} balance={balance}")
         return 0
 
     risk_usd = min(balance * (RISK_PERCENTAGE / 100.0), MAX_RISK_USD)
@@ -4995,7 +4992,7 @@ def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: floa
 
     if balance <= 0 or risk_usd <= 0 or distance_quote <= 0:
         logger.error(
-            f"V78: sizing impossible {pair}: balance={balance}, risk_usd={risk_usd}, distance={distance_quote}"
+            f"V86: sizing impossible {pair}: balance={balance}, risk_usd={risk_usd}, distance={distance_quote}"
         )
         return 0
 
@@ -5003,12 +5000,12 @@ def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: floa
     quote_to_usd = get_fx_rate_to_usd_v76(quote)
 
     if quote_to_usd <= 0:
-        logger.error(f"V78: conversion quote_to_usd invalide {quote}->{quote_to_usd}, trade bloqué.")
+        logger.error(f"V86: conversion quote_to_usd invalide {quote}->{quote_to_usd}, trade bloqué.")
         return 0
 
     risk_per_unit_usd = distance_quote * quote_to_usd
     if risk_per_unit_usd <= 0:
-        logger.error(f"V78: risk_per_unit_usd invalide {pair}: {risk_per_unit_usd}")
+        logger.error(f"V86: risk_per_unit_usd invalide {pair}: {risk_per_unit_usd}")
         return 0
 
     raw_units = risk_usd / risk_per_unit_usd
@@ -5021,7 +5018,7 @@ def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: floa
 
     if units < min_units:
         logger.warning(
-            f"V78: units trop faibles après caps {pair}: {units} < min={min_units}. "
+            f"V86: units trop faibles après caps {pair}: {units} < min={min_units}. "
             f"Trade bloqué. raw_units={raw_units:.2f}"
         )
         return 0
@@ -5032,7 +5029,7 @@ def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: floa
     margin_pct = estimated_margin / balance * 100.0 if balance > 0 else 0.0
 
     logger.info(
-        f"V78 RISK LOT {pair}: balance=${balance:.2f} risk_cap=${risk_usd:.2f} "
+        f"V86 RISK LOT {pair}: balance=${balance:.2f} risk_cap=${risk_usd:.2f} "
         f"entry={entry:.5f} SL={stop_loss:.5f} dist_quote={distance_quote:.5f} "
         f"quote_to_usd={quote_to_usd:.8f} risk_per_unit=${risk_per_unit_usd:.8f} "
         f"raw_units={raw_units:.2f} units_before_caps={units_before_caps} final_units={units} "
@@ -5108,11 +5105,71 @@ def trade_direction_v86(trade: dict) -> str:
     except:
         return "UNKNOWN"
 
-# V86 - Fonction de vérification du Break Even (simple)
+# V86 - Fonction de modification du SL (utilisée par check_breakeven_simple)
+def modify_trade_sl_v76(trade_id: str, pair: str, new_sl: float) -> bool:
+    """
+    Modifie le Stop Loss d'un trade existant.
+    Retourne True si succès.
+    """
+    try:
+        api = v76_client()
+        order_data = {
+            "order": {
+                "type": "STOP_LOSS",
+                "tradeID": trade_id,
+                "price": round_price_v76(pair, new_sl),
+                "timeInForce": "GTC"
+            }
+        }
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+        resp = api.request(r)
+        if resp.get("orderRejectTransaction"):
+            logger.error(f"SL modification rejected for trade {trade_id}: {resp.get('orderRejectTransaction')}")
+            return False
+        logger.info(f"SL modifié pour trade {trade_id} -> {new_sl}")
+        return True
+    except Exception as e:
+        logger.error(f"Erreur modification SL trade {trade_id}: {e}")
+        return False
+
+# V86 - Création d'un Trailing Stop Loss natif OANDA (avec TrailingStopLossOrderRequest)
+def create_oanda_trailing_stop(
+        api,
+        account_id: str,
+        trade_id: str,
+        distance: float
+) -> bool:
+    """
+    Crée un TrailingStopLossOrderRequest pour un trade ouvert.
+    Utilise l'objet dédié TrailingStopLossOrderRequest.
+    Retourne True si succès.
+    """
+    try:
+        # Construction de l'ordre avec l'objet dédié
+        from oandapyV20 import order
+        trailing_order = order.TrailingStopLossOrderRequest(
+            tradeID=trade_id,
+            distance=str(distance),
+            timeInForce="GTC"
+        )
+        # Le paramètre attendu par OrderCreate est un dict contenant la clé "order"
+        req = orders.OrderCreate(accountID=account_id, data={"order": trailing_order.dict()})
+        resp = api.request(req)
+        if resp.get("orderRejectTransaction"):
+            logger.error(f"[TSL] Rejeté: {resp.get('orderRejectTransaction')}")
+            return False
+        logger.info(f"[TSL] Succès pour trade {trade_id}")
+        return True
+    except Exception as e:
+        logger.error(f"[TSL] Erreur: {e}")
+        return False
+
+# V86 - Fonction de vérification du Break Even et activation du trailing
 def check_breakeven_simple():
     """
-    Parcourt les trades ouverts et déplace le Stop Loss au prix d'entrée + offset
-    lorsque le profit atteint 1R.
+    Parcourt les trades ouverts :
+    - Si R >= 1.0, déplace le SL au BE (avec offset).
+    - Puis, si le trailing n'a pas encore été créé pour ce trade, le crée via OANDA.
     """
     try:
         open_trades = get_open_trades_v76()
@@ -5125,23 +5182,22 @@ def check_breakeven_simple():
             if not sl_order.get("price"):
                 continue
             current_sl = float(sl_order["price"])
-            current_price = get_recent_m5_price_v76(pair)  # prix actuel M5
+            current_price = get_recent_m5_price_v76(pair)
             if current_price <= 0:
                 continue
 
-            # Calcul du R (gain en unités de risque)
+            # Calcul du R
             if direction == "BUY":
                 profit = current_price - entry
                 risk = entry - current_sl
-            else:  # SELL
+            else:
                 profit = entry - current_price
                 risk = current_sl - entry
-
             if risk <= 0:
                 continue
             r = profit / risk
 
-            # Si R >= 1.0, on place le SL au breakeven (avec un petit offset)
+            # Étape 1 : Break-even si R >= 1.0
             if r >= 1.0:
                 pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
                 spread = get_price_spread_v83(pair)["spread"]
@@ -5150,47 +5206,40 @@ def check_breakeven_simple():
                     be_sl = entry + offset
                 else:
                     be_sl = entry - offset
-                # Vérifier si le nouveau SL est meilleur que l'actuel
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl} -> {be_sl}")
                     modify_trade_sl_v76(trade_id, pair, be_sl)
-                    # Effacer le cache pour rafraîchir
                     _OANDA_CACHE_V83.pop("open_trades_raw", None)
+                    # On rafraîchit le SL pour la suite
+                    current_sl = be_sl  # met à jour pour la création du trailing
+
+            # Étape 2 : Création du trailing si R >= 1.0 ET que le trailing n'a pas encore été créé
+            # On vérifie que le SL est bien au BE (ou mieux) et que le trade est en profit
+            if trade_id not in _TRAILING_CREATED_V86 and r >= 1.0:
+                # Vérification que le SL est du bon côté (protection)
+                if direction == "BUY" and current_sl >= entry:
+                    atr = get_atr_m15_v83(pair)
+                    spread = get_price_spread_v83(pair)["spread"]
+                    distance = max(atr * 1.3, spread * 8)
+                    distance = round(distance, PRICE_DECIMALS_V76.get(pair, 5))
+                    if distance > 0:
+                        api = v76_client()
+                        if create_oanda_trailing_stop(api, OANDA_ACCOUNT_ID, trade_id, distance):
+                            _TRAILING_CREATED_V86.add(trade_id)
+                            logger.info(f"[TSL] Trailing activé pour {pair} trade {trade_id} après BE")
+                elif direction == "SELL" and current_sl <= entry:
+                    atr = get_atr_m15_v83(pair)
+                    spread = get_price_spread_v83(pair)["spread"]
+                    distance = max(atr * 1.3, spread * 8)
+                    distance = round(distance, PRICE_DECIMALS_V76.get(pair, 5))
+                    if distance > 0:
+                        api = v76_client()
+                        if create_oanda_trailing_stop(api, OANDA_ACCOUNT_ID, trade_id, distance):
+                            _TRAILING_CREATED_V86.add(trade_id)
+                            logger.info(f"[TSL] Trailing activé pour {pair} trade {trade_id} après BE")
     except Exception as e:
         logger.error(f"Erreur check_breakeven_simple: {e}")
         logger.error(traceback.format_exc())
-
-# V86 - Création d'un Trailing Stop Loss natif OANDA
-def create_oanda_trailing_stop(
-        api,
-        account_id: str,
-        trade_id: str,
-        distance: float
-) -> bool:
-    """
-    Crée un TrailingStopLossOrderRequest pour un trade ouvert.
-    Retourne True si succès.
-    """
-    try:
-        order_data = {
-            "order": {
-                "type": "TRAILING_STOP_LOSS",
-                "tradeID": trade_id,
-                "distance": str(distance),
-                "timeInForce": "GTC"
-            }
-        }
-        logger.info(f"[TSL] Création trailing stop pour trade {trade_id} avec distance {distance:.5f}")
-        r = orders.OrderCreate(accountID=account_id, data=order_data)
-        resp = api.request(r)
-        if resp.get("orderRejectTransaction"):
-            logger.error(f"[TSL] Rejeté: {resp.get('orderRejectTransaction')}")
-            return False
-        logger.info(f"[TSL] Succès pour trade {trade_id}")
-        return True
-    except Exception as e:
-        logger.error(f"[TSL] Erreur: {e}")
-        return False
 
 # =============================
 # MODIFICATION DE execute_oanda_trade_v76 (V86)
@@ -5198,7 +5247,8 @@ def create_oanda_trailing_stop(
 def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_loss: float,
                             take_profit: float, score: int, entry_type: str) -> str | None:
     """
-    V86 : ouverture d'un Market Order, puis création d'un Trailing Stop Loss natif OANDA.
+    V86 : ouverture d'un Market Order, puis enregistrement du trade.
+    Le trailing stop sera créé plus tard par check_breakeven_simple.
     """
     logger.info(f"V86 EXECUTION START {pair} {direction} type={entry_type} score={score}")
     logger.info(
@@ -5253,7 +5303,7 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
             "positionFill": "DEFAULT",
             "stopLossOnFill": {"price": round_price_v76(pair, stop_loss), "timeInForce": "GTC"},
             "takeProfitOnFill": {"price": round_price_v76(pair, take_profit), "timeInForce": "GTC"},
-            # V86 : on supprime "trailingStopLossOnFill"
+            # V86 : pas de trailing stop à l'ouverture
         }
     }
 
@@ -5300,26 +5350,7 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
         logger.info(f"✅ ORDRE RÉEL CONFIRMÉ {pair} | ID={trade_id}")
         logger.info(f"DEBUG EXECUTION RESULT | status=CONFIRMED | pair={pair} trade_or_order_id={trade_id}")
 
-        # V86 : Récupération de l'ATR M15 et du spread pour calculer la distance du trailing
-        atr = get_atr_m15_v83(pair)
-        spread = get_price_spread_v83(pair)["spread"]
-        pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
-        distance = max(atr * 1.3, spread * 8)
-        # Arrondir à la précision de la paire
-        distance = round(distance, PRICE_DECIMALS_V76.get(pair, 5))
-        logger.info(f"[TSL] Distance calculée pour {pair}: ATR={atr:.5f}, spread={spread:.5f}, distance={distance:.5f}")
-
-        # V86 : Création du trailing stop natif
-        if distance > 0:
-            success = create_oanda_trailing_stop(api, OANDA_ACCOUNT_ID, trade_id, distance)
-            if success:
-                logger.info(f"[TSL] Trailing Stop créé pour trade {trade_id}")
-            else:
-                logger.warning(f"[TSL] Échec création trailing stop pour trade {trade_id}, le trade reste ouvert sans trailing")
-        else:
-            logger.warning(f"[TSL] Distance invalide ({distance}), pas de trailing stop")
-
-        # V86 : On enregistre le risque initial pour éventuel BE (mais on ne fait plus de trailing)
+        # V86 : On enregistre le risque initial pour le BE (pas de trailing immédiat)
         _INITIAL_RISK_BY_TRADE_V83[trade_id] = abs(float(entry_price) - float(stop_loss))
 
         log_account_snapshot_v76("AFTER_ORDER_CREATE")
@@ -5340,36 +5371,6 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
         log_account_snapshot_v76("EXCEPTION_ORDER_CREATE")
         return None
 
-# V86 - Fonction de modification du SL (utilisée par check_breakeven_simple)
-def modify_trade_sl_v76(trade_id: str, pair: str, new_sl: float) -> bool:
-    """
-    Modifie le Stop Loss d'un trade existant.
-    Retourne True si succès.
-    """
-    try:
-        api = v76_client()
-        # On crée une requête de modification du SL
-        # Note : on peut aussi utiliser la méthode order.put() mais on va faire simple
-        # avec un StopLossOrderRequest
-        order_data = {
-            "order": {
-                "type": "STOP_LOSS",
-                "tradeID": trade_id,
-                "price": round_price_v76(pair, new_sl),
-                "timeInForce": "GTC"
-            }
-        }
-        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
-        resp = api.request(r)
-        if resp.get("orderRejectTransaction"):
-            logger.error(f"SL modification rejected for trade {trade_id}: {resp.get('orderRejectTransaction')}")
-            return False
-        logger.info(f"SL modifié pour trade {trade_id} -> {new_sl}")
-        return True
-    except Exception as e:
-        logger.error(f"Erreur modification SL trade {trade_id}: {e}")
-        return False
-
 # =============================
 # MODIFICATION DE LA BOUCLE PRINCIPALE (V86)
 # =============================
@@ -5387,7 +5388,7 @@ if __name__ == "__main__":
                 time.sleep(300)
                 continue
 
-            # V86 : Vérification du Break Even (et uniquement cela)
+            # V86 : Vérification du Break Even et activation du trailing
             check_breakeven_simple()
 
             current_open_count_v83 = open_trade_count_v76()
