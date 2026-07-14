@@ -1,3 +1,15 @@
+# ============================================================
+# main(75).py - Version V86
+# Modifications V86 :
+# - Suppression de toute la logique de trailing stop gérée en Python
+#   (manage_open_trades_v76, move_sl_to_breakeven_v85, lock_profit_v85,
+#    trail_to_swing_v85, compute_swing_sl, etc.)
+# - Ajout de create_oanda_trailing_stop pour créer un Trailing Stop natif OANDA
+# - Ajout de check_breakeven_simple pour déplacer le SL au BE quand R>=1
+# - Modification de execute_oanda_trade_v76 pour créer le trailing stop après l'ordre
+# - Boucle principale réduite : plus de gestion des trades ouverts, seulement scan + BE
+# ============================================================
+
 import os
 import sys
 import time
@@ -5075,206 +5087,120 @@ def get_atr_m15_v83(pair: str) -> float:
     return float(_cache_set_v83(f"atr_m15:{pair}", atr))
 
 # ============================================================
-# V85 - SMART TRAILING STOP (remplacement du trailing statique)
+# V86 - SUPPRESSION DES FONCTIONS DE TRAILING PYTHON
+# ============================================================
+# Les fonctions suivantes ont été supprimées :
+# - manage_open_trades_v76
+# - move_sl_to_breakeven_v85
+# - lock_profit_v85
+# - trail_to_swing_v85
+# - compute_swing_sl
+# - trade_current_r_v76 (si présente)
+# - trade_direction_v76 (si présente, on garde une version simplifiée)
 # ============================================================
 
-def compute_swing_sl(pair: str, direction: str, current_price: float, atr: float) -> float | None:
+# V86 - Fonction utilitaire pour obtenir la direction d'un trade (conservée pour le BE)
+def trade_direction_v86(trade: dict) -> str:
+    """Retourne 'BUY' ou 'SELL' selon les unités du trade."""
+    try:
+        units = float(trade.get("currentUnits", trade.get("units", 0)))
+        return "BUY" if units > 0 else "SELL"
+    except:
+        return "UNKNOWN"
+
+# V86 - Fonction de vérification du Break Even (simple)
+def check_breakeven_simple():
     """
-    Calcule un SL basé sur les derniers swings M5.
-    Pour BUY : SL = dernier swing low - buffer (0.5 ATR)
-    Pour SELL : SL = dernier swing high + buffer (0.5 ATR)
-    Retourne None si pas de swing trouvé.
+    Parcourt les trades ouverts et déplace le Stop Loss au prix d'entrée + offset
+    lorsque le profit atteint 1R.
     """
-    api = v76_client()
-    df = get_candles_with_retry(api, pair, "M5", 90)
-    if df is None or df.empty or len(df) < 20:
-        return None
-    pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
-    buffer = max(0.5 * atr, SWING_BUFFER_PIPS * pip)
-    lookback = SWING_LOOKBACK_V76
-
-    if direction == "BUY":
-        lows = df["low"].values
-        # Parcours en arrière pour trouver le dernier swing low
-        for i in range(len(df) - 2 - lookback, lookback, -1):
-            window = lows[i - lookback : i + lookback + 1]
-            if lows[i] == window.min():
-                return float(lows[i] - buffer)
-        return None
-    else:  # SELL
-        highs = df["high"].values
-        for i in range(len(df) - 2 - lookback, lookback, -1):
-            window = highs[i - lookback : i + lookback + 1]
-            if highs[i] == window.max():
-                return float(highs[i] + buffer)
-        return None
-
-
-def move_sl_to_breakeven_v85(trade: dict, current_r: float, current_sl: float) -> bool:
-    """
-    Déplace le SL au breakeven + offset si R >= BREAKEVEN_TRIGGER_R.
-    Retourne True si modifié.
-    """
-    if current_r < BREAKEVEN_TRIGGER_R:
-        return False
-    trade_id = str(trade.get("id"))
-    pair = trade.get("instrument")
-    direction = trade_direction_v76(trade)
-    entry = float(trade.get("price"))
-    spread = get_price_spread_v83(pair)["spread"]
-    pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
-    offset = max(spread, BREAKEVEN_OFFSET_PIPS * pip)
-    be_sl = entry + offset if direction == "BUY" else entry - offset
-    # Vérifier si le nouveau SL est amélioré (plus proche du prix pour BUY, plus bas pour SELL)
-    if direction == "BUY" and current_sl >= be_sl:
-        return False
-    if direction == "SELL" and current_sl <= be_sl:
-        return False
-    logger.info(f"[RISK] V85 BREAKEVEN {pair}: SL {current_sl} -> {be_sl} at R={current_r:.2f}")
-    return modify_trade_sl_v76(trade_id, pair, be_sl)
-
-
-def lock_profit_v85(trade: dict, current_r: float, current_sl: float) -> bool:
-    """
-    Verrouille des gains progressifs :
-    - R >= 1.5 → SL à 0.5R (entry ± 0.5*risk)
-    - R >= 2.0 → SL à 1.0R (entry ± 1.0*risk)
-    Retourne True si modifié.
-    """
-    trade_id = str(trade.get("id"))
-    pair = trade.get("instrument")
-    direction = trade_direction_v76(trade)
-    entry = float(trade.get("price"))
-    initial_risk = _INITIAL_RISK_BY_TRADE_V83.get(trade_id, None)
-    if initial_risk is None:
-        # estimation à partir du SL actuel si non trouvé
-        sl_price = trade.get("stopLossOrder", {}).get("price")
-        if sl_price:
-            initial_risk = abs(entry - float(sl_price))
-            _INITIAL_RISK_BY_TRADE_V83[trade_id] = initial_risk
-        else:
-            return False
-    if initial_risk <= 0:
-        return False
-
-    new_sl = None
-    if current_r >= 2.0:
-        # verrouiller 1R
-        new_sl = entry + initial_risk if direction == "BUY" else entry - initial_risk
-    elif current_r >= 1.5:
-        # verrouiller 0.5R
-        new_sl = entry + 0.5 * initial_risk if direction == "BUY" else entry - 0.5 * initial_risk
-
-    if new_sl is None:
-        return False
-
-    # Vérifier si le nouveau SL est plus favorable que l'actuel
-    if direction == "BUY" and new_sl <= current_sl:
-        return False
-    if direction == "SELL" and new_sl >= current_sl:
-        return False
-
-    logger.info(f"[RISK] V85 LOCK PROFIT {pair}: SL {current_sl} -> {new_sl} at R={current_r:.2f}")
-    return modify_trade_sl_v76(trade_id, pair, new_sl)
-
-
-def trail_to_swing_v85(trade: dict, current_r: float, current_sl: float, atr: float) -> bool:
-    """
-    Trailing basé sur les swings : déplace le SL vers le dernier swing si cela améliore la position,
-    seulement si R >= TRAILING_START_R (1.5 par défaut).
-    """
-    if current_r < TRAILING_START_R:
-        return False
-
-    pair = trade.get("instrument")
-    direction = trade_direction_v76(trade)
-    current_price = get_recent_m5_price_v76(pair)
-    if current_price <= 0:
-        return False
-
-    swing_sl = compute_swing_sl(pair, direction, current_price, atr)
-    if swing_sl is None:
-        return False
-
-    # Vérifier si le nouveau SL est meilleur (plus proche du prix pour BUY, plus bas ; plus haut pour SELL)
-    if direction == "BUY" and swing_sl > current_sl and swing_sl < current_price:
-        # On ne dépasse pas le prix
-        pass
-    elif direction == "SELL" and swing_sl < current_sl and swing_sl > current_price:
-        pass
-    else:
-        return False
-
-    # Vérifier une amélioration significative (éviter les micro-déplacements)
-    pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
-    if abs(swing_sl - current_sl) < pip * 2:
-        return False
-
-    logger.info(f"[RISK] V85 TRAIL SWING {pair}: SL {current_sl} -> {swing_sl} at R={current_r:.2f}")
-    return modify_trade_sl_v76(str(trade.get("id")), pair, swing_sl)
-
-
-def manage_open_trades_v76():
-    """
-    V85 : gestion intelligente des trades ouverts.
-    - Break-even à +0.8R
-    - Lock de profits à +1.5R et +2R
-    - Trailing basé sur les swings à partir de +1.5R
-    """
-    open_trades = get_open_trades_v76()
-    if not open_trades:
-        logger.info("V85 TRADE MANAGER: aucun trade ouvert.")
-        return
-
-    for t in open_trades:
-        try:
+    try:
+        open_trades = get_open_trades_v76()
+        for t in open_trades:
             trade_id = str(t.get("id"))
             pair = t.get("instrument")
-            direction = trade_direction_v76(t)
+            direction = trade_direction_v86(t)
             entry = float(t.get("price"))
             sl_order = t.get("stopLossOrder", {}) or {}
             if not sl_order.get("price"):
                 continue
             current_sl = float(sl_order["price"])
-            current_r = trade_current_r_v76(t)
-            if current_r is None:
+            current_price = get_recent_m5_price_v76(pair)  # prix actuel M5
+            if current_price <= 0:
                 continue
 
-            # Mise à jour du risque initial si manquant
-            if trade_id not in _INITIAL_RISK_BY_TRADE_V83:
-                initial_risk = abs(entry - current_sl)
-                if initial_risk > 0:
-                    _INITIAL_RISK_BY_TRADE_V83[trade_id] = initial_risk
+            # Calcul du R (gain en unités de risque)
+            if direction == "BUY":
+                profit = current_price - entry
+                risk = entry - current_sl
+            else:  # SELL
+                profit = entry - current_price
+                risk = current_sl - entry
 
-            logger.info(f"V85 TRADE MANAGER {pair} id={trade_id} dir={direction} R={current_r:.2f} SL={current_sl}")
-
-            # Étape 1 : Break-even
-            if move_sl_to_breakeven_v85(t, current_r, current_sl):
-                _OANDA_CACHE_V83.pop("open_trades_raw", None)
-                continue  # on passe au trade suivant après modification
-
-            # Étape 2 : Lock progressif des profits
-            if lock_profit_v85(t, current_r, current_sl):
-                _OANDA_CACHE_V83.pop("open_trades_raw", None)
+            if risk <= 0:
                 continue
+            r = profit / risk
 
-            # Étape 3 : Trailing basé sur les swings (si R >= TRAILING_START_R)
-            atr = get_atr_m15_v83(pair)
-            if trail_to_swing_v85(t, current_r, current_sl, atr):
-                _OANDA_CACHE_V83.pop("open_trades_raw", None)
-                continue
+            # Si R >= 1.0, on place le SL au breakeven (avec un petit offset)
+            if r >= 1.0:
+                pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
+                spread = get_price_spread_v83(pair)["spread"]
+                offset = max(spread, pip * 1.0)  # 1 pip d'offset
+                if direction == "BUY":
+                    be_sl = entry + offset
+                else:
+                    be_sl = entry - offset
+                # Vérifier si le nouveau SL est meilleur que l'actuel
+                if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
+                    logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl} -> {be_sl}")
+                    modify_trade_sl_v76(trade_id, pair, be_sl)
+                    # Effacer le cache pour rafraîchir
+                    _OANDA_CACHE_V83.pop("open_trades_raw", None)
+    except Exception as e:
+        logger.error(f"Erreur check_breakeven_simple: {e}")
+        logger.error(traceback.format_exc())
 
-        except Exception as e:
-            logger.error(f"Erreur V85 trade manager: {e}")
-            logger.error(traceback.format_exc())
+# V86 - Création d'un Trailing Stop Loss natif OANDA
+def create_oanda_trailing_stop(
+        api,
+        account_id: str,
+        trade_id: str,
+        distance: float
+) -> bool:
+    """
+    Crée un TrailingStopLossOrderRequest pour un trade ouvert.
+    Retourne True si succès.
+    """
+    try:
+        order_data = {
+            "order": {
+                "type": "TRAILING_STOP_LOSS",
+                "tradeID": trade_id,
+                "distance": str(distance),
+                "timeInForce": "GTC"
+            }
+        }
+        logger.info(f"[TSL] Création trailing stop pour trade {trade_id} avec distance {distance:.5f}")
+        r = orders.OrderCreate(accountID=account_id, data=order_data)
+        resp = api.request(r)
+        if resp.get("orderRejectTransaction"):
+            logger.error(f"[TSL] Rejeté: {resp.get('orderRejectTransaction')}")
+            return False
+        logger.info(f"[TSL] Succès pour trade {trade_id}")
+        return True
+    except Exception as e:
+        logger.error(f"[TSL] Erreur: {e}")
+        return False
 
-
+# =============================
+# MODIFICATION DE execute_oanda_trade_v76 (V86)
+# =============================
 def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_loss: float,
                             take_profit: float, score: int, entry_type: str) -> str | None:
     """
-    V85 : suppression du trailingStopLossOnFill, gestion manuelle assurée par manage_open_trades_v76.
+    V86 : ouverture d'un Market Order, puis création d'un Trailing Stop Loss natif OANDA.
     """
-    logger.info(f"V85 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"V86 EXECUTION START {pair} {direction} type={entry_type} score={score}")
     logger.info(
         f"DEBUG EXEC INPUT | pair={pair} direction={direction} entry={round_price_v76(pair, entry_price)} "
         f"SL={round_price_v76(pair, stop_loss)} TP={round_price_v76(pair, take_profit)} "
@@ -5299,13 +5225,13 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
     balance = get_balance_v76()
     logger.info(f"DEBUG STEP balance={balance}")
     if balance <= 0:
-        logger.error("V85: balance invalide, ordre annulé.")
+        logger.error("V86: balance invalide, ordre annulé.")
         return None
 
     units = calculate_units_v76(pair, entry_price, stop_loss, balance)
     logger.info(f"DEBUG STEP calculated_units={units}")
     if not units or float(units) <= 0:
-        logger.error(f"V85: units invalides pour {pair}: {units}")
+        logger.error(f"V86: units invalides pour {pair}: {units}")
         return None
     margin_info = calculate_margin(pair, units, entry_price)
     logger.info(
@@ -5327,14 +5253,14 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
             "positionFill": "DEFAULT",
             "stopLossOnFill": {"price": round_price_v76(pair, stop_loss), "timeInForce": "GTC"},
             "takeProfitOnFill": {"price": round_price_v76(pair, take_profit), "timeInForce": "GTC"},
-            # "trailingStopLossOnFill" est volontairement supprimé
+            # V86 : on supprime "trailingStopLossOnFill"
         }
     }
 
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
     logger.info(
-        f"SIGNAL V85 {pair} {direction} | "
+        f"SIGNAL V86 {pair} {direction} | "
         f"entry≈{round_price_v76(pair, entry_price)} SL={round_price_v76(pair, stop_loss)} "
         f"TP={round_price_v76(pair, take_profit)} RR={rr:.2f} score={score} "
         f"units={units} signed_units={signed_units} type={entry_type}"
@@ -5374,6 +5300,28 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
         logger.info(f"✅ ORDRE RÉEL CONFIRMÉ {pair} | ID={trade_id}")
         logger.info(f"DEBUG EXECUTION RESULT | status=CONFIRMED | pair={pair} trade_or_order_id={trade_id}")
 
+        # V86 : Récupération de l'ATR M15 et du spread pour calculer la distance du trailing
+        atr = get_atr_m15_v83(pair)
+        spread = get_price_spread_v83(pair)["spread"]
+        pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
+        distance = max(atr * 1.3, spread * 8)
+        # Arrondir à la précision de la paire
+        distance = round(distance, PRICE_DECIMALS_V76.get(pair, 5))
+        logger.info(f"[TSL] Distance calculée pour {pair}: ATR={atr:.5f}, spread={spread:.5f}, distance={distance:.5f}")
+
+        # V86 : Création du trailing stop natif
+        if distance > 0:
+            success = create_oanda_trailing_stop(api, OANDA_ACCOUNT_ID, trade_id, distance)
+            if success:
+                logger.info(f"[TSL] Trailing Stop créé pour trade {trade_id}")
+            else:
+                logger.warning(f"[TSL] Échec création trailing stop pour trade {trade_id}, le trade reste ouvert sans trailing")
+        else:
+            logger.warning(f"[TSL] Distance invalide ({distance}), pas de trailing stop")
+
+        # V86 : On enregistre le risque initial pour éventuel BE (mais on ne fait plus de trailing)
+        _INITIAL_RISK_BY_TRADE_V83[trade_id] = abs(float(entry_price) - float(stop_loss))
+
         log_account_snapshot_v76("AFTER_ORDER_CREATE")
         open_after = get_open_trades_v76(log_raw=True)
         opened_for_pair = [t for t in open_after if t.get("instrument") == pair]
@@ -5392,15 +5340,44 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
         log_account_snapshot_v76("EXCEPTION_ORDER_CREATE")
         return None
 
+# V86 - Fonction de modification du SL (utilisée par check_breakeven_simple)
+def modify_trade_sl_v76(trade_id: str, pair: str, new_sl: float) -> bool:
+    """
+    Modifie le Stop Loss d'un trade existant.
+    Retourne True si succès.
+    """
+    try:
+        api = v76_client()
+        # On crée une requête de modification du SL
+        # Note : on peut aussi utiliser la méthode order.put() mais on va faire simple
+        # avec un StopLossOrderRequest
+        order_data = {
+            "order": {
+                "type": "STOP_LOSS",
+                "tradeID": trade_id,
+                "price": round_price_v76(pair, new_sl),
+                "timeInForce": "GTC"
+            }
+        }
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+        resp = api.request(r)
+        if resp.get("orderRejectTransaction"):
+            logger.error(f"SL modification rejected for trade {trade_id}: {resp.get('orderRejectTransaction')}")
+            return False
+        logger.info(f"SL modifié pour trade {trade_id} -> {new_sl}")
+        return True
+    except Exception as e:
+        logger.error(f"Erreur modification SL trade {trade_id}: {e}")
+        return False
 
 # =============================
-# LANCEMENT
+# MODIFICATION DE LA BOUCLE PRINCIPALE (V86)
 # =============================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V85 PROD (Smart Trailing)")
-    
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V86 (Trailing Stop OANDA)")
+
     api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
-    
+
     while True:
         try:
             clear_scan_cache_v83()
@@ -5410,7 +5387,8 @@ if __name__ == "__main__":
                 time.sleep(300)
                 continue
 
-            manage_open_trades_v76()
+            # V86 : Vérification du Break Even (et uniquement cela)
+            check_breakeven_simple()
 
             current_open_count_v83 = open_trade_count_v76()
             if current_open_count_v83 >= MAX_TRADES_TOTAL:
