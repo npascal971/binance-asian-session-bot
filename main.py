@@ -4459,7 +4459,7 @@ ONE_TRADE_PER_PAIR = os.getenv("ONE_TRADE_PER_PAIR", "true").lower() == "true"
 
 BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))  # V83
 BREAKEVEN_OFFSET_PIPS = float(os.getenv("BREAKEVEN_OFFSET_PIPS", "1.0"))
-TRAILING_START_R = float(os.getenv("TRAILING_START_R", "1.0"))  # V83
+TRAILING_START_R = float(os.getenv("TRAILING_START_R", "1.5"))  # V85 : déclenchement du trailing à partir de 1.5R
 SWING_LOOKBACK_V76 = int(os.getenv("SWING_LOOKBACK_V76", "3"))
 SWING_BUFFER_PIPS = float(os.getenv("SWING_BUFFER_PIPS", "1.5"))
 
@@ -4468,14 +4468,14 @@ PIP_SIZE_V76 = {
     "USD_CAD": 0.0001, "AUD_CAD": 0.0001,
     "USD_JPY": 0.01, "AUD_JPY": 0.01, "GBP_JPY": 0.01,
     "XAU_USD": 0.01,
-    "NAS100_USD": 0.1, "US30_USD": 1.0, "SPX500_USD": 0.1,  # V83
+    "NAS100_USD": 0.1, "US30_USD": 1.0, "SPX500_USD": 0.1,
 }
 PRICE_DECIMALS_V76 = {
     "EUR_USD": 5, "GBP_USD": 5, "AUD_USD": 5,
     "USD_CAD": 5, "AUD_CAD": 5,
     "USD_JPY": 3, "AUD_JPY": 3, "GBP_JPY": 3,
     "XAU_USD": 3,
-    "NAS100_USD": 1, "US30_USD": 1, "SPX500_USD": 1,  # V83
+    "NAS100_USD": 1, "US30_USD": 1, "SPX500_USD": 1,
 }
 MIN_UNITS_V76 = {"XAU_USD": 0.1, "DEFAULT": 1000}
 
@@ -4491,17 +4491,17 @@ UNIT_STEP_BY_PAIR = {
     "AUD_CAD": 1000,
     "AUD_JPY": 1000,
     "GBP_JPY": 1000,
-    "NAS100_USD": 1,  # V83
-    "US30_USD": 1,  # V83
-    "SPX500_USD": 1,  # V83
+    "NAS100_USD": 1,
+    "US30_USD": 1,
+    "SPX500_USD": 1,
     "DEFAULT": 1000,
 }
 
 MIN_UNITS_BY_PAIR = {
     "XAU_USD": 1,
-    "NAS100_USD": 1,  # V83
-    "US30_USD": 1,  # V83
-    "SPX500_USD": 1,  # V83
+    "NAS100_USD": 1,
+    "US30_USD": 1,
+    "SPX500_USD": 1,
     "DEFAULT": 1000,
 }
 
@@ -4515,16 +4515,16 @@ MAX_UNITS_BY_PAIR = {
     "AUD_CAD": 200000,
     "AUD_JPY": 200000,
     "GBP_JPY": 200000,
-    "NAS100_USD": 50,  # V83
-    "US30_USD": 20,  # V83
-    "SPX500_USD": 50,  # V83
+    "NAS100_USD": 50,
+    "US30_USD": 20,
+    "SPX500_USD": 50,
     "DEFAULT": 200000,
 }
 
 MAX_MARGIN_USAGE_PER_TRADE_PERCENT = float(os.getenv("MAX_MARGIN_USAGE_PER_TRADE_PERCENT", "5.0"))
-OANDA_CACHE_TTL_SECONDS_V83 = float(os.getenv("OANDA_CACHE_TTL_SECONDS_V83", "3.0"))  # V83
-_OANDA_CACHE_V83 = {}  # V83
-_INITIAL_RISK_BY_TRADE_V83 = {}  # V83
+OANDA_CACHE_TTL_SECONDS_V83 = float(os.getenv("OANDA_CACHE_TTL_SECONDS_V83", "3.0"))
+_OANDA_CACHE_V83 = {}
+_INITIAL_RISK_BY_TRADE_V83 = {}
 
 
 
@@ -4544,7 +4544,7 @@ def v76_client():
     return oandapyV20.API(access_token=token, environment=OANDA_ENVIRONMENT)
 
 
-def _cache_get_v83(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V83):  # V83
+def _cache_get_v83(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V83):
     item = _OANDA_CACHE_V83.get(key)
     if not item:
         return None
@@ -4555,12 +4555,12 @@ def _cache_get_v83(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V83): 
     return value
 
 
-def _cache_set_v83(key: str, value):  # V83
+def _cache_set_v83(key: str, value):
     _OANDA_CACHE_V83[key] = (time.time(), value)
     return value
 
 
-def clear_scan_cache_v83():  # V83
+def clear_scan_cache_v83():
     _OANDA_CACHE_V83.clear()
 
 def is_market_open_utc_v76(now_dt: datetime) -> bool:
@@ -4591,9 +4591,9 @@ def oanda_safe_request_v76(endpoint, label: str = ""):
         return None
 
 def get_account_summary_v76() -> dict:
-    cached = _cache_get_v83("account_summary")  # V83
-    if cached is not None:  # V83
-        return cached  # V83
+    cached = _cache_get_v83("account_summary")
+    if cached is not None:
+        return cached
     r = accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID)
     resp = oanda_safe_request_v76(r, "AccountSummary")
     if not resp:
@@ -4605,13 +4605,13 @@ def get_account_summary_v76() -> dict:
         f"openTradeCount={acc.get('openTradeCount')} openPositionCount={acc.get('openPositionCount')} "
         f"lastTransactionID={resp.get('lastTransactionID') or acc.get('lastTransactionID')}"
     )
-    return _cache_set_v83("account_summary", resp)  # V83
+    return _cache_set_v83("account_summary", resp)
 
 
 def get_account_summary_v76() -> dict:
-    cached = _cache_get_v83("account_summary")  # V83
-    if cached is not None:  # V83
-        return cached  # V83
+    cached = _cache_get_v83("account_summary")
+    if cached is not None:
+        return cached
     r = accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID)
     resp = oanda_safe_request_v76(r, "AccountSummary")
     if not resp:
@@ -4623,7 +4623,7 @@ def get_account_summary_v76() -> dict:
         f"openTradeCount={acc.get('openTradeCount')} openPositionCount={acc.get('openPositionCount')} "
         f"lastTransactionID={resp.get('lastTransactionID') or acc.get('lastTransactionID')}"
     )
-    return _cache_set_v83("account_summary", resp)  # V83
+    return _cache_set_v83("account_summary", resp)
 
 
 def get_balance_v76() -> float:
@@ -4639,15 +4639,15 @@ def get_open_trades_v76(log_raw: bool = False) -> list:
     V78: lecture officielle OpenTrades, comme V75.
     Ne bloque que si OANDA renvoie un trade avec currentUnits non nul.
     """
-    cache_key = "open_trades_raw"  # V83
-    resp = _cache_get_v83(cache_key)  # V83
-    if resp is None:  # V83
+    cache_key = "open_trades_raw"
+    resp = _cache_get_v83(cache_key)
+    if resp is None:
         r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
         resp = oanda_safe_request_v76(r, "OpenTrades")
         if resp:
-            _cache_set_v83(cache_key, resp)  # V83
+            _cache_set_v83(cache_key, resp)
     if not resp:
-        logger.warning("[RISK] OPEN TRADES response missing; using empty list to avoid false blocking.")  # V83
+        logger.warning("[RISK] OPEN TRADES response missing; using empty list to avoid false blocking.")
         return []
 
     raw_trades = resp.get("trades", []) or []
@@ -4675,13 +4675,13 @@ def get_open_trades_v76(log_raw: bool = False) -> list:
 def get_open_positions_v76(log_raw: bool = False) -> list:
     """Lecture OpenPositions pour confirmer l'état réel du compte, comme V75."""
     try:
-        cache_key = "open_positions_raw"  # V83
-        resp = _cache_get_v83(cache_key)  # V83
-        if resp is None:  # V83
+        cache_key = "open_positions_raw"
+        resp = _cache_get_v83(cache_key)
+        if resp is None:
             r = positions.OpenPositions(accountID=OANDA_ACCOUNT_ID)
             resp = oanda_safe_request_v76(r, "OpenPositions")
             if resp:
-                _cache_set_v83(cache_key, resp)  # V83
+                _cache_set_v83(cache_key, resp)
         if not resp:
             return []
         open_positions = resp.get("positions", []) or []
@@ -4802,9 +4802,9 @@ def get_fx_rate_to_usd_v76(currency: str) -> float:
     """Retourne la valeur USD de 1 unité de devise 'currency'."""
     if currency == "USD":
         return 1.0
-    cached = _cache_get_v83(f"fx_to_usd:{currency}", ttl_seconds=60.0)  # V83
-    if cached is not None:  # V83
-        return float(cached)  # V83
+    cached = _cache_get_v83(f"fx_to_usd:{currency}", ttl_seconds=60.0)
+    if cached is not None:
+        return float(cached)
     # Exemples utiles pour nos paires : JPY via USD_JPY, CAD via USD_CAD
     direct = f"{currency}_USD"
     inverse = f"USD_{currency}"
@@ -4813,12 +4813,12 @@ def get_fx_rate_to_usd_v76(currency: str) -> float:
             api = v76_client()
             df = get_candles_with_retry(api, direct, "M5", 10)
             if df is not None and not df.empty:
-                return float(_cache_set_v83(f"fx_to_usd:{currency}", float(df["close"].iloc[-1])))  # V83
+                return float(_cache_set_v83(f"fx_to_usd:{currency}", float(df["close"].iloc[-1])))
         if inverse in PAIR_LIST:
             api = v76_client()
             df = get_candles_with_retry(api, inverse, "M5", 10)
             if df is not None and not df.empty:
-                return float(_cache_set_v83(f"fx_to_usd:{currency}", 1.0 / float(df["close"].iloc[-1])))  # V83
+                return float(_cache_set_v83(f"fx_to_usd:{currency}", 1.0 / float(df["close"].iloc[-1])))
     except Exception:
         pass
     logger.warning(f"⚠️ V78 conversion {currency}->USD inconnue, fallback 1.0")
@@ -4831,16 +4831,16 @@ def get_oanda_margin_rate_v78(pair: str) -> float:
     Retourne la marge requise OANDA approximative.
     Si l'info instrument est inaccessible, fallback conservateur 3.33%.
     """
-    cached = _cache_get_v83(f"instrument:{pair}", ttl_seconds=300.0)  # V83
-    if cached is not None:  # V83
-        return float(cached.get("marginRate", 0.0333) or 0.0333)  # V83
+    cached = _cache_get_v83(f"instrument:{pair}", ttl_seconds=300.0)
+    if cached is not None:
+        return float(cached.get("marginRate", 0.0333) or 0.0333)
     try:
         api = v76_client()
         r = accounts.AccountInstruments(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
         resp = api.request(r)
         instruments_data = resp.get("instruments", [])
         if instruments_data:
-            _cache_set_v83(f"instrument:{pair}", instruments_data[0])  # V83
+            _cache_set_v83(f"instrument:{pair}", instruments_data[0])
             margin_rate = float(instruments_data[0].get("marginRate", 0.0333))
             if margin_rate > 0:
                 return margin_rate
@@ -4849,7 +4849,7 @@ def get_oanda_margin_rate_v78(pair: str) -> float:
     return 0.0333
 
 
-def get_available_margin_v83(account_summary: dict | None = None) -> float:  # V83
+def get_available_margin_v83(account_summary: dict | None = None) -> float:
     account_summary = account_summary or get_account_summary_v76()
     account = account_summary.get("account", {}) if isinstance(account_summary, dict) else {}
     for key in ("marginAvailable", "NAV", "balance"):
@@ -4862,7 +4862,7 @@ def get_available_margin_v83(account_summary: dict | None = None) -> float:  # V
     return 0.0
 
 
-def calculate_margin(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:  # V83
+def calculate_margin(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:
     margin_required = estimate_margin_used_v78(pair, units, entry_price)
     available = get_available_margin_v83(account_summary)
     return {
@@ -4875,7 +4875,7 @@ def calculate_margin(pair: str, units: int, entry_price: float, account_summary:
     }
 
 
-def risk_report(pair: str, entry: float, stop_loss: float, units: int, balance: float) -> dict:  # V83
+def risk_report(pair: str, entry: float, stop_loss: float, units: int, balance: float) -> dict:
     quote_to_usd = get_fx_rate_to_usd_v76(quote_currency_v76(pair))
     risk_per_unit_usd = abs(float(entry) - float(stop_loss)) * quote_to_usd
     estimated_risk = abs(int(units or 0)) * risk_per_unit_usd
@@ -4938,10 +4938,10 @@ def cap_units_by_margin_v78(pair: str, units: int, entry_price: float, balance: 
     if units <= 0 or balance <= 0:
         return 0
 
-    margin_info = calculate_margin(pair, units, entry_price)  # V83
-    account_available = margin_info["margin_available"]  # V83
-    max_margin_usd = min(balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0), account_available) if account_available > 0 else balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0)  # V83
-    estimated_margin = margin_info["margin_required"]  # V83
+    margin_info = calculate_margin(pair, units, entry_price)
+    account_available = margin_info["margin_available"]
+    max_margin_usd = min(balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0), account_available) if account_available > 0 else balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0)
+    estimated_margin = margin_info["margin_required"]
 
     if estimated_margin <= max_margin_usd:
         return units
@@ -5027,7 +5027,7 @@ def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: floa
         f"estimated_risk=${estimated_risk:.2f} ({estimated_risk_pct:.2f}%) "
         f"estimated_margin=${estimated_margin:.2f} ({margin_pct:.2f}%)"
     )
-    risk_report(pair, entry, stop_loss, units, balance)  # V83
+    risk_report(pair, entry, stop_loss, units, balance)
 
     return int(units)
 
@@ -5040,7 +5040,7 @@ def get_recent_m5_price_v76(pair: str) -> float:
     return float(df["close"].iloc[-1])
 
 
-def get_price_spread_v83(pair: str) -> dict:  # V83
+def get_price_spread_v83(pair: str) -> dict:
     cached = _cache_get_v83(f"pricing:{pair}", ttl_seconds=2.0)
     if cached is not None:
         return cached
@@ -5063,7 +5063,7 @@ def get_price_spread_v83(pair: str) -> dict:  # V83
     return {"bid": fallback_price, "ask": fallback_price, "mid": fallback_price, "spread": fallback_spread}
 
 
-def get_atr_m15_v83(pair: str) -> float:  # V83
+def get_atr_m15_v83(pair: str) -> float:
     cached = _cache_get_v83(f"atr_m15:{pair}", ttl_seconds=60.0)
     if cached is not None:
         return float(cached)
@@ -5074,16 +5074,207 @@ def get_atr_m15_v83(pair: str) -> float:  # V83
     atr = float(calculate_atr(df, ATR_PERIOD) or 0.0)
     return float(_cache_set_v83(f"atr_m15:{pair}", atr))
 
+# ============================================================
+# V85 - SMART TRAILING STOP (remplacement du trailing statique)
+# ============================================================
+
+def compute_swing_sl(pair: str, direction: str, current_price: float, atr: float) -> float | None:
+    """
+    Calcule un SL basé sur les derniers swings M5.
+    Pour BUY : SL = dernier swing low - buffer (0.5 ATR)
+    Pour SELL : SL = dernier swing high + buffer (0.5 ATR)
+    Retourne None si pas de swing trouvé.
+    """
+    api = v76_client()
+    df = get_candles_with_retry(api, pair, "M5", 90)
+    if df is None or df.empty or len(df) < 20:
+        return None
+    pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
+    buffer = max(0.5 * atr, SWING_BUFFER_PIPS * pip)
+    lookback = SWING_LOOKBACK_V76
+
+    if direction == "BUY":
+        lows = df["low"].values
+        # Parcours en arrière pour trouver le dernier swing low
+        for i in range(len(df) - 2 - lookback, lookback, -1):
+            window = lows[i - lookback : i + lookback + 1]
+            if lows[i] == window.min():
+                return float(lows[i] - buffer)
+        return None
+    else:  # SELL
+        highs = df["high"].values
+        for i in range(len(df) - 2 - lookback, lookback, -1):
+            window = highs[i - lookback : i + lookback + 1]
+            if highs[i] == window.max():
+                return float(highs[i] + buffer)
+        return None
+
+
+def move_sl_to_breakeven_v85(trade: dict, current_r: float, current_sl: float) -> bool:
+    """
+    Déplace le SL au breakeven + offset si R >= BREAKEVEN_TRIGGER_R.
+    Retourne True si modifié.
+    """
+    if current_r < BREAKEVEN_TRIGGER_R:
+        return False
+    trade_id = str(trade.get("id"))
+    pair = trade.get("instrument")
+    direction = trade_direction_v76(trade)
+    entry = float(trade.get("price"))
+    spread = get_price_spread_v83(pair)["spread"]
+    pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
+    offset = max(spread, BREAKEVEN_OFFSET_PIPS * pip)
+    be_sl = entry + offset if direction == "BUY" else entry - offset
+    # Vérifier si le nouveau SL est amélioré (plus proche du prix pour BUY, plus bas pour SELL)
+    if direction == "BUY" and current_sl >= be_sl:
+        return False
+    if direction == "SELL" and current_sl <= be_sl:
+        return False
+    logger.info(f"[RISK] V85 BREAKEVEN {pair}: SL {current_sl} -> {be_sl} at R={current_r:.2f}")
+    return modify_trade_sl_v76(trade_id, pair, be_sl)
+
+
+def lock_profit_v85(trade: dict, current_r: float, current_sl: float) -> bool:
+    """
+    Verrouille des gains progressifs :
+    - R >= 1.5 → SL à 0.5R (entry ± 0.5*risk)
+    - R >= 2.0 → SL à 1.0R (entry ± 1.0*risk)
+    Retourne True si modifié.
+    """
+    trade_id = str(trade.get("id"))
+    pair = trade.get("instrument")
+    direction = trade_direction_v76(trade)
+    entry = float(trade.get("price"))
+    initial_risk = _INITIAL_RISK_BY_TRADE_V83.get(trade_id, None)
+    if initial_risk is None:
+        # estimation à partir du SL actuel si non trouvé
+        sl_price = trade.get("stopLossOrder", {}).get("price")
+        if sl_price:
+            initial_risk = abs(entry - float(sl_price))
+            _INITIAL_RISK_BY_TRADE_V83[trade_id] = initial_risk
+        else:
+            return False
+    if initial_risk <= 0:
+        return False
+
+    new_sl = None
+    if current_r >= 2.0:
+        # verrouiller 1R
+        new_sl = entry + initial_risk if direction == "BUY" else entry - initial_risk
+    elif current_r >= 1.5:
+        # verrouiller 0.5R
+        new_sl = entry + 0.5 * initial_risk if direction == "BUY" else entry - 0.5 * initial_risk
+
+    if new_sl is None:
+        return False
+
+    # Vérifier si le nouveau SL est plus favorable que l'actuel
+    if direction == "BUY" and new_sl <= current_sl:
+        return False
+    if direction == "SELL" and new_sl >= current_sl:
+        return False
+
+    logger.info(f"[RISK] V85 LOCK PROFIT {pair}: SL {current_sl} -> {new_sl} at R={current_r:.2f}")
+    return modify_trade_sl_v76(trade_id, pair, new_sl)
+
+
+def trail_to_swing_v85(trade: dict, current_r: float, current_sl: float, atr: float) -> bool:
+    """
+    Trailing basé sur les swings : déplace le SL vers le dernier swing si cela améliore la position,
+    seulement si R >= TRAILING_START_R (1.5 par défaut).
+    """
+    if current_r < TRAILING_START_R:
+        return False
+
+    pair = trade.get("instrument")
+    direction = trade_direction_v76(trade)
+    current_price = get_recent_m5_price_v76(pair)
+    if current_price <= 0:
+        return False
+
+    swing_sl = compute_swing_sl(pair, direction, current_price, atr)
+    if swing_sl is None:
+        return False
+
+    # Vérifier si le nouveau SL est meilleur (plus proche du prix pour BUY, plus bas ; plus haut pour SELL)
+    if direction == "BUY" and swing_sl > current_sl and swing_sl < current_price:
+        # On ne dépasse pas le prix
+        pass
+    elif direction == "SELL" and swing_sl < current_sl and swing_sl > current_price:
+        pass
+    else:
+        return False
+
+    # Vérifier une amélioration significative (éviter les micro-déplacements)
+    pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
+    if abs(swing_sl - current_sl) < pip * 2:
+        return False
+
+    logger.info(f"[RISK] V85 TRAIL SWING {pair}: SL {current_sl} -> {swing_sl} at R={current_r:.2f}")
+    return modify_trade_sl_v76(str(trade.get("id")), pair, swing_sl)
+
+
+def manage_open_trades_v76():
+    """
+    V85 : gestion intelligente des trades ouverts.
+    - Break-even à +0.8R
+    - Lock de profits à +1.5R et +2R
+    - Trailing basé sur les swings à partir de +1.5R
+    """
+    open_trades = get_open_trades_v76()
+    if not open_trades:
+        logger.info("V85 TRADE MANAGER: aucun trade ouvert.")
+        return
+
+    for t in open_trades:
+        try:
+            trade_id = str(t.get("id"))
+            pair = t.get("instrument")
+            direction = trade_direction_v76(t)
+            entry = float(t.get("price"))
+            sl_order = t.get("stopLossOrder", {}) or {}
+            if not sl_order.get("price"):
+                continue
+            current_sl = float(sl_order["price"])
+            current_r = trade_current_r_v76(t)
+            if current_r is None:
+                continue
+
+            # Mise à jour du risque initial si manquant
+            if trade_id not in _INITIAL_RISK_BY_TRADE_V83:
+                initial_risk = abs(entry - current_sl)
+                if initial_risk > 0:
+                    _INITIAL_RISK_BY_TRADE_V83[trade_id] = initial_risk
+
+            logger.info(f"V85 TRADE MANAGER {pair} id={trade_id} dir={direction} R={current_r:.2f} SL={current_sl}")
+
+            # Étape 1 : Break-even
+            if move_sl_to_breakeven_v85(t, current_r, current_sl):
+                _OANDA_CACHE_V83.pop("open_trades_raw", None)
+                continue  # on passe au trade suivant après modification
+
+            # Étape 2 : Lock progressif des profits
+            if lock_profit_v85(t, current_r, current_sl):
+                _OANDA_CACHE_V83.pop("open_trades_raw", None)
+                continue
+
+            # Étape 3 : Trailing basé sur les swings (si R >= TRAILING_START_R)
+            atr = get_atr_m15_v83(pair)
+            if trail_to_swing_v85(t, current_r, current_sl, atr):
+                _OANDA_CACHE_V83.pop("open_trades_raw", None)
+                continue
+
+        except Exception as e:
+            logger.error(f"Erreur V85 trade manager: {e}")
+            logger.error(traceback.format_exc())
 
 
 def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_loss: float,
                             take_profit: float, score: int, entry_type: str) -> str | None:
     """
-    V78: exécution reprise dans l'esprit de la V75.
-    Objectif: ne plus s'arrêter silencieusement après openTrades.
-    Chaque étape critique est loggée.
+    V85 : suppression du trailingStopLossOnFill, gestion manuelle assurée par manage_open_trades_v76.
     """
-    logger.info(f"V78 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"V85 EXECUTION START {pair} {direction} type={entry_type} score={score}")
     logger.info(
         f"DEBUG EXEC INPUT | pair={pair} direction={direction} entry={round_price_v76(pair, entry_price)} "
         f"SL={round_price_v76(pair, stop_loss)} TP={round_price_v76(pair, take_profit)} "
@@ -5108,24 +5299,24 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
     balance = get_balance_v76()
     logger.info(f"DEBUG STEP balance={balance}")
     if balance <= 0:
-        logger.error("V78: balance invalide, ordre annulé.")
+        logger.error("V85: balance invalide, ordre annulé.")
         return None
 
     units = calculate_units_v76(pair, entry_price, stop_loss, balance)
     logger.info(f"DEBUG STEP calculated_units={units}")
     if not units or float(units) <= 0:
-        logger.error(f"V78: units invalides pour {pair}: {units}")
+        logger.error(f"V85: units invalides pour {pair}: {units}")
         return None
-    margin_info = calculate_margin(pair, units, entry_price)  # V83
+    margin_info = calculate_margin(pair, units, entry_price)
     logger.info(
         f"[RISK] {pair} margin_required=${margin_info['margin_required']:.2f} "
         f"available=${margin_info['margin_available']:.2f} sufficient={margin_info['sufficient']}"
-    )  # V83
-    if not margin_info["sufficient"]:  # V83
-        units = cap_units_by_margin_v78(pair, units, entry_price, balance)  # V83
-        if not units or units <= 0:  # V83
-            logger.error(f"[RISK] {pair} order blocked: insufficient margin after unit reduction.")  # V83
-            return None  # V83
+    )
+    if not margin_info["sufficient"]:
+        units = cap_units_by_margin_v78(pair, units, entry_price, balance)
+        if not units or units <= 0:
+            logger.error(f"[RISK] {pair} order blocked: insufficient margin after unit reduction.")
+            return None
 
     signed_units = units if direction == "BUY" else -units
     order_data = {
@@ -5136,13 +5327,14 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
             "positionFill": "DEFAULT",
             "stopLossOnFill": {"price": round_price_v76(pair, stop_loss), "timeInForce": "GTC"},
             "takeProfitOnFill": {"price": round_price_v76(pair, take_profit), "timeInForce": "GTC"},
+            # "trailingStopLossOnFill" est volontairement supprimé
         }
     }
 
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
     logger.info(
-        f"SIGNAL V78 {pair} {direction} | "
+        f"SIGNAL V85 {pair} {direction} | "
         f"entry≈{round_price_v76(pair, entry_price)} SL={round_price_v76(pair, stop_loss)} "
         f"TP={round_price_v76(pair, take_profit)} RR={rr:.2f} score={score} "
         f"units={units} signed_units={signed_units} type={entry_type}"
@@ -5186,8 +5378,8 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
         open_after = get_open_trades_v76(log_raw=True)
         opened_for_pair = [t for t in open_after if t.get("instrument") == pair]
         if opened_for_pair:
-            actual_trade_id = str(opened_for_pair[0].get("id") or trade_id)  # V83
-            _INITIAL_RISK_BY_TRADE_V83[actual_trade_id] = abs(float(opened_for_pair[0].get("price", entry_price)) - float(stop_loss))  # V83
+            actual_trade_id = str(opened_for_pair[0].get("id") or trade_id)
+            _INITIAL_RISK_BY_TRADE_V83[actual_trade_id] = abs(float(opened_for_pair[0].get("price", entry_price)) - float(stop_loss))
             logger.info(f"CONFIRMATION OPEN TRADE {pair}: {compact_json_v76(opened_for_pair)}")
         else:
             logger.warning(f"ATTENTION {pair}: ordre accepté mais OpenTrades ne montre pas encore la position.")
@@ -5200,151 +5392,18 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
         log_account_snapshot_v76("EXCEPTION_ORDER_CREATE")
         return None
 
-def trade_direction_v76(trade: dict) -> str:
-    return "BUY" if float(trade.get("currentUnits", 0)) > 0 else "SELL"
-
-
-def trade_current_r_v76(trade: dict) -> float | None:
-    pair = trade.get("instrument")
-    price_info = get_price_spread_v83(pair)  # V83
-    price = price_info["bid"] if trade_direction_v76(trade) == "BUY" else price_info["ask"]  # V83
-    if not price:
-        return None
-    entry = float(trade.get("price", 0))
-    sl_order = trade.get("stopLossOrder", {}) or {}
-    if not sl_order.get("price"):
-        return None
-    current_sl = float(sl_order["price"])
-    trade_id = str(trade.get("id", ""))  # V83
-    initial_risk = float(_INITIAL_RISK_BY_TRADE_V83.get(trade_id) or abs(entry - current_sl))  # V83
-    if trade_id and trade_id not in _INITIAL_RISK_BY_TRADE_V83 and initial_risk > 0:  # V83
-        _INITIAL_RISK_BY_TRADE_V83[trade_id] = initial_risk  # V83
-    if initial_risk <= 0:
-        return None
-    direction = trade_direction_v76(trade)
-    gain = (price - entry) if direction == "BUY" else (entry - price)
-    return gain / initial_risk
-
-
-def find_last_swing_sl_v76(pair: str, direction: str) -> float | None:
-    api = v76_client()
-    df = get_candles_with_retry(api, pair, "M5", 90)
-    if df is None or df.empty or len(df) < 20:
-        return None
-    pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
-    buffer = SWING_BUFFER_PIPS * pip
-    if direction == "BUY":
-        lows = df["low"].values
-        for i in range(len(df) - 2 - SWING_LOOKBACK_V76, SWING_LOOKBACK_V76, -1):
-            window = lows[i-SWING_LOOKBACK_V76:i+SWING_LOOKBACK_V76+1]
-            if lows[i] == window.min():
-                return float(lows[i] - buffer)
-    else:
-        highs = df["high"].values
-        for i in range(len(df) - 2 - SWING_LOOKBACK_V76, SWING_LOOKBACK_V76, -1):
-            window = highs[i-SWING_LOOKBACK_V76:i+SWING_LOOKBACK_V76+1]
-            if highs[i] == window.max():
-                return float(highs[i] + buffer)
-    return None
-
-
-def modify_trade_sl_v76(trade_id: str, pair: str, new_sl: float) -> bool:
-    data = {"stopLoss": {"price": round_price_v76(pair, new_sl), "timeInForce": "GTC"}}
-    r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
-    resp = oanda_safe_request_v76(r, f"TradeCRCDO {trade_id}")
-    logger.info(f"V76 SL UPDATE RESPONSE={resp}")
-    return bool(resp)
-
-
-def move_break_even(trade: dict, current_r: float, current_sl: float) -> bool:  # V83
-    if current_r < BREAKEVEN_TRIGGER_R:
-        return False
-    trade_id = str(trade.get("id"))
-    pair = trade.get("instrument")
-    direction = trade_direction_v76(trade)
-    entry = float(trade.get("price"))
-    spread = get_price_spread_v83(pair)["spread"]
-    pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
-    offset = max(spread, BREAKEVEN_OFFSET_PIPS * pip)
-    be_sl = entry + offset if direction == "BUY" else entry - offset
-    if direction == "BUY" and current_sl >= be_sl:
-        return False
-    if direction == "SELL" and current_sl <= be_sl:
-        return False
-    logger.info(f"[RISK] V83 BREAKEVEN {pair}: SL {current_sl} -> {be_sl} at R={current_r:.2f}")
-    return modify_trade_sl_v76(trade_id, pair, be_sl)
-
-
-def update_trailing(trade: dict, current_r: float) -> bool:  # V83
-    if current_r < TRAILING_START_R:
-        return False
-    trade_id = str(trade.get("id"))
-    pair = trade.get("instrument")
-    atr_m15 = get_atr_m15_v83(pair)
-    spread = get_price_spread_v83(pair)["spread"]
-    distance = max(atr_m15 * 1.4, spread * 8.0)
-    if distance <= 0:
-        logger.warning(f"[RISK] V83 trailing skipped {pair}: invalid distance atr={atr_m15} spread={spread}")
-        return False
-    existing = trade.get("trailingStopLossOrder", {}) or {}
-    existing_distance = float(existing.get("distance", 0) or 0)
-    pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
-    if existing_distance and abs(existing_distance - distance) < pip:
-        return False
-    data = {"trailingStopLoss": {"distance": round_price_v76(pair, distance), "timeInForce": "GTC"}}
-    r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
-    resp = oanda_safe_request_v76(r, f"TrailingStopLoss {trade_id}")
-    if resp:
-        action = "UPDATED" if existing else "CREATED"
-        logger.info(f"[RISK] V83 TRAILING {action} {pair}: distance={distance:.6f} atr_m15={atr_m15:.6f} spread={spread:.6f} R={current_r:.2f}")
-        _OANDA_CACHE_V83.pop("open_trades_raw", None)
-        return True
-    logger.error(f"[ERROR] V83 trailing failed {pair} trade={trade_id}")
-    return False
-
-
-def manage_open_trades_v76():
-    open_trades = get_open_trades_v76()
-    if not open_trades:
-        logger.info("V78 TRADE MANAGER: aucun trade ouvert.")
-        return
-
-    for t in open_trades:
-        try:
-            trade_id = str(t.get("id"))
-            pair = t.get("instrument")
-            direction = trade_direction_v76(t)
-            entry = float(t.get("price"))
-            sl_order = t.get("stopLossOrder", {}) or {}
-            if not sl_order.get("price"):
-                continue
-            current_sl = float(sl_order["price"])
-            current_r = trade_current_r_v76(t)
-            if current_r is None:
-                continue
-
-            logger.info(f"V78 TRADE MANAGER {pair} id={trade_id} dir={direction} R={current_r:.2f} SL={current_sl}")
-            if move_break_even(t, current_r, current_sl):  # V83
-                _OANDA_CACHE_V83.pop("open_trades_raw", None)  # V83
-                continue  # V83
-
-            update_trailing(t, current_r)  # V83
-        except Exception as e:
-            logger.error(f"Erreur V76 trade manager: {e}")
-            logger.error(traceback.format_exc())
-
 
 # =============================
 # LANCEMENT
 # =============================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V84 PROD")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V85 PROD (Smart Trailing)")
     
     api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
     
     while True:
         try:
-            clear_scan_cache_v83()  # V83
+            clear_scan_cache_v83()
             now_dt = datetime.utcnow()
             if not is_market_open_utc_v76(now_dt):
                 logger.info("Marché Forex fermé. Attente 5 minutes.")
@@ -5353,9 +5412,9 @@ if __name__ == "__main__":
 
             manage_open_trades_v76()
 
-            current_open_count_v83 = open_trade_count_v76()  # V83
+            current_open_count_v83 = open_trade_count_v76()
             if current_open_count_v83 >= MAX_TRADES_TOTAL:
-                logger.info(f"Limite trades ouverts atteinte ({current_open_count_v83}/{MAX_TRADES_TOTAL}). Scan entrées ignoré.")  # V83
+                logger.info(f"Limite trades ouverts atteinte ({current_open_count_v83}/{MAX_TRADES_TOTAL}). Scan entrées ignoré.")
                 time.sleep(300)
                 continue
 
