@@ -1,12 +1,10 @@
 # ============================================================
-# main(75).py - Version V87.1 (Break Even + Trailing OANDA natif avec confirmation)
+# main(75).py - Version V88.1 "Audit + API Officielle"
 # 
-# Modifications V87.1 :
-# - Break Even : utilisation de trades.TradeCRCDO (API officielle)
-# - Trailing Stop : création directe via orders.OrderCreate + relecture du trade
-# - Confirmation du SL avant de créer le trailing
-# - Confirmation du trailing après création
-# - Logs détaillés en cas d'échec
+# Modifications V88.1 :
+# - Modification du Stop Loss via trades.Trade.set_dependent_orders (API officielle)
+# - Création du Trailing Stop via trades.Trade.set_dependent_orders (API officielle)
+# - Trace complète de chaque étape
 # ============================================================
 
 import os
@@ -29,7 +27,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V87.1
+# CONFIGURATION V88.1
 # =========================
 load_dotenv()
 
@@ -39,8 +37,10 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 # Fichier de journal des décisions
 DECISION_JOURNAL = os.getenv("DECISION_JOURNAL", "decision_journal.json")
+# Fichier de trace des trades
+TRACE_JOURNAL = os.getenv("TRACE_JOURNAL", "trade_trace.json")
 
-# Seuils de score par paire (V87)
+# Seuils de score par paire
 MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "EUR_USD": 9,
     "GBP_USD": 9,
@@ -51,14 +51,59 @@ MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "DEFAULT": 8
 }
 
-# Configuration du trailing stop natif OANDA
 TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.3"))
 TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "5.0"))
 
 # =========================
-# LOG HELPERS (dé-dup + compact)
+# TRACE JOURNAL
 # =========================
+class TradeTracer:
+    def __init__(self):
+        self.traces = []
+        self._load()
+    
+    def _load(self):
+        try:
+            if os.path.exists(TRACE_JOURNAL):
+                with open(TRACE_JOURNAL, 'r') as f:
+                    data = json.load(f)
+                    self.traces = data.get("traces", [])
+        except Exception:
+            pass
+    
+    def _save(self):
+        try:
+            data = {
+                "traces": self.traces,
+                "last_update": datetime.utcnow().isoformat()
+            }
+            with open(TRACE_JOURNAL, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Impossible de sauvegarder la trace: {e}")
+    
+    def log_step(self, trade_id: str, step: str, details: dict, response: dict = None):
+        entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "trade_id": trade_id,
+            "step": step,
+            "details": details,
+            "response": response
+        }
+        self.traces.append(entry)
+        if len(self.traces) > 200:
+            self.traces = self.traces[-200:]
+        self._save()
+        if response:
+            logger.info(f"[TRACE] {step} | trade={trade_id} | {details} | response={json.dumps(response, default=str)[:200]}")
+        else:
+            logger.info(f"[TRACE] {step} | trade={trade_id} | {details}")
 
+tracer = TradeTracer()
+
+# =========================
+# LOG HELPERS
+# =========================
 _seen_log_keys_fvg_recent = set()
 _seen_log_keys_fvg_added  = set()
 _seen_log_keys_kept_entry = set()
@@ -84,15 +129,6 @@ def _log_fvg_added_once(pair: str, direction: str, level: float, fvg_type: str, 
     if key in _seen_log_keys_fvg_added:
         return
     _seen_log_keys_fvg_added.add(key)
-    logger.debug(msg)
-
-def _log_kept_entry_once(pair: str, level: float, status: str, dist: float, msg: str, precision: int = 5):
-    if not DEBUG_MODE:
-        return
-    key = (pair, round(float(level), precision), status)
-    if key in _seen_log_keys_kept_entry:
-        return
-    _seen_log_keys_kept_entry.add(key)
     logger.debug(msg)
 
 def _log_narrative_list(entries: list, top_n: int = 10):
@@ -239,7 +275,7 @@ SCORING_CONFIG = {
 }
 
 # =============================
-# STATISTIQUES (V87)
+# STATISTIQUES
 # =============================
 class TradingStats:
     def __init__(self):
@@ -344,7 +380,7 @@ class TradingStats:
 stats = TradingStats()
 
 # =============================
-# FONCTIONS UTILITAIRES (inchangées)
+# FONCTIONS UTILITAIRES
 # =============================
 def get_dynamic_max_distance(df: pd.DataFrame, pair: str, atr_multiplier: float = 1.5) -> float:
     if df is None or len(df) < 14:
@@ -535,7 +571,7 @@ def get_pair_settings(pair: str) -> dict:
     return PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
 # =============================
-# LOGGING (inchangé)
+# LOGGING
 # =============================
 LOG_ASCII_SAFE = os.getenv("LOG_ASCII_SAFE", "true").lower() == "true"
 
@@ -616,7 +652,7 @@ def repair_mojibake_v82(value) -> str:
     return text
 
 class ReadableLogFormatterV82(logging.Formatter):
-    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]")
+    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]")
     def _clean_message_v83(self, message: str, levelname: str) -> str:
         text = repair_mojibake_v82(str(message))
         text = "".join(ch for ch in text if ord(ch) < 128)
@@ -626,11 +662,17 @@ class ReadableLogFormatterV82(logging.Formatter):
             return text
         if levelname in ("ERROR", "CRITICAL"):
             tag = "[ERROR]"
+        elif "TRACE" in upper:
+            tag = "[TRACE]"
+        elif "BE" in upper or "BREAKEVEN" in upper:
+            tag = "[BE]"
+        elif "TSL" in upper or "TRAILING" in upper:
+            tag = "[TSL]"
         elif "SIGNAL" in upper:
             tag = "[SIGNAL]"
         elif "ORDER" in upper or "ORDRE" in upper or "EXECUTION" in upper or "/ORDERS" in upper:
             tag = "[ORDER]"
-        elif "RISK" in upper or "MARGIN" in upper or "UNITS" in upper or "BREAKEVEN" in upper or "TRAIL" in upper:
+        elif "RISK" in upper or "MARGIN" in upper or "UNITS" in upper:
             tag = "[RISK]"
         elif "SCAN" in upper or "ANALYSE" in upper:
             tag = "[SCAN]"
@@ -703,7 +745,7 @@ def mark_signal_sent(pair: str, direction: str, entry_level: float, zone_start: 
     logger.info(f"✅ Signal marqué comme envoyé : {key}")
 
 # =============================
-# INDICATEURS TECHNIQUES (unifiés)
+# INDICATEURS TECHNIQUES
 # =============================
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
@@ -1762,7 +1804,7 @@ def calculate_signal_confidence(
     }
 
 # ============================================================
-# V87 - DÉTECTION BIAS-FIRST
+# V88.1 - DÉTECTION BIAS-FIRST
 # ============================================================
 def detect_setups_aligned_with_bias(
     df_m15: pd.DataFrame,
@@ -1851,9 +1893,9 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # ============================================================
-# V87 - FONCTION PRINCIPALE AVEC STATS
+# V88.1 - FONCTION PRINCIPALE AVEC STATS
 # ============================================================
-def advanced_main_v87():
+def advanced_main_v881():
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
@@ -1947,7 +1989,7 @@ def advanced_main_v87():
                     stats.record_signal(pair, True, "demo_mode", entry_level, stop_loss, take_profit, score, direction)
                     nb_envoyes += 1
                     continue
-                trade_id = execute_oanda_trade_v87(
+                trade_id = execute_oanda_trade_v881(
                     pair=pair,
                     direction=direction,
                     entry_price=entry_level,
@@ -1980,7 +2022,7 @@ def advanced_main_v87():
     stats.log_summary()
 
 # ============================================================
-# V87.1 - OANDA EXECUTION AVEC TRAILING NATIF + CONFIRMATION
+# V88.1 - OANDA EXECUTION + API OFFICIELLE
 # ============================================================
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
@@ -1991,14 +2033,14 @@ MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "1250"))
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "9"))
 ONE_TRADE_PER_PAIR = os.getenv("ONE_TRADE_PER_PAIR", "true").lower() == "true"
 
-PIP_SIZE_V87 = {
+PIP_SIZE_V88 = {
     "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
     "USD_CAD": 0.0001, "AUD_CAD": 0.0001,
     "USD_JPY": 0.01, "AUD_JPY": 0.01, "GBP_JPY": 0.01,
     "XAU_USD": 0.01,
     "NAS100_USD": 0.1, "US30_USD": 1.0, "SPX500_USD": 0.1,
 }
-PRICE_DECIMALS_V87 = {
+PRICE_DECIMALS_V88 = {
     "EUR_USD": 5, "GBP_USD": 5, "AUD_USD": 5,
     "USD_CAD": 5, "AUD_CAD": 5,
     "USD_JPY": 3, "AUD_JPY": 3, "GBP_JPY": 3,
@@ -2026,34 +2068,34 @@ MAX_UNITS_BY_PAIR = {
 }
 
 MAX_MARGIN_USAGE_PER_TRADE_PERCENT = float(os.getenv("MAX_MARGIN_USAGE_PER_TRADE_PERCENT", "5.0"))
-OANDA_CACHE_TTL_SECONDS_V87 = float(os.getenv("OANDA_CACHE_TTL_SECONDS_V87", "3.0"))
-_OANDA_CACHE_V87 = {}
+OANDA_CACHE_TTL_SECONDS_V88 = float(os.getenv("OANDA_CACHE_TTL_SECONDS_V88", "3.0"))
+_OANDA_CACHE_V88 = {}
 
-def v87_client():
+def v88_client():
     token = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN")
     return oandapyV20.API(access_token=token, environment=OANDA_ENVIRONMENT)
 
-def _cache_get_v87(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V87):
-    item = _OANDA_CACHE_V87.get(key)
+def _cache_get_v88(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V88):
+    item = _OANDA_CACHE_V88.get(key)
     if not item:
         return None
     ts, value = item
     if time.time() - ts > ttl_seconds:
-        _OANDA_CACHE_V87.pop(key, None)
+        _OANDA_CACHE_V88.pop(key, None)
         return None
     return value
 
-def _cache_set_v87(key: str, value):
-    _OANDA_CACHE_V87[key] = (time.time(), value)
+def _cache_set_v88(key: str, value):
+    _OANDA_CACHE_V88[key] = (time.time(), value)
     return value
 
-def clear_scan_cache_v87():
-    _OANDA_CACHE_V87.clear()
+def clear_scan_cache_v88():
+    _OANDA_CACHE_V88.clear()
 
-def round_price_v87(pair: str, price: float) -> str:
-    return f"{float(price):.{PRICE_DECIMALS_V87.get(pair, 5)}f}"
+def round_price_v88(pair: str, price: float) -> str:
+    return f"{float(price):.{PRICE_DECIMALS_V88.get(pair, 5)}f}"
 
-def is_market_open_utc_v87(now_dt: datetime) -> bool:
+def is_market_open_utc_v88(now_dt: datetime) -> bool:
     wd = now_dt.weekday()
     t = now_dt.time()
     if wd == 5:
@@ -2064,39 +2106,39 @@ def is_market_open_utc_v87(now_dt: datetime) -> bool:
         return False
     return True
 
-def get_account_summary_v87() -> dict:
-    cached = _cache_get_v87("account_summary")
+def get_account_summary_v88() -> dict:
+    cached = _cache_get_v88("account_summary")
     if cached is not None:
         return cached
     r = accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID)
     try:
-        api = v87_client()
+        api = v88_client()
         resp = api.request(r)
         if not resp:
             return {}
-        _cache_set_v87("account_summary", resp)
+        _cache_set_v88("account_summary", resp)
         return resp
     except Exception as e:
         logger.error(f"❌ AccountSummary error: {e}")
         return {}
 
-def get_balance_v87() -> float:
-    resp = get_account_summary_v87()
+def get_balance_v88() -> float:
+    resp = get_account_summary_v88()
     try:
         return float(resp.get("account", {}).get("balance", 0))
     except Exception:
         return 0.0
 
-def get_open_trades_v87(log_raw: bool = False) -> list:
+def get_open_trades_v88(log_raw: bool = False) -> list:
     cache_key = "open_trades_raw"
-    resp = _cache_get_v87(cache_key)
+    resp = _cache_get_v88(cache_key)
     if resp is None:
         r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
         try:
-            api = v87_client()
+            api = v88_client()
             resp = api.request(r)
             if resp:
-                _cache_set_v87(cache_key, resp)
+                _cache_set_v88(cache_key, resp)
         except Exception:
             return []
     if not resp:
@@ -2112,56 +2154,56 @@ def get_open_trades_v87(log_raw: bool = False) -> list:
             open_trades.append(t)
     return open_trades
 
-def open_trade_count_v87() -> int:
-    return len(get_open_trades_v87(log_raw=True))
+def open_trade_count_v88() -> int:
+    return len(get_open_trades_v88(log_raw=True))
 
-def has_open_trade_v87(pair: str) -> bool:
-    for t in get_open_trades_v87():
+def has_open_trade_v88(pair: str) -> bool:
+    for t in get_open_trades_v88():
         if t.get("instrument") == pair:
             return True
     return False
 
-def quote_currency_v87(pair: str) -> str:
+def quote_currency_v88(pair: str) -> str:
     return pair.split("_")[1]
 
-def get_fx_rate_to_usd_v87(currency: str) -> float:
+def get_fx_rate_to_usd_v88(currency: str) -> float:
     if currency == "USD":
         return 1.0
-    cached = _cache_get_v87(f"fx_to_usd:{currency}", ttl_seconds=60.0)
+    cached = _cache_get_v88(f"fx_to_usd:{currency}", ttl_seconds=60.0)
     if cached is not None:
         return float(cached)
     direct = f"{currency}_USD"
     inverse = f"USD_{currency}"
     try:
         if direct in PAIR_LIST:
-            api = v87_client()
+            api = v88_client()
             df = get_candles_with_retry(api, direct, "M5", 10)
             if df is not None and not df.empty:
                 val = float(df["close"].iloc[-1])
-                _cache_set_v87(f"fx_to_usd:{currency}", val)
+                _cache_set_v88(f"fx_to_usd:{currency}", val)
                 return val
         if inverse in PAIR_LIST:
-            api = v87_client()
+            api = v88_client()
             df = get_candles_with_retry(api, inverse, "M5", 10)
             if df is not None and not df.empty:
                 val = 1.0 / float(df["close"].iloc[-1])
-                _cache_set_v87(f"fx_to_usd:{currency}", val)
+                _cache_set_v88(f"fx_to_usd:{currency}", val)
                 return val
     except Exception:
         pass
     return 1.0
 
-def get_oanda_margin_rate_v87(pair: str) -> float:
-    cached = _cache_get_v87(f"instrument:{pair}", ttl_seconds=300.0)
+def get_oanda_margin_rate_v88(pair: str) -> float:
+    cached = _cache_get_v88(f"instrument:{pair}", ttl_seconds=300.0)
     if cached is not None:
         return float(cached.get("marginRate", 0.0333) or 0.0333)
     try:
-        api = v87_client()
+        api = v88_client()
         r = accounts.AccountInstruments(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
         resp = api.request(r)
         instruments_data = resp.get("instruments", [])
         if instruments_data:
-            _cache_set_v87(f"instrument:{pair}", instruments_data[0])
+            _cache_set_v88(f"instrument:{pair}", instruments_data[0])
             margin_rate = float(instruments_data[0].get("marginRate", 0.0333))
             if margin_rate > 0:
                 return margin_rate
@@ -2169,8 +2211,8 @@ def get_oanda_margin_rate_v87(pair: str) -> float:
         pass
     return 0.0333
 
-def get_available_margin_v87(account_summary: dict | None = None) -> float:
-    account_summary = account_summary or get_account_summary_v87()
+def get_available_margin_v88(account_summary: dict | None = None) -> float:
+    account_summary = account_summary or get_account_summary_v88()
     account = account_summary.get("account", {}) if isinstance(account_summary, dict) else {}
     for key in ("marginAvailable", "NAV", "balance"):
         try:
@@ -2181,9 +2223,9 @@ def get_available_margin_v87(account_summary: dict | None = None) -> float:
             continue
     return 0.0
 
-def calculate_margin_v87(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:
-    margin_required = estimate_margin_used_v87(pair, units, entry_price)
-    available = get_available_margin_v87(account_summary)
+def calculate_margin_v88(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:
+    margin_required = estimate_margin_used_v88(pair, units, entry_price)
+    available = get_available_margin_v88(account_summary)
     return {
         "pair": pair,
         "units": abs(int(units or 0)),
@@ -2193,9 +2235,9 @@ def calculate_margin_v87(pair: str, units: int, entry_price: float, account_summ
         "sufficient": bool(available <= 0 or margin_required <= available),
     }
 
-def estimate_margin_used_v87(pair: str, units: int, entry_price: float) -> float:
+def estimate_margin_used_v88(pair: str, units: int, entry_price: float) -> float:
     units = abs(int(units))
-    margin_rate = get_oanda_margin_rate_v87(pair)
+    margin_rate = get_oanda_margin_rate_v88(pair)
     try:
         base, quote = pair.split("_")
     except Exception:
@@ -2207,21 +2249,21 @@ def estimate_margin_used_v87(pair: str, units: int, entry_price: float) -> float
     elif base == "USD":
         notional_usd = units
     else:
-        q_to_usd = get_fx_rate_to_usd_v87(quote)
+        q_to_usd = get_fx_rate_to_usd_v88(quote)
         notional_usd = units * entry_price * q_to_usd
     return float(notional_usd * margin_rate)
 
-def cap_units_absolute_v87(pair: str, units: int) -> int:
+def cap_units_absolute_v88(pair: str, units: int) -> int:
     max_units = MAX_UNITS_BY_PAIR.get(pair, MAX_UNITS_BY_PAIR["DEFAULT"])
     if units > max_units:
         logger.warning(f"ABS CAP {pair}: units {units} -> {max_units}")
         return max_units
     return units
 
-def cap_units_by_margin_v87(pair: str, units: int, entry_price: float, balance: float) -> int:
+def cap_units_by_margin_v88(pair: str, units: int, entry_price: float, balance: float) -> int:
     if units <= 0 or balance <= 0:
         return 0
-    margin_info = calculate_margin_v87(pair, units, entry_price)
+    margin_info = calculate_margin_v88(pair, units, entry_price)
     account_available = margin_info["margin_available"]
     max_margin_usd = min(balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0), account_available) if account_available > 0 else balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0)
     estimated_margin = margin_info["margin_required"]
@@ -2234,7 +2276,7 @@ def cap_units_by_margin_v87(pair: str, units: int, entry_price: float, balance: 
     logger.warning(f"MARGIN CAP {pair}: units {units} -> {capped}")
     return max(capped, 0)
 
-def calculate_units_v87(pair: str, entry: float, stop_loss: float, balance: float) -> float:
+def calculate_units_v88(pair: str, entry: float, stop_loss: float, balance: float) -> float:
     try:
         balance = float(balance)
         entry = float(entry)
@@ -2246,8 +2288,8 @@ def calculate_units_v87(pair: str, entry: float, stop_loss: float, balance: floa
     distance_quote = abs(entry - stop_loss)
     if balance <= 0 or risk_usd <= 0 or distance_quote <= 0:
         return 0
-    quote = quote_currency_v87(pair)
-    quote_to_usd = get_fx_rate_to_usd_v87(quote)
+    quote = quote_currency_v88(pair)
+    quote_to_usd = get_fx_rate_to_usd_v88(quote)
     if quote_to_usd <= 0:
         return 0
     risk_per_unit_usd = distance_quote * quote_to_usd
@@ -2257,16 +2299,16 @@ def calculate_units_v87(pair: str, entry: float, stop_loss: float, balance: floa
     step = UNIT_STEP_BY_PAIR.get(pair, UNIT_STEP_BY_PAIR["DEFAULT"])
     min_units = MIN_UNITS_BY_PAIR.get(pair, MIN_UNITS_BY_PAIR["DEFAULT"])
     units_before_caps = int(raw_units // step * step)
-    units = cap_units_absolute_v87(pair, units_before_caps)
-    units = cap_units_by_margin_v87(pair, units, entry, balance)
+    units = cap_units_absolute_v88(pair, units_before_caps)
+    units = cap_units_by_margin_v88(pair, units, entry, balance)
     if units < min_units:
         logger.warning(f"units trop faibles {pair}: {units} < min={min_units}")
         return 0
     return int(units)
 
-def get_recent_m5_price_v87(pair: str) -> float:
+def get_recent_m5_price_v88(pair: str) -> float:
     try:
-        api = v87_client()
+        api = v88_client()
         df = get_candles_with_retry(api, pair, "M5", 10)
         if df is None or df.empty:
             return 0.0
@@ -2274,12 +2316,12 @@ def get_recent_m5_price_v87(pair: str) -> float:
     except Exception:
         return 0.0
 
-def get_price_spread_v87(pair: str) -> dict:
-    cached = _cache_get_v87(f"pricing:{pair}", ttl_seconds=2.0)
+def get_price_spread_v88(pair: str) -> dict:
+    cached = _cache_get_v88(f"pricing:{pair}", ttl_seconds=2.0)
     if cached is not None:
         return cached
     try:
-        api = v87_client()
+        api = v88_client()
         r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
         resp = api.request(r)
         prices = resp.get("prices", []) or []
@@ -2289,149 +2331,189 @@ def get_price_spread_v87(pair: str) -> dict:
             ask = float(item.get("asks", [{}])[0].get("price", 0) or 0)
             mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0
             data = {"bid": bid, "ask": ask, "mid": mid, "spread": max(ask - bid, 0.0)}
-            _cache_set_v87(f"pricing:{pair}", data)
+            _cache_set_v88(f"pricing:{pair}", data)
             return data
     except Exception:
         pass
-    fallback_price = get_recent_m5_price_v87(pair)
+    fallback_price = get_recent_m5_price_v88(pair)
     return {"bid": fallback_price, "ask": fallback_price, "mid": fallback_price, "spread": 0.0}
 
-def get_atr_m15_v87(pair: str) -> float:
-    cached = _cache_get_v87(f"atr_m15:{pair}", ttl_seconds=60.0)
+def get_atr_m15_v88(pair: str) -> float:
+    cached = _cache_get_v88(f"atr_m15:{pair}", ttl_seconds=60.0)
     if cached is not None:
         return float(cached)
     try:
-        api = v87_client()
+        api = v88_client()
         df = get_candles_with_retry(api, pair, "M15", max(ATR_PERIOD + 10, 40))
         if df is None or df.empty:
             return 0.0
         atr = float(calculate_atr(df, ATR_PERIOD) or 0.0)
-        _cache_set_v87(f"atr_m15:{pair}", atr)
+        _cache_set_v88(f"atr_m15:{pair}", atr)
         return atr
     except Exception:
         return 0.0
 
 # ============================================================
-# V87.1 - MODIFICATION SL VIA TRADE CRCDO
+# V88.1 - MODIFICATION SL VIA set_dependent_orders (API OFFICIELLE)
 # ============================================================
-def modify_trade_sl_v87(trade_id: str, pair: str, new_sl: float) -> bool:
+def modify_trade_sl_v881(trade_id: str, pair: str, new_sl: float) -> bool:
     """
-    V87.1 : Modification du Stop Loss via TradeCRCDO (API officielle).
-    Retourne True si succès.
+    V88.1 : Modification du Stop Loss via set_dependent_orders (API officielle).
     """
     try:
-        api = v87_client()
-        data = {
-            "stopLoss": {
-                "price": round_price_v87(pair, new_sl),
+        api = v88_client()
+        
+        logger.info(f"[BE] Modification SL via set_dependent_orders pour trade {trade_id} -> {new_sl:.5f}")
+        
+        # Création de l'instance de l'endpoint
+        r = trades.Trade.set_dependent_orders(
+            accountID=OANDA_ACCOUNT_ID,
+            tradeSpecifier=trade_id,
+            stopLoss={
+                "price": round_price_v88(pair, new_sl),
                 "timeInForce": "GTC"
             }
-        }
-        r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
+        )
         resp = api.request(r)
-        if resp.get("orderRejectTransaction"):
-            logger.error(f"[BE] Rejeté pour trade {trade_id}: {resp.get('orderRejectTransaction')}")
+        
+        # Trace
+        tracer.log_step(trade_id, "BE_MODIFY_SL_VIA_SET_DEPENDENT_ORDERS", {
+            "pair": pair,
+            "new_sl": new_sl
+        }, resp)
+        
+        # Vérifier le rejet
+        if resp.get("stopLossOrderRejectTransaction"):
+            reject = resp.get("stopLossOrderRejectTransaction")
+            logger.error(f"[BE] Rejeté pour trade {trade_id}: {reject}")
             return False
-        logger.info(f"[BE] SL modifié pour trade {trade_id} -> {new_sl:.5f}")
-        return True
+        
+        # Vérifier le succès
+        if resp.get("stopLossOrderTransaction"):
+            logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
+            return True
+        
+        logger.warning(f"[BE] Réponse inattendue: {resp}")
+        return False
+        
     except Exception as e:
         logger.error(f"[BE] Erreur modification SL trade {trade_id}: {e}")
         return False
 
 # ============================================================
-# V87.1 - CONFIRMATION DU TRADE
+# V88.1 - CRÉATION DU TRAILING STOP VIA set_dependent_orders (API OFFICIELLE)
 # ============================================================
-def get_trade_details_v87(trade_id: str) -> dict:
+def create_oanda_trailing_stop_v881(trade_id: str, pair: str, distance: float) -> bool:
     """
-    Récupère les détails d'un trade via /trades/{tradeID}.
+    V88.1 : Crée un Trailing Stop Loss via set_dependent_orders (API officielle).
     """
     try:
-        api = v87_client()
-        r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
+        api = v88_client()
+        
+        logger.info(f"[TSL] Création trailing via set_dependent_orders pour trade {trade_id} -> distance={distance:.5f}")
+        
+        r = trades.Trade.set_dependent_orders(
+            accountID=OANDA_ACCOUNT_ID,
+            tradeSpecifier=trade_id,
+            trailingStopLoss={
+                "distance": str(distance),
+                "timeInForce": "GTC"
+            }
+        )
+        resp = api.request(r)
+        
+        # Trace
+        tracer.log_step(trade_id, "TSL_CREATE_VIA_SET_DEPENDENT_ORDERS", {
+            "pair": pair,
+            "distance": distance
+        }, resp)
+        
+        # Vérifier le rejet
+        if resp.get("trailingStopLossOrderRejectTransaction"):
+            reject = resp.get("trailingStopLossOrderRejectTransaction")
+            logger.error(f"[TSL] Rejeté pour trade {trade_id}: {reject}")
+            return False
+        
+        # Vérifier le succès
+        if resp.get("trailingStopLossOrderTransaction"):
+            logger.info(f"[TSL] SUCCESS: Trailing stop créé pour trade {trade_id}, distance={distance:.5f}")
+            return True
+        
+        logger.warning(f"[TSL] Réponse inattendue: {resp}")
+        return False
+        
+    except Exception as e:
+        logger.error(f"[TSL] Erreur création trailing stop trade {trade_id}: {e}")
+        return False
+
+# ============================================================
+# V88.1 - CONFIRMATION DU TRADE
+# ============================================================
+def get_trade_details_v88(trade_id: str) -> dict:
+    try:
+        api = v88_client()
+        r = trades.Trade.get(accountID=OANDA_ACCOUNT_ID, tradeSpecifier=trade_id)
         resp = api.request(r)
         return resp.get("trade", {})
     except Exception as e:
         logger.error(f"[TRADE] Erreur récupération trade {trade_id}: {e}")
         return {}
 
-def has_trailing_stop_v87(trade: dict) -> bool:
-    """Vérifie si un trade a un trailing stop actif."""
+def has_trailing_stop_v88(trade: dict) -> bool:
     trailing_stop = trade.get("trailingStopLossOrder", {})
     return bool(trailing_stop and trailing_stop.get("id"))
 
-def get_stop_loss_v87(trade: dict) -> float:
-    """Récupère le prix du stop loss d'un trade."""
+def get_stop_loss_v88(trade: dict) -> float:
     sl_order = trade.get("stopLossOrder", {})
     return float(sl_order.get("price", 0)) if sl_order else 0.0
 
 # ============================================================
-# V87.1 - CRÉATION DU TRAILING STOP (dictionnaire pur)
+# V88.1 - CHECK BREAKEVEN AVEC API OFFICIELLE
 # ============================================================
-def create_oanda_trailing_stop_v87(api, account_id: str, trade_id: str, distance: float) -> dict:
+def check_breakeven_simple_v881():
     """
-    V87.1 : Crée un TrailingStopLossOrder via un dictionnaire JSON.
-    Retourne la réponse complète pour analyse.
-    """
-    order_data = {
-        "order": {
-            "type": "TRAILING_STOP_LOSS",
-            "tradeID": trade_id,
-            "distance": str(distance),
-            "timeInForce": "GTC"
-        }
-    }
-    try:
-        r = orders.OrderCreate(accountID=account_id, data=order_data)
-        resp = api.request(r)
-        return resp
-    except Exception as e:
-        logger.error(f"[TSL] Erreur: {e}")
-        return {"error": str(e)}
-
-# ============================================================
-# V87.1 - CHECK BREAKEVEN AVEC CONFIRMATION
-# ============================================================
-def check_breakeven_simple_v87():
-    """
-    V87.1 : Break Even avec confirmation OANDA.
-    - Calcule R
-    - Si R >= 1.2, modifie SL via TradeCRCDO
-    - Confirme que le SL est bien mis à jour
-    - Crée le trailing stop et confirme
+    V88.1 : Break Even avec set_dependent_orders (API officielle).
     """
     try:
-        open_trades = get_open_trades_v87()
+        open_trades = get_open_trades_v88()
+        logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts")
+        
         for t in open_trades:
             trade_id = str(t.get("id"))
             pair = t.get("instrument")
             direction = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
             entry = float(t.get("price"))
             
-            # Récupérer le SL actuel depuis le trade
             sl_order = t.get("stopLossOrder", {}) or {}
             current_sl = float(sl_order.get("price", 0))
             if current_sl <= 0:
+                logger.debug(f"[BE] Trade {trade_id} sans SL, ignoré")
                 continue
             
-            current_price = get_recent_m5_price_v87(pair)
+            current_price = get_recent_m5_price_v88(pair)
             if current_price <= 0:
+                logger.debug(f"[BE] Trade {trade_id} prix indisponible")
                 continue
             
-            # Calcul du R
             if direction == "BUY":
                 profit = current_price - entry
                 risk = entry - current_sl
             else:
                 profit = entry - current_price
                 risk = current_sl - entry
-            if risk <= 0:
-                continue
-            r = profit / risk
             
-            # === 1. Break Even si R >= 1.2 ===
+            if risk <= 0:
+                logger.debug(f"[BE] Trade {trade_id} risque invalide")
+                continue
+            
+            r = profit / risk
+            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} | Entry={entry:.5f} | SL={current_sl:.5f} | Price={current_price:.5f}")
+            
             if r >= 1.2:
-                pip = PIP_SIZE_V87.get(pair, get_pip_value_for_pair(pair))
-                spread_data = get_price_spread_v87(pair)
+                logger.info(f"[BE] Condition R>=1.2 atteinte pour {trade_id} (R={r:.2f})")
+                
+                pip = PIP_SIZE_V88.get(pair, get_pip_value_for_pair(pair))
+                spread_data = get_price_spread_v88(pair)
                 spread = spread_data.get("spread", 0)
                 offset = max(spread, pip * 1.0)
                 
@@ -2440,106 +2522,101 @@ def check_breakeven_simple_v87():
                 else:
                     be_sl = entry - offset
                 
-                # Vérifier si le nouveau SL est meilleur
+                logger.info(f"[BE] Nouveau SL calculé: {be_sl:.5f} (offset={offset:.5f})")
+                
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
                     
-                    if modify_trade_sl_v87(trade_id, pair, be_sl):
-                        # Attendre que OANDA applique la modification
+                    if modify_trade_sl_v881(trade_id, pair, be_sl):
                         time.sleep(1)
-                        # Rafraîchir le cache
-                        _OANDA_CACHE_V87.pop("open_trades_raw", None)
+                        _OANDA_CACHE_V88.pop("open_trades_raw", None)
                         
-                        # === 2. Confirmer que le SL est bien appliqué ===
-                        trade_details = get_trade_details_v87(trade_id)
+                        # Confirmation du SL
+                        trade_details = get_trade_details_v88(trade_id)
                         if trade_details:
-                            new_sl = get_stop_loss_v87(trade_details)
+                            new_sl = get_stop_loss_v88(trade_details)
                             if abs(new_sl - be_sl) > 0.000001:
                                 logger.warning(f"[BE] {pair} SL non confirmé: attendu {be_sl:.5f}, reçu {new_sl:.5f}")
+                                tracer.log_step(trade_id, "BE_CONFIRM_FAIL", {"expected": be_sl, "received": new_sl}, None)
                             else:
                                 logger.info(f"[BE] {pair} SL confirmé à {new_sl:.5f}")
+                                tracer.log_step(trade_id, "BE_CONFIRM_OK", {"sl": new_sl}, None)
                                 
-                                # === 3. Création du trailing stop ===
-                                atr = get_atr_m15_v87(pair)
+                                # Création du trailing stop
+                                atr = get_atr_m15_v88(pair)
                                 spread = spread_data.get("spread", 0)
                                 pip_value = get_pip_value_for_pair(pair)
                                 distance = max(atr * TRAILING_STOP_DISTANCE_ATR_MULTIPLIER, spread * 8, pip_value * TRAILING_STOP_MIN_DISTANCE_PIPS)
-                                distance = round(distance, PRICE_DECIMALS_V87.get(pair, 5))
+                                distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
+                                
+                                logger.info(f"[TSL] Distance calculée: ATR={atr:.5f}, spread={spread:.5f}, pip={pip_value:.5f} -> distance={distance:.5f}")
                                 
                                 if distance > 0:
-                                    api = v87_client()
-                                    resp = create_oanda_trailing_stop_v87(api, OANDA_ACCOUNT_ID, trade_id, distance)
-                                    
-                                    if resp.get("orderRejectTransaction"):
-                                        logger.error(f"[TSL] Rejeté: {resp.get('orderRejectTransaction')}")
-                                    elif resp.get("orderCreateTransaction"):
-                                        logger.info(f"[TSL] Trailing stop créé avec succès pour {pair} trade {trade_id}, distance={distance:.5f}")
-                                        
-                                        # === 4. Confirmer que le trailing est actif ===
+                                    if create_oanda_trailing_stop_v881(trade_id, pair, distance):
                                         time.sleep(1)
-                                        _OANDA_CACHE_V87.pop("open_trades_raw", None)
-                                        trade_after = get_trade_details_v87(trade_id)
-                                        if trade_after and has_trailing_stop_v87(trade_after):
-                                            logger.info(f"[TSL] CONFIRMÉ: Trailing stop actif sur {pair} trade {trade_id}")
+                                        _OANDA_CACHE_V88.pop("open_trades_raw", None)
+                                        trade_after = get_trade_details_v88(trade_id)
+                                        if trade_after and has_trailing_stop_v88(trade_after):
+                                            trailing_id = trade_after.get("trailingStopLossOrder", {}).get("id", "unknown")
+                                            logger.info(f"[TSL] CONFIRMÉ: Trailing stop actif sur {pair} trade {trade_id} (ID: {trailing_id})")
+                                            tracer.log_step(trade_id, "TSL_CONFIRMED", {"trailing_id": trailing_id}, trade_after)
                                         else:
                                             logger.warning(f"[TSL] NON CONFIRMÉ: Trailing stop pas actif sur {pair} trade {trade_id}")
+                                            tracer.log_step(trade_id, "TSL_CONFIRM_FAIL", {"trade": trade_after}, None)
                                     else:
-                                        logger.warning(f"[TSL] Réponse inattendue: {resp}")
+                                        logger.warning(f"[TSL] Échec création trailing pour {pair} trade {trade_id}")
                                 else:
                                     logger.warning(f"[TSL] Distance invalide ({distance}) pour {pair}")
     except Exception as e:
-        logger.error(f"Erreur check_breakeven_simple_v87: {e}")
+        logger.error(f"Erreur check_breakeven_simple_v881: {e}")
         logger.error(traceback.format_exc())
 
 # ============================================================
-# V87.1 - EXECUTION AVEC TRAILING STOP NATIF
+# V88.1 - EXECUTION AVEC TRAILING NATIF OANDA
 # ============================================================
-def execute_oanda_trade_v87(pair: str, direction: str, entry_price: float, stop_loss: float,
+def execute_oanda_trade_v881(pair: str, direction: str, entry_price: float, stop_loss: float,
                             take_profit: float, score: int, entry_type: str) -> str | None:
     """
-    V87.1 : ouverture d'un Market Order AVEC trailingStopLossOnFill natif OANDA.
+    V88.1 : ouverture d'un Market Order AVEC trailingStopLossOnFill natif OANDA.
     """
-    logger.info(f"V87.1 EXECUTION START {pair} {direction} type={entry_type} score={score}")
-    logger.info(
-        f"EXEC INPUT | pair={pair} direction={direction} entry={round_price_v87(pair, entry_price)} "
-        f"SL={round_price_v87(pair, stop_loss)} TP={round_price_v87(pair, take_profit)}"
-    )
+    logger.info(f"[ORDER] V88.1 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] EXEC INPUT | pair={pair} direction={direction} entry={round_price_v88(pair, entry_price)} "
+                f"SL={round_price_v88(pair, stop_loss)} TP={round_price_v88(pair, take_profit)}")
 
-    if ONE_TRADE_PER_PAIR and has_open_trade_v87(pair):
+    if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert, aucun nouvel ordre.")
         return None
 
-    if open_trade_count_v87() >= MAX_TRADES_TOTAL:
+    if open_trade_count_v88() >= MAX_TRADES_TOTAL:
         logger.info(f"Limite trades ouverts atteinte")
         return None
 
-    balance = get_balance_v87()
+    balance = get_balance_v88()
     if balance <= 0:
         logger.error("Balance invalide")
         return None
 
-    units = calculate_units_v87(pair, entry_price, stop_loss, balance)
+    units = calculate_units_v88(pair, entry_price, stop_loss, balance)
     if not units or float(units) <= 0:
         logger.error(f"units invalides pour {pair}: {units}")
         return None
 
-    margin_info = calculate_margin_v87(pair, units, entry_price)
+    margin_info = calculate_margin_v88(pair, units, entry_price)
     if not margin_info["sufficient"]:
-        units = cap_units_by_margin_v87(pair, units, entry_price, balance)
+        units = cap_units_by_margin_v88(pair, units, entry_price, balance)
         if not units or units <= 0:
             logger.error(f"[RISK] {pair} order blocked: insufficient margin")
             return None
 
-    # === Calcul de la distance du trailing stop ===
-    atr = get_atr_m15_v87(pair)
-    spread_data = get_price_spread_v87(pair)
+    atr = get_atr_m15_v88(pair)
+    spread_data = get_price_spread_v88(pair)
     spread = spread_data.get("spread", 0)
     pip = get_pip_value_for_pair(pair)
     
     trailing_distance = max(atr * TRAILING_STOP_DISTANCE_ATR_MULTIPLIER, spread * 8, pip * TRAILING_STOP_MIN_DISTANCE_PIPS)
-    trailing_distance = round(trailing_distance, PRICE_DECIMALS_V87.get(pair, 5))
+    trailing_distance = round(trailing_distance, PRICE_DECIMALS_V88.get(pair, 5))
     
-    logger.info(f"[TSL] Distance de trailing calculée pour {pair}: {trailing_distance:.5f}")
+    logger.info(f"[TSL] Distance de trailing calculée: ATR={atr:.5f}, spread={spread:.5f}, pip={pip:.5f} -> distance={trailing_distance:.5f}")
 
     signed_units = units if direction == "BUY" else -units
     
@@ -2549,8 +2626,8 @@ def execute_oanda_trade_v87(pair: str, direction: str, entry_price: float, stop_
             "instrument": pair,
             "units": str(signed_units),
             "positionFill": "DEFAULT",
-            "stopLossOnFill": {"price": round_price_v87(pair, stop_loss), "timeInForce": "GTC"},
-            "takeProfitOnFill": {"price": round_price_v87(pair, take_profit), "timeInForce": "GTC"},
+            "stopLossOnFill": {"price": round_price_v88(pair, stop_loss), "timeInForce": "GTC"},
+            "takeProfitOnFill": {"price": round_price_v88(pair, take_profit), "timeInForce": "GTC"},
             "trailingStopLossOnFill": {
                 "distance": str(trailing_distance),
                 "timeInForce": "GTC"
@@ -2561,24 +2638,36 @@ def execute_oanda_trade_v87(pair: str, direction: str, entry_price: float, stop_
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
     logger.info(
-        f"SIGNAL V87.1 {pair} {direction} | "
-        f"entry≈{round_price_v87(pair, entry_price)} SL={round_price_v87(pair, stop_loss)} "
-        f"TP={round_price_v87(pair, take_profit)} RR={rr:.2f} score={score} "
+        f"[ORDER] SIGNAL V88.1 {pair} {direction} | "
+        f"entry≈{round_price_v88(pair, entry_price)} SL={round_price_v88(pair, stop_loss)} "
+        f"TP={round_price_v88(pair, take_profit)} RR={rr:.2f} score={score} "
         f"units={units} type={entry_type} trailing_distance={trailing_distance:.5f}"
     )
+    logger.info(f"[ORDER] Payload: {json.dumps(order_data)}")
 
     if not EXECUTE_TRADES:
-        logger.info("EXECUTE_TRADES=false : ordre simulé")
+        logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
         return "SIMULATION"
 
     try:
-        api = v87_client()
+        api = v88_client()
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         resp = api.request(r)
         
+        tracer.log_step("new", "ORDER_CREATE", {
+            "pair": pair,
+            "direction": direction,
+            "entry": entry_price,
+            "sl": stop_loss,
+            "tp": take_profit,
+            "trailing_distance": trailing_distance,
+            "units": units
+        }, resp)
+        
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
-            logger.error(f"ORDRE REJETÉ {pair}: {reject}")
+            logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject}")
+            tracer.log_step("new", "ORDER_REJECTED", {"reason": reject.get("rejectReason", "unknown")}, resp)
             return None
 
         trade_id = None
@@ -2591,27 +2680,33 @@ def execute_oanda_trade_v87(pair: str, direction: str, entry_price: float, stop_
             if trades_opened and trades_opened[0].get("tradeID"):
                 trade_id = str(trades_opened[0]["tradeID"])
         if not trade_id:
-            logger.error(f"ORDRE NON CONFIRMÉ {pair}")
+            logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
+            tracer.log_step("new", "ORDER_NO_TRADE_ID", {"response": str(resp)[:500]}, resp)
             return None
 
-        logger.info(f"✅ ORDRE CONFIRMÉ {pair} | ID={trade_id} | Trailing Stop activé")
+        logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
+        tracer.log_step(trade_id, "ORDER_CONFIRMED", {"pair": pair, "direction": direction}, resp)
         
         # Confirmer que le trailing est actif
         time.sleep(1)
-        trade_details = get_trade_details_v87(trade_id)
-        if trade_details and has_trailing_stop_v87(trade_details):
-            logger.info(f"[TSL] CONFIRMÉ: Trailing stop actif sur {pair} trade {trade_id}")
+        trade_details = get_trade_details_v88(trade_id)
+        if trade_details and has_trailing_stop_v88(trade_details):
+            trailing_id = trade_details.get("trailingStopLossOrder", {}).get("id", "unknown")
+            logger.info(f"[TSL] CONFIRMÉ: Trailing stop actif sur {pair} trade {trade_id} (ID: {trailing_id})")
+            tracer.log_step(trade_id, "TSL_CONFIRMED_ON_OPEN", {"trailing_id": trailing_id}, trade_details)
         else:
             logger.warning(f"[TSL] NON CONFIRMÉ: Trailing stop pas actif sur {pair} trade {trade_id}")
+            tracer.log_step(trade_id, "TSL_CONFIRM_FAIL_ON_OPEN", {"trade": trade_details}, None)
         
         return str(trade_id)
 
     except Exception as exc:
-        logger.exception(f"Erreur ordre OANDA {pair}: {exc}")
+        logger.exception(f"[ORDER] Erreur ordre OANDA {pair}: {exc}")
+        tracer.log_step("new", "ORDER_EXCEPTION", {"error": str(exc)}, None)
         return None
 
 # ============================================================
-# V87 - STRICT FILTERS
+# V88.1 - STRICT FILTERS
 # ============================================================
 STRICT_ALLOWED_ENTRY_TYPES = {
     "FVG_RETEST_PERFECT", "FVG_RETEST", "BISI", "BREAKER",
@@ -2786,10 +2881,12 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V87.1 - BOUCLE PRINCIPALE
+# V88.1 - BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V87.1 (Trailing OANDA natif + confirmation)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V88.1 (API Officielle)")
+    logger.info("📋 Trace des trades activée dans trade_trace.json")
+    logger.info("✅ Utilisation de set_dependent_orders (API officielle) pour SL et TSL")
     
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ - Aucun trade réel ne sera envoyé")
@@ -2798,20 +2895,25 @@ if __name__ == "__main__":
     
     while True:
         try:
-            clear_scan_cache_v87()
+            clear_scan_cache_v88()
             now_dt = datetime.utcnow()
-            if not is_market_open_utc_v87(now_dt):
+            if not is_market_open_utc_v88(now_dt):
                 logger.info("Marché fermé. Attente 5 minutes.")
                 time.sleep(300)
                 continue
 
-            current_open_count = open_trade_count_v87()
+            current_open_count = open_trade_count_v88()
+            logger.info(f"[SCAN] Trades ouverts: {current_open_count}/{MAX_TRADES_TOTAL}")
+            
+            # V88.1 : Break Even avec API officielle
+            check_breakeven_simple_v881()
+
             if current_open_count >= MAX_TRADES_TOTAL:
-                logger.info(f"Limite trades ouverts ({current_open_count}/{MAX_TRADES_TOTAL})")
+                logger.info(f"Limite trades ouverts atteinte ({current_open_count}/{MAX_TRADES_TOTAL})")
                 time.sleep(300)
                 continue
 
-            advanced_main_v87()
+            advanced_main_v881()
 
             logger.info("⏳ Attente 15 minutes...")
             time.sleep(900)
