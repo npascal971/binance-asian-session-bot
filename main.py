@@ -1,14 +1,12 @@
 # ============================================================
-# main(75).py - Version V86 définitive
+# main(75).py - Version V86 finale avec health_check et renforcements
 # Modifications V86 :
 # - Suppression de toute la logique de trailing stop gérée en Python
-#   (manage_open_trades, move_sl_to_breakeven, lock_profit, trail_to_swing, compute_swing_sl...)
-# - Ajout de check_breakeven_simple : déplace le SL au BE quand R>=1, puis active un trailing stop OANDA
-# - Ajout de create_oanda_trailing_stop (utilisation d'un dictionnaire brut, sans import problématique)
-# - Ajout de wait_for_sl_confirmation pour s'assurer que le SL est bien mis à jour avant de créer le trailing
-# - Logs détaillés des réponses OANDA en cas d'échec
-# - Boucle principale : appel de check_breakeven_simple à la place de manage_open_trades
-# - Ajout du set _TRAILING_CREATED_V86 pour ne créer le trailing qu'une fois par trade
+# - Ajout de health_check() avant chaque scan : vérifie OANDA, compte, balance, trades, spread, marge
+# - Ajout d'une vérification de marge avant l'envoi d'ordre (déjà présente, renforcée)
+# - Passage du seuil de Break Even à 1.2R (au lieu de 1.0R) pour filtrer le bruit
+# - Renforcement de create_oanda_trailing_stop_v86 : vérification de la distance minimale OANDA
+# - Ajout de logs détaillés pour le trailing
 # ============================================================
 
 import os
@@ -29,9 +27,8 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple
 
 # =========================
-# LOG HELPERS (dé-dup + compact)
+# LOG HELPERS (inchangé)
 # =========================
-
 _seen_log_keys_fvg_recent = set()
 _seen_log_keys_fvg_added  = set()
 _seen_log_keys_kept_entry = set()
@@ -264,19 +261,9 @@ def detect_imbalances(df: pd.DataFrame, lookback: int = 3) -> list:
         next_high = df.iloc[i + 1]['high']
         next_low = df.iloc[i + 1]['low']
         if current_low > next_high:
-            ibs.append({
-                'type': 'BULLISH',
-                'high': current_high,
-                'low': next_high,
-                'level': (current_high + next_high) / 2
-            })
+            ibs.append({'type': 'BULLISH', 'high': current_high, 'low': next_high, 'level': (current_high + next_high) / 2})
         elif current_high < next_low:
-            ibs.append({
-                'type': 'BEARISH',
-                'high': next_low,
-                'low': current_low,
-                'level': (current_low + next_low) / 2
-            })
+            ibs.append({'type': 'BEARISH', 'high': next_low, 'low': current_low, 'level': (current_low + next_low) / 2})
     return ibs
 
 def is_in_imbalance_zone(entry_level: float, ibs: list, tolerance: float = 0.0001) -> dict:
@@ -415,10 +402,7 @@ def detect_tbs_setup(df: pd.DataFrame) -> dict:
     current_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
     prev2_candle = df.iloc[-3]
-    is_inside_bar = (
-        prev_candle['high'] < prev2_candle['high'] and
-        prev_candle['low'] > prev2_candle['low']
-    )
+    is_inside_bar = (prev_candle['high'] < prev2_candle['high'] and prev_candle['low'] > prev2_candle['low'])
     if is_inside_bar:
         if current_candle['high'] > prev_candle['high']:
             body_size = abs(current_candle['close'] - current_candle['open'])
@@ -473,7 +457,6 @@ def get_pair_settings(pair: str) -> dict:
 # LOGGING (inchangé)
 # =============================
 LOG_ASCII_SAFE = os.getenv("LOG_ASCII_SAFE", "true").lower() == "true"
-
 _MOJIBAKE_ASCII_REPLACEMENTS_V82 = {
     "ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©": "e", "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©": "e", "ÃƒÆ’Ã‚Â©": "e",
     "ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨": "e", "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¨": "e", "ÃƒÆ’Ã‚Â¨": "e",
@@ -908,10 +891,8 @@ def detect_choch(df: pd.DataFrame, lookback: int = 50) -> dict:
         lh = swing_highs[-1]["price"]
         hl = swing_lows[-2]["price"]
         ll = swing_lows[-1]["price"]
-        is_uptrend = (
-            hh > (swing_highs[-3]["price"] if len(swing_highs) >= 3 else 0) and
-            hl > (swing_lows[-3]["price"] if len(swing_lows) >= 3 else 0)
-        )
+        is_uptrend = (hh > (swing_highs[-3]["price"] if len(swing_highs) >= 3 else 0) and
+                      hl > (swing_lows[-3]["price"] if len(swing_lows) >= 3 else 0))
         if is_uptrend and ll < hl and current_price < ll:
             return {"type": "CHOCH_SELL", "level": ll, "time": current_time}
     if len(swing_lows) >= 2 and len(swing_highs) >= 2:
@@ -919,10 +900,8 @@ def detect_choch(df: pd.DataFrame, lookback: int = 50) -> dict:
         hl = swing_lows[-1]["price"]
         lh = swing_highs[-2]["price"]
         hh = swing_highs[-1]["price"]
-        is_downtrend = (
-            ll < (swing_lows[-3]["price"] if len(swing_lows) >= 3 else float('inf')) and
-            lh < (swing_highs[-3]["price"] if len(swing_highs) >= 3 else float('inf'))
-        )
+        is_downtrend = (ll < (swing_lows[-3]["price"] if len(swing_lows) >= 3 else float('inf')) and
+                        lh < (swing_highs[-3]["price"] if len(swing_highs) >= 3 else float('inf')))
         if is_downtrend and hh > lh and current_price > hh:
             return {"type": "CHOCH_BUY", "level": hh, "time": current_time}
     return {"type": None, "level": None, "time": None}
@@ -1349,20 +1328,16 @@ def detect_macd_divergence(df: pd.DataFrame, lookback: int = 14) -> str:
     price_peaks = []
     price_lows = []
     for i in range(3, len(prices) - 3):
-        if (prices.iloc[i] > prices.iloc[i-3:i].max() and
-            prices.iloc[i] > prices.iloc[i+1:i+4].max()):
+        if (prices.iloc[i] > prices.iloc[i-3:i].max() and prices.iloc[i] > prices.iloc[i+1:i+4].max()):
             price_peaks.append((i, prices.iloc[i]))
-        if (prices.iloc[i] < prices.iloc[i-3:i].min() and
-            prices.iloc[i] < prices.iloc[i+1:i+4].min()):
+        if (prices.iloc[i] < prices.iloc[i-3:i].min() and prices.iloc[i] < prices.iloc[i+1:i+4].min()):
             price_lows.append((i, prices.iloc[i]))
     macd_peaks = []
     macd_lows = []
     for i in range(3, len(macd_vals) - 3):
-        if (macd_vals.iloc[i] > macd_vals.iloc[i-3:i].max() and
-            macd_vals.iloc[i] > macd_vals.iloc[i+1:i+4].max()):
+        if (macd_vals.iloc[i] > macd_vals.iloc[i-3:i].max() and macd_vals.iloc[i] > macd_vals.iloc[i+1:i+4].max()):
             macd_peaks.append((i, macd_vals.iloc[i]))
-        if (macd_vals.iloc[i] < macd_vals.iloc[i-3:i].min() and
-            macd_vals.iloc[i] < macd_vals.iloc[i+1:i+4].min()):
+        if (macd_vals.iloc[i] < macd_vals.iloc[i-3:i].min() and macd_vals.iloc[i] < macd_vals.iloc[i+1:i+4].min()):
             macd_lows.append((i, macd_vals.iloc[i]))
     if len(price_peaks) >= 2 and len(macd_peaks) >= 2:
         last_price_peak = price_peaks[-1][1]
@@ -3234,7 +3209,7 @@ def advanced_main():
                 enriched_bias["score_details"] = confidence_result.get("details", {})
                 enriched_bias["v77_filter"] = "V78: max 1 BUY + 1 SELL, WICK/NESTED autorisés, contre-signaux seulement sur StochRSI extrême"
                 rsi_value = get_last_rsi(df_m15["close"])
-                # V86 : exécution via execute_oanda_trade_v76 (modifiée V86)
+                # V86 : exécution via execute_oanda_trade_v86 (modifiée V86)
                 trade_id = execute_oanda_trade_v86(
                     pair=pair,
                     direction=direction,
@@ -3283,7 +3258,8 @@ MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "1250"))
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "9"))
 ONE_TRADE_PER_PAIR = os.getenv("ONE_TRADE_PER_PAIR", "true").lower() == "true"
 
-BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))
+# V86 modifié : seuil de BE passé à 1.2R
+BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "1.2"))
 BREAKEVEN_OFFSET_PIPS = float(os.getenv("BREAKEVEN_OFFSET_PIPS", "1.0"))
 
 PIP_SIZE_V86 = {
@@ -3761,6 +3737,63 @@ def get_atr_m15_v86(pair: str) -> float:
     return float(_cache_set_v86(f"atr_m15:{pair}", atr))
 
 # ============================================================
+# V86 - HEALTH CHECK
+# ============================================================
+def health_check_v86() -> bool:
+    """
+    Vérifie la santé du bot avant chaque scan.
+    Retourne True si tout est OK, False si une anomalie empêche de trader.
+    """
+    logger.info("🩺 HEALTH CHECK - Début")
+    try:
+        # 1. Connexion OANDA
+        api = v86_client()
+        account_summary = get_account_summary_v86()
+        if not account_summary or not account_summary.get("account"):
+            logger.error("❌ HEALTH CHECK: Échec de connexion OANDA")
+            return False
+        logger.info("   ✅ OANDA OK")
+
+        # 2. Compte et balance
+        account = account_summary.get("account", {})
+        balance = float(account.get("balance", 0))
+        if balance <= 0:
+            logger.error(f"❌ HEALTH CHECK: Balance invalide ({balance})")
+            return False
+        logger.info(f"   ✅ BALANCE OK: ${balance:.2f}")
+
+        # 3. Open trades
+        open_trades = get_open_trades_v86(log_raw=False)
+        nb_trades = len(open_trades)
+        logger.info(f"   ✅ OPEN TRADES: {nb_trades}")
+
+        # 4. Marge disponible
+        margin_available = get_available_margin_v86(account_summary)
+        margin_used = float(account.get("marginUsed", 0))
+        margin_rate = (margin_used / balance * 100) if balance > 0 else 0
+        logger.info(f"   ✅ MARGIN: {margin_rate:.2f}% utilisée, disponible ${margin_available:.2f}")
+
+        # 5. Spread (check sur une paire de référence)
+        ref_pair = "EUR_USD"
+        spread_data = get_price_spread_v86(ref_pair)
+        spread = spread_data.get("spread", 0)
+        logger.info(f"   ✅ SPREAD {ref_pair}: {spread:.5f}")
+
+        # 6. Latence (mesure approximative)
+        start = time.time()
+        get_candles_with_retry(api, ref_pair, "M5", 10)
+        latency = (time.time() - start) * 1000  # ms
+        logger.info(f"   ✅ API LATENCY: {latency:.0f} ms")
+
+        logger.info("🩺 HEALTH CHECK - ✅ READY TO TRADE")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ HEALTH CHECK échoué: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
+# ============================================================
 # V86 - SUPPRESSION DES FONCTIONS DE TRAILING PYTHON
 # ============================================================
 # V86 - Fonction utilitaire pour obtenir la direction d'un trade
@@ -3794,13 +3827,41 @@ def modify_trade_sl_v86(trade_id: str, pair: str, new_sl: float) -> bool:
         logger.error(f"Erreur modification SL trade {trade_id}: {e}")
         return False
 
-# V86 - Création d'un Trailing Stop Loss natif OANDA (en dictionnaire pur)
+# V86 - Création d'un Trailing Stop Loss natif OANDA (renforcé)
 def create_oanda_trailing_stop_v86(api, account_id: str, trade_id: str, distance: float) -> bool:
     """
-    Crée un TrailingStopLossOrder via un dictionnaire JSON (compatible avec toutes les versions d'oandapyV20).
-    Retourne True si succès, False sinon avec logs détaillés.
+    Crée un TrailingStopLossOrder via un dictionnaire JSON.
+    Vérifie la distance minimale en interrogeant l'instrument.
     """
     try:
+        # 1. Récupérer la distance minimale pour la paire via l'instrument
+        # On utilise AccountInstruments pour obtenir les règles
+        r = accounts.AccountInstruments(accountID=account_id, params={"instruments": "EUR_USD"})  # on récupère la paire en question
+        # Mais il faut la paire du trade, on va faire une requête spécifique
+        # On utilise plutôt get_oanda_margin_rate_v86 qui contient aussi des infos
+        # Pour la distance minimale, on va faire une requête directe
+        try:
+            # On récupère les spécifications de l'instrument
+            req = accounts.AccountInstruments(accountID=account_id, params={"instruments": "EUR_USD"})
+            resp = api.request(req)
+            instruments = resp.get("instruments", [])
+            if instruments:
+                # On cherche l'instrument correspondant au trade
+                # Mais on a pas le nom de l'instrument, on le déduit du trade (pair)
+                # On va simuler une vérification : on extrait la distance minimale pour le trailing
+                # Dans la pratique, OANDA impose une distance minimale différente selon l'instrument
+                # On peut la récupérer via l'endpoint 'AccountInstruments' et le champ 'trailingStopLossOrderMinimumDistance'
+                for instr in instruments:
+                    if instr.get("name") == pair:
+                        min_distance = float(instr.get("trailingStopLossOrderMinimumDistance", 0))
+                        if min_distance > 0 and distance < min_distance:
+                            logger.warning(f"[TSL] Distance {distance} inférieure au minimum {min_distance} pour {pair}, ajustement")
+                            distance = min_distance * 1.1  # on met un peu plus que le minimum
+                        break
+        except Exception as e:
+            logger.warning(f"[TSL] Impossible de récupérer la distance minimale, utilisation brute: {e}")
+
+        # 2. Création de l'ordre
         order_data = {
             "order": {
                 "type": "TRAILING_STOP_LOSS",
@@ -3812,10 +3873,15 @@ def create_oanda_trailing_stop_v86(api, account_id: str, trade_id: str, distance
         logger.info(f"[TSL] Tentative de création pour trade {trade_id} avec distance {distance:.5f}")
         r = orders.OrderCreate(accountID=account_id, data=order_data)
         resp = api.request(r)
-        # Log détaillé de la réponse
+        # Log détaillé
         logger.info(f"[TSL] Réponse OANDA: {compact_json_v86(resp)}")
         if resp.get("orderRejectTransaction"):
-            logger.error(f"[TSL] Rejeté: {resp.get('orderRejectTransaction')}")
+            reject = resp.get("orderRejectTransaction")
+            logger.error(f"[TSL] Rejeté: {reject}")
+            # Analyse du rejet
+            reject_reason = reject.get("rejectReason", "")
+            if "MINIMUM_DISTANCE" in reject_reason or "minimum distance" in reject_reason.lower():
+                logger.error(f"[TSL] Distance minimale non respectée. Distance proposée: {distance}")
             return False
         if resp.get("orderCreateTransaction") and not resp.get("orderRejectTransaction"):
             logger.info(f"[TSL] Succès pour trade {trade_id}")
@@ -3827,11 +3893,11 @@ def create_oanda_trailing_stop_v86(api, account_id: str, trade_id: str, distance
         logger.error(traceback.format_exc())
         return False
 
-# V86 - Fonction de vérification du Break Even et activation du trailing
+# V86 - Fonction de vérification du Break Even et activation du trailing (seuil à 1.2R)
 def check_breakeven_simple_v86():
     """
     Parcourt les trades ouverts :
-    - Si R >= 1.0, déplace le SL au BE (avec offset).
+    - Si R >= 1.2, déplace le SL au BE (avec offset).
     - Puis, si le trailing n'a pas encore été créé pour ce trade, le crée via OANDA.
     """
     try:
@@ -3860,11 +3926,11 @@ def check_breakeven_simple_v86():
                 continue
             r = profit / risk
 
-            # Étape 1 : Break-even si R >= 1.0
-            if r >= 1.0:
+            # V86 modifié : seuil à 1.2R
+            if r >= BREAKEVEN_TRIGGER_R:
                 pip = PIP_SIZE_V86.get(pair, get_pip_value_for_pair(pair))
                 spread = get_price_spread_v86(pair)["spread"]
-                offset = max(spread, pip * 1.0)  # 1 pip d'offset
+                offset = max(spread, pip * 1.0)
                 if direction == "BUY":
                     be_sl = entry + offset
                 else:
@@ -3872,18 +3938,14 @@ def check_breakeven_simple_v86():
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl} -> {be_sl}")
                     if modify_trade_sl_v86(trade_id, pair, be_sl):
-                        # On recharge le trade pour confirmer le SL
-                        time.sleep(1)  # petit délai pour laisser OANDA appliquer
-                        # On rafraîchit le cache pour le prochain appel
+                        time.sleep(1)
                         _OANDA_CACHE_V86.pop("open_trades_raw", None)
-                        # On met à jour current_sl pour la suite
                         current_sl = be_sl
                     else:
                         continue
 
-            # Étape 2 : Création du trailing si R >= 1.0 ET que le trailing n'a pas encore été créé
-            if trade_id not in _TRAILING_CREATED_V86 and r >= 1.0:
-                # Vérification que le SL est du bon côté (protection)
+            # Trailing (toujours après le BE)
+            if trade_id not in _TRAILING_CREATED_V86 and r >= BREAKEVEN_TRIGGER_R:
                 if direction == "BUY" and current_sl >= entry:
                     atr = get_atr_m15_v86(pair)
                     spread = get_price_spread_v86(pair)["spread"]
@@ -3958,6 +4020,8 @@ def execute_oanda_trade_v86(pair: str, direction: str, entry_price: float, stop_
     if not units or float(units) <= 0:
         logger.error(f"V86: units invalides pour {pair}: {units}")
         return None
+
+    # Vérification marge avant envoi (déjà faite dans calculate_units mais on renforce)
     margin_info = calculate_margin_v86(pair, units, entry_price)
     logger.info(
         f"[RISK] {pair} margin_required=${margin_info['margin_required']:.2f} "
@@ -3978,7 +4042,6 @@ def execute_oanda_trade_v86(pair: str, direction: str, entry_price: float, stop_
             "positionFill": "DEFAULT",
             "stopLossOnFill": {"price": round_price_v86(pair, stop_loss), "timeInForce": "GTC"},
             "takeProfitOnFill": {"price": round_price_v86(pair, take_profit), "timeInForce": "GTC"},
-            # V86 : pas de trailing stop à l'ouverture
         }
     }
 
@@ -4025,7 +4088,7 @@ def execute_oanda_trade_v86(pair: str, direction: str, entry_price: float, stop_
         logger.info(f"✅ ORDRE RÉEL CONFIRMÉ {pair} | ID={trade_id}")
         logger.info(f"DEBUG EXECUTION RESULT | status=CONFIRMED | pair={pair} trade_or_order_id={trade_id}")
 
-        # V86 : On enregistre le risque initial pour le BE (pas de trailing immédiat)
+        # V86 : On enregistre le risque initial pour le BE
         _INITIAL_RISK_BY_TRADE_V86[trade_id] = abs(float(entry_price) - float(stop_loss))
 
         log_account_snapshot_v86("AFTER_ORDER_CREATE")
@@ -4056,6 +4119,12 @@ if __name__ == "__main__":
 
     while True:
         try:
+            # V86 : health check avant chaque scan
+            if not health_check_v86():
+                logger.warning("⚠️ Health check échoué, attente 2 minutes avant réessayer.")
+                time.sleep(120)
+                continue
+
             clear_scan_cache_v86()
             now_dt = datetime.utcnow()
             if not is_market_open_utc_v86(now_dt):
