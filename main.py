@@ -1,13 +1,12 @@
 # ============================================================
-# main(75).py - Version V86 (définitive)
+# main(75).py - Version V86 définitive
 # Modifications V86 :
 # - Suppression de toute la logique de trailing stop gérée en Python
-#   (manage_open_trades_v76, move_sl_to_breakeven_v85, lock_profit_v85,
-#    trail_to_swing_v85, compute_swing_sl, etc.)
+#   (manage_open_trades, move_sl_to_breakeven, lock_profit, trail_to_swing, compute_swing_sl...)
 # - Ajout de check_breakeven_simple : déplace le SL au BE quand R>=1, puis active un trailing stop OANDA
-# - Ajout de create_oanda_trailing_stop pour créer un Trailing Stop natif OANDA (utilise TrailingStopLossOrderRequest)
-# - Ajout de modify_trade_sl_v76 pour modifier le SL (utilisé par le BE)
-# - Modification de execute_oanda_trade_v76 : ne crée plus le trailing immédiatement
+# - Ajout de create_oanda_trailing_stop (utilisation d'un dictionnaire brut, sans import problématique)
+# - Ajout de wait_for_sl_confirmation pour s'assurer que le SL est bien mis à jour avant de créer le trailing
+# - Logs détaillés des réponses OANDA en cas d'échec
 # - Boucle principale : appel de check_breakeven_simple à la place de manage_open_trades
 # - Ajout du set _TRAILING_CREATED_V86 pour ne créer le trailing qu'une fois par trade
 # ============================================================
@@ -18,15 +17,12 @@ import time
 import logging
 import unicodedata
 import requests
-from datetime import datetime, timedelta
 from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 import oandapyV20
-from oandapyV20.endpoints import instruments, pricing  # V83
-from oandapyV20.endpoints import orders, accounts, trades
-from oandapyV20.endpoints import positions, transactions
+from oandapyV20.endpoints import instruments, pricing, orders, accounts, trades, positions, transactions
 import talib
 import traceback
 from ta.momentum import RSIIndicator
@@ -41,13 +37,11 @@ _seen_log_keys_fvg_added  = set()
 _seen_log_keys_kept_entry = set()
 
 def _reset_log_dedup():
-    """Réinitialise les registres de dé-duplication pour un nouveau scan de paire."""
     _seen_log_keys_fvg_recent.clear()
     _seen_log_keys_fvg_added.clear()
     _seen_log_keys_kept_entry.clear()
 
 def _log_fvg_recent_once(pair: str, direction: str, level: float, msg: str, precision: int = 5):
-    """Loggue un FVG récent au plus une fois par (pair, direction, level)."""
     key = (pair, (direction or "").upper(), round(float(level), precision))
     if key in _seen_log_keys_fvg_recent:
         return
@@ -55,7 +49,6 @@ def _log_fvg_recent_once(pair: str, direction: str, level: float, msg: str, prec
     logger.info(msg)
 
 def _log_fvg_added_once(pair: str, direction: str, level: float, fvg_type: str, msg: str, precision: int = 5):
-    """Loggue l'ajout d'un FVG/Nested/Wick au plus une fois par (pair, direction, type, level)."""
     key = (pair, (direction or "").upper(), (fvg_type or "UNKNOWN").upper(), round(float(level), precision))
     if key in _seen_log_keys_fvg_added:
         return
@@ -63,7 +56,6 @@ def _log_fvg_added_once(pair: str, direction: str, level: float, fvg_type: str, 
     logger.info(msg)
 
 def _log_kept_entry_once(pair: str, level: float, status: str, dist: float, msg: str, precision: int = 5):
-    """(Optionnel) Dé-dup 'Entrée conservée' par (pair, level, status)."""
     key = (pair, round(float(level), precision), status)
     if key in _seen_log_keys_kept_entry:
         return
@@ -71,7 +63,6 @@ def _log_kept_entry_once(pair: str, level: float, status: str, dist: float, msg:
     logger.info(msg)
 
 def _log_narrative_list(entries: list, top_n: int = 10):
-    """Affiche au plus 'top_n' entrées (triées) + compteur restant."""
     if not entries:
         logger.info("🔎 AUCUNE ENTRÉE DÉTECTÉE - Analyse détaillée:")
         return
@@ -80,7 +71,6 @@ def _log_narrative_list(entries: list, top_n: int = 10):
         try:
             lvl = float(e.get("entry_level", 0))
             zone = e.get("entry_zone", (lvl, lvl))
-            # priorité: proximité au bas de zone (simple & stable)
             d = abs(lvl - float(zone[0]))
         except Exception:
             d = 0.0
@@ -92,9 +82,8 @@ def _log_narrative_list(entries: list, top_n: int = 10):
         logger.info(f" {i}. {entry.get('direction','?')} - {entry.get('type','?')} à {float(entry.get('entry_level',0)):.5f}")
     if other_count:
         logger.info(f" … (+{other_count} autres entrées)")
-        
+
 def _log_kept_compact(pair: str, kept: list, top_n: int = 8):
-    """Compacte l'affichage des 'Entrées conservées' (top_n + compteur)."""
     if not kept:
         logger.info(f"{pair} · Aucune entrée conservée.")
         return
@@ -111,8 +100,8 @@ def _log_kept_compact(pair: str, kept: list, top_n: int = 8):
             logger.info(f"✅ Entrée {status}: {float(entry_level):.5f}")
     if len(kept) > len(show):
         logger.info(f"… (+{len(kept)-len(show)} autres entrées {pair})")
-logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
 
+logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
 last_reset_time = datetime.utcnow()
 
 # =============================
@@ -120,13 +109,12 @@ last_reset_time = datetime.utcnow()
 # =============================
 load_dotenv()
 
-# Liste des paires incluant XAU_USD (Or)
 PAIR_LIST = ["EUR_USD", "GBP_USD", "USD_CAD", "AUD_USD", "AUD_CAD"]
 
-GRANULARITY_D1 = "D"  # Pour analyse de bias
-GRANULARITY_H4 = "H4"  # Pour narrative et orderflow principal
-GRANULARITY_H1 = "H1"  # Pour validation narrative
-GRANULARITY_M15 = "M15"  # Pour entrée précise
+GRANULARITY_D1 = "D"
+GRANULARITY_H4 = "H4"
+GRANULARITY_H1 = "H1"
+GRANULARITY_M15 = "M15"
 
 EMA_SLOW = 200
 EMA_MEDIUM = 50
@@ -139,19 +127,18 @@ MAX_VOLATILITY_RATIO = 0.02
 SWING_LOOKBACK = 3
 MIN_WICK_RATIO = 0.7
 
- # 🔥 CONFIG DISTANCE MAXIMALE (ÉLARGIE)
 MAX_DISTANCE_PIPS = {
-    "XAU_USD": 500,     # = 50 pips (1 pip = 0.01)
-    "USD_JPY": 150,     # = 10 pips (1 pip = 0.01)
-    "NAS100_USD": 25.0,   # = 10 pips (1 pip ≈ 0.1)
-    "AUD_USD": 0.0080,   # = 10 pips (1 pip = 0.0001)
+    "XAU_USD": 500,
+    "USD_JPY": 150,
+    "NAS100_USD": 25.0,
+    "AUD_USD": 0.0080,
     "EUR_USD": 0.0080,
     "GBP_USD": 0.0080,
     "USD_CAD": 0.0010,
-    "GBP_JPY": 150,      # = 15 pips (1 pip = 0.01)
+    "GBP_JPY": 150,
     "DEFAULT": 0.0010
 }
-# Paramètres spécifiques par paire
+
 PAIR_SETTINGS = {
     "XAU_USD": {
         "atr_multiplier_sl": 1.8,
@@ -160,11 +147,11 @@ PAIR_SETTINGS = {
         "risk_multiplier": 0.5,
         "required_confluence": "STRICT"
     },
-     "NAS100_USD": {
-        "atr_multiplier_sl": 1.6,        # SL un peu plus serré
-        "atr_multiplier_tp": 3.2,        # TP adapté à la volatilité
-        "max_volatility_ratio": 0.015,   # Plus volatile que Forex
-        "risk_multiplier": 0.7,          # Risque modéré
+    "NAS100_USD": {
+        "atr_multiplier_sl": 1.6,
+        "atr_multiplier_tp": 3.2,
+        "max_volatility_ratio": 0.015,
+        "risk_multiplier": 0.7,
         "required_confluence": "STRICT"
     },
     "GBP_JPY": {
@@ -183,22 +170,10 @@ PAIR_SETTINGS = {
 }
 
 SIGNAL_RISK_SETTINGS = {
-    "NESTED_FVG": {
-        "sl_multiplier": 1.0,   # ← Plus serré
-        "tp_multiplier": 2.5    # ← RR > 2.5
-    },
-    "FVG_RETEST": {
-        "sl_multiplier": 1.5,
-        "tp_multiplier": 3.0
-    },
-    "WICK_REJECTION": {
-        "sl_multiplier": 1.7,
-        "tp_multiplier": 4.5
-    },
-    "LIQUIDITY_DRAW": {
-        "sl_multiplier": 1.8,
-        "tp_multiplier": 3.5
-    }
+    "NESTED_FVG": {"sl_multiplier": 1.0, "tp_multiplier": 2.5},
+    "FVG_RETEST": {"sl_multiplier": 1.5, "tp_multiplier": 3.0},
+    "WICK_REJECTION": {"sl_multiplier": 1.7, "tp_multiplier": 4.5},
+    "LIQUIDITY_DRAW": {"sl_multiplier": 1.8, "tp_multiplier": 3.5}
 }
 
 MAX_PIPS_ACCEPTED = {
@@ -213,54 +188,42 @@ MAX_PIPS_ACCEPTED = {
     "DEFAULT": 10.0
 }
 
-# Configuration du scoring
-# === CONFIGURATION DU SCORING (MISE À JOUR) ===
-# V78: le filtre EMA50 H1 n'est plus un veto absolu, il devient un malus de score.
 SCORING_CONFIG = {
-    "MIN_CONFIDENCE_SCORE": 10,  # V78 équilibré : setups B+/A acceptés si risque OK
+    "MIN_CONFIDENCE_SCORE": 10,
     "SIGNAL_WEIGHTS": {
-        "BISI": 5,              # Combo fort BOS + FVG
+        "BISI": 5,
         "NESTED_FVG": 4,
-        "FVG_RETEST_PERFECT": 4,# Meilleure qualité qu’un simple FVG
-        "FVG_RETEST": 3, 
-        "BREAKER": 2,# Classique
+        "FVG_RETEST_PERFECT": 4,
+        "FVG_RETEST": 3,
+        "BREAKER": 2,
         "WICK_REJECTION": 3,
-        "TBS_PIN_BUY": 4,# Plus faible
+        "TBS_PIN_BUY": 4,
         "LIQUIDITY_DRAW": 2,
-        "TBS_PIN_SELL": 4# Cible secondaire
+        "TBS_PIN_SELL": 4
     },
     "BONUS": {
         "BOS_CONFIRMED": 2,
         "CHOCH_CONFIRMED": 2,
-        "RSI_CONFLUENCE": 2,    # Renforcé
+        "RSI_CONFLUENCE": 2,
         "VOLATILITY_OK": 1,
-        "RR_OK": 2,             # Renforcé
-        "MACD_DIVERGENCE": 3,   # Nouveau bonus
-        "FAILURE_SWING": 3,     # Nouveau bonus
-        "CRT_DETECTED": 2,    # <-- AJOUTER CETTE LIGNE
-        "TBS_DETECTED": 3, 
-        "ERL_BONUS": 1,        # <-- Déjà présent
+        "RR_OK": 2,
+        "MACD_DIVERGENCE": 3,
+        "FAILURE_SWING": 3,
+        "CRT_DETECTED": 2,
+        "TBS_DETECTED": 3,
+        "ERL_BONUS": 1,
         "IB_BONUS": 2
     },
-     "PENALTY": {
-        "IB_PENALTY": 2,       # <-- AJOUTER CETTE LIGNE
-        "NO_IB_PENALTY": 1,    # <-- AJOUTER CETTE LIGNE
-        "IRL_PENALTY": 3      # <-- Déjà présent ou à ajouter
+    "PENALTY": {
+        "IB_PENALTY": 2,
+        "NO_IB_PENALTY": 1,
+        "IRL_PENALTY": 3
     }
 }
 
-
-# === FONCTION DE CALCUL DU SCORE (MISE À JOUR) ===
-
-
 def get_dynamic_max_distance(df: pd.DataFrame, pair: str, atr_multiplier: float = 1.5) -> float:
-    """
-    Retourne une distance maximale en PIPS (pas en prix) basée sur l'ATR.
-    Bornée entre 10 et 50 pips pour normaliser la sensibilité.
-    """
     if df is None or len(df) < 14:
-        return 20.0  # fallback par défaut (en pips)
-
+        return 20.0
     try:
         atr = calculate_atr(df, period=14)
         atr_pips = price_to_pips(atr, pair)
@@ -269,62 +232,37 @@ def get_dynamic_max_distance(df: pd.DataFrame, pair: str, atr_multiplier: float 
     except Exception:
         return 20.0
 
-
-
-logger = logging.getLogger(__name__)
-
-# --- FONCTION À AJOUTER ---
 def is_in_key_zone_or_consolidation(current_price, pair, df_m15, liquidity_levels, nested_fvgs, recent_ofls, structure_analysis, max_zone_width_pips=30.0) -> bool:
-    """
-    Vérifie si le prix est dans une zone clé (liquidité, FVG, BOS/CHoCH).
-    Correction : Ajout d’un fallback pour éviter rejet excessif.
-    """
     try:
         pip_value = 0.01 if "JPY" in pair or pair == "XAU_USD" else 0.0001
         max_zone_width_price = max_zone_width_pips * pip_value
-
-        # Vérification Weekly High/Low
         liq_high = liquidity_levels.get("previous_week_high")
         liq_low = liquidity_levels.get("previous_week_low")
         if liq_high and abs(current_price - liq_high) <= max_zone_width_price:
             return True
         if liq_low and abs(current_price - liq_low) <= max_zone_width_price:
             return True
-
-        # Vérification Nested FVG
         for nfvg in nested_fvgs:
             midpoint = nfvg.get("midpoint")
             if midpoint and abs(current_price - midpoint) <= max_zone_width_price:
                 return True
-
-        # Vérification BOS/CHoCH
         for key in ["bos", "choch"]:
             level = structure_analysis.get(key, {}).get("level")
             if level and abs(current_price - level) <= max_zone_width_price:
                 return True
-
         return False
     except Exception:
-        return True  # Correction : éviter blocage complet
-# --- FIN DE LA FONCTION ---
+        return True
 
 def detect_imbalances(df: pd.DataFrame, lookback: int = 3) -> list:
-    """
-    Détecte les zones d'imbalance (IB) sur un dataframe.
-    Retourne une liste de dictionnaires avec 'type', 'high', 'low', 'level'.
-    """
     if len(df) < lookback + 2:
         return []
-
     ibs = []
     for i in range(lookback, len(df) - 1):
-        # Vérifiez si la bougie actuelle crée une imbalance
         current_high = df.iloc[i]['high']
         current_low = df.iloc[i]['low']
         next_high = df.iloc[i + 1]['high']
         next_low = df.iloc[i + 1]['low']
-
-        # Imbalance haussière (le prix casse le low de la bougie précédente)
         if current_low > next_high:
             ibs.append({
                 'type': 'BULLISH',
@@ -332,8 +270,6 @@ def detect_imbalances(df: pd.DataFrame, lookback: int = 3) -> list:
                 'low': next_high,
                 'level': (current_high + next_high) / 2
             })
-
-        # Imbalance baissière (le prix casse le high de la bougie précédente)
         elif current_high < next_low:
             ibs.append({
                 'type': 'BEARISH',
@@ -341,77 +277,41 @@ def detect_imbalances(df: pd.DataFrame, lookback: int = 3) -> list:
                 'low': current_low,
                 'level': (current_low + next_low) / 2
             })
-
     return ibs
 
 def is_in_imbalance_zone(entry_level: float, ibs: list, tolerance: float = 0.0001) -> dict:
-    """
-    Vérifie si le niveau d'entrée est dans une zone d'imbalance.
-    Retourne un dictionnaire avec 'is_in_zone', 'type', 'level'.
-    """
     for ib in ibs:
         if ib['low'] - tolerance <= entry_level <= ib['high'] + tolerance:
-            return {
-                'is_in_zone': True,
-                'type': ib['type'],
-                'level': ib['level']
-            }
-    return {
-        'is_in_zone': False,
-        'type': None,
-        'level': None
-    }
+            return {'is_in_zone': True, 'type': ib['type'], 'level': ib['level']}
+    return {'is_in_zone': False, 'type': None, 'level': None}
 
 def detect_breaker(df: pd.DataFrame, lookback: int = 10) -> dict:
-    """
-    Détecte un Breaker Block (bougie d'inversion après Stop Hunt).
-    Retourne {'type': 'BUY'/'SELL', 'level': prix, 'time': timestamp} ou None.
-    """
     if len(df) < lookback + 3:
         return {"type": None, "level": None}
-    # Exemple logique : après un Stop Hunt (nouveau haut/bas), bougie inverse ferme au-dessus du corps précédent
     for i in range(len(df) - 3, len(df)):
         candle = df.iloc[i]
         prev_candle = df.iloc[i-1]
-        if candle['close'] > prev_candle['high']:  # Breaker BUY
+        if candle['close'] > prev_candle['high']:
             return {"type": "BUY", "level": prev_candle['high'], "time": df.index[i]}
-        elif candle['close'] < prev_candle['low']:  # Breaker SELL
+        elif candle['close'] < prev_candle['low']:
             return {"type": "SELL", "level": prev_candle['low'], "time": df.index[i]}
     return {"type": None, "level": None}
 
-# Dans main.py, cherchez ou ajoutez cette logique de validation
-
 def validate_trend_alignment(direction, df_h1, df_h4):
-    """
-    Compatibilité historique: l'EMA50 H1 n'est plus un veto.
-    L'information de tendance est maintenant scorée par score_ema_trend().
-    """
     return True
 
 def detect_dealing_range(df: pd.DataFrame, lookback: int = 50) -> dict:
-    """
-    Détecte la dernière "Dealing Range" (SWHL) sur le dataframe.
-    Retourne un dictionnaire avec les niveaux de la range ou None.
-    """
     if df is None or df.empty or len(df) < lookback:
         return None
-
-    # Détecter les swings highs et lows
     swing_highs, swing_lows = detect_swing_points_advanced(df, lookback)
-
     if len(swing_highs) < 1 or len(swing_lows) < 1:
         return None
-
-    # Trier par index (temps) pour trouver la dernière range
     all_swings = []
     for sh in swing_highs:
         all_swings.append((sh['index'], sh['price'], 'high'))
     for sl in swing_lows:
         all_swings.append((sl['index'], sl['price'], 'low'))
-
-    all_swings.sort(key=lambda x: x[0])  # Trier par index (temps)
-
-    # Trouver la dernière paire high/low ou low/high (la range la plus récente)
+    all_swings.sort(key=lambda x: x[0])
     last_high = None
     last_low = None
     for idx, price, swing_type in reversed(all_swings):
@@ -421,192 +321,88 @@ def detect_dealing_range(df: pd.DataFrame, lookback: int = 50) -> dict:
             last_low = price
         if last_high is not None and last_low is not None:
             break
-
     if last_high is not None and last_low is not None:
-        # On suppose que la range est définie par le dernier high et le dernier low trouvés
-        # (l'ordre peut varier, on prend le max et le min)
         range_high = max(last_high, last_low)
         range_low = min(last_high, last_low)
-        return {
-            "high": range_high,
-            "low": range_low,
-            "range_size": range_high - range_low
-        }
-
+        return {"high": range_high, "low": range_low, "range_size": range_high - range_low}
     return None
 
-# Vous pouvez appeler cette fonction dans advanced_main ou determine_advanced_narrative
-# Exemple dans advanced_main :
-# dealing_range = detect_dealing_range(df_h4, lookback=50)
-# if dealing_range:
-#     logger.info(f"🔍 Dealing Range détectée: H {dealing_range['high']:.5f} - L {dealing_range['low']:.5f}")
-
 def classify_zone_irl_erl(zone_level: float, dealing_range: dict, tolerance: float = 0.0001) -> str:
-    """
-    Classifie une zone (représentée par un niveau) comme IRL ou ERL par rapport à une dealing range.
-    Utilise une petite tolérance pour les niveaux exacts sur les bords.
-    Retourne "IRL", "ERL", ou None si la range n'est pas valide.
-    """
     if not dealing_range or dealing_range.get("high") is None or dealing_range.get("low") is None:
         return None
-
     range_high = dealing_range["high"]
     range_low = dealing_range["low"]
-
-    # Vérifier si le niveau est à l'intérieur de la range (ou très proche des bords)
     if range_low - tolerance <= zone_level <= range_high + tolerance:
-        return "IRL"  # Internal Range Liquidity
+        return "IRL"
     else:
-        return "ERL"  # External Range Liquidity
+        return "ERL"
 
-# Vous pouvez utiliser cette fonction dans determine_advanced_narrative ou calculate_signal_confidence
-# Exemple dans determine_advanced_narrative, après avoir détecté un FVG :
-# dealing_range = detect_dealing_range(df_h4, lookback=50)
-# if dealing_range:
-#     for entry in narrative["potential_entries"]:
-#         level = entry.get("entry_level")
-#         if level:
-#             irl_erl_type = classify_zone_irl_erl(level, dealing_range)
-#             entry["irl_erl_type"] = irl_erl_type # Ajouter l'info à l'entrée
-#             logger.info(f"📊 FVG {level:.5f} classé comme {irl_erl_type} selon la range {dealing_range['low']:.5f}-{dealing_range['high']:.5f}")
-
-
-    
 def is_displacement_strong(df: pd.DataFrame, threshold: float = 0.0005) -> bool:
-    """
-    Vérifie si la dernière bougie a un corps > threshold (fort déplacement).
-    """
     if df.empty or len(df) < 2:
         return False
-
     last_candle = df.iloc[-1]
     body_size = abs(last_candle['close'] - last_candle['open'])
     total_range = last_candle['high'] - last_candle['low']
-
-    # Displacement fort si corps > threshold et ratio corps/range > 0.6
     return body_size >= threshold and (body_size / total_range) > 0.6
 
 def detect_amd_phase(df: pd.DataFrame, lookback: int = 50) -> str:
-    """
-    Détecte la phase AMD : Accumulation, Manipulation, Distribution.
-    Basé sur range et sweep.
-    """
     if df.empty or len(df) < lookback:
         return "UNKNOWN"
-
     recent_high = df['high'].tail(lookback).max()
     recent_low = df['low'].tail(lookback).min()
     current_price = df['close'].iloc[-1]
     range_size = recent_high - recent_low
-
-    # Accumulation : range étroit
     if range_size < (current_price * 0.005):
         return "ACCUMULATION"
-
-    # Manipulation : sweep fort (cassure du range)
     if df['high'].iloc[-1] > recent_high or df['low'].iloc[-1] < recent_low:
         return "MANIPULATION"
-
-    # Distribution : breakout confirmé après manipulation
     if current_price > recent_high or current_price < recent_low:
         return "DISTRIBUTION"
-
     return "UNKNOWN"
 
-
-
 def cluster_signals(signals: List[Dict], pair: str, max_distance_pips_for_clustering: float = None) -> List[Dict]:
-    """
-    Regroupe les entrées proches et ne garde que le meilleur (score le plus élevé).
-    Utilise la signature attendue par `advanced_main`.
-    """
     if not signals:
         return []
-
     pip_value = get_pip_value_for_pair(pair)
-    # Utilise max_distance_pips_for_clustering, ou une valeur par défaut de 15 pips si non fournie
     max_distance_pips_arg = max_distance_pips_for_clustering or 15.0
     max_distance_price = max_distance_pips_arg * pip_value
-
-    # Trier les signaux par score de confiance (décroissant) pour s'assurer que le premier est le meilleur
     signals.sort(key=lambda s: s.get("confidence_score", 0), reverse=True)
-
     clusters = []
     current_cluster = []
-
     for s in signals:
-        # Utilise le niveau d'entrée du signal
         lvl = float(s["entry_level"])
         if not current_cluster:
             current_cluster = [s]
             last_level = lvl
             continue
-        # Vérifier si le niveau est proche du dernier niveau du cluster actuel
         if abs(lvl - last_level) <= max_distance_price:
             current_cluster.append(s)
             last_level = lvl
         else:
-            # Fin du cluster actuel : sélectionner le meilleur et commencer un nouveau cluster
-            # Le tri initial garantit que le premier élément du cluster a le meilleur score
-            best_signal_in_cluster = current_cluster[0] # Déjà trié par score
+            best_signal_in_cluster = current_cluster[0]
             clusters.append(best_signal_in_cluster)
             current_cluster = [s]
             last_level = lvl
-
-    # Ne pas oublier le dernier cluster
     if current_cluster:
-        best_signal_in_cluster = current_cluster[0] # Déjà trié par score
+        best_signal_in_cluster = current_cluster[0]
         clusters.append(best_signal_in_cluster)
-
     if 'logger' in globals() and isinstance(globals()['logger'], logging.Logger):
         logger.info(f"🗂️ Entrées après clustering: {len(clusters)}")
-
     return clusters
 
-
-def is_crt_candle(candle: pd.Series, min_body_ratio: float = 0.5) -> bool: # <-- Changement ici : 0.5 au lieu de 0.7
-    """
-    Vérifie si la bougie est une CRT Candle (corps large, wicks courts).
-    Utilise `min_body_ratio` pour la flexibilité.
-    """
+def is_crt_candle(candle: pd.Series, min_body_ratio: float = 0.5) -> bool:
     body = abs(candle['close'] - candle['open'])
     total_range = candle['high'] - candle['low']
     if total_range == 0:
         return False
     body_ratio = body / total_range
-
-    # Assouplissement : on accepte maintenant >= 0.5
-    # Vérifier que les wicks sont courts (ex: < 20% du range total)
     upper_wick = candle['high'] - max(candle['open'], candle['close'])
     lower_wick = min(candle['open'], candle['close']) - candle['low']
     upper_wick_ratio = upper_wick / total_range
     lower_wick_ratio = lower_wick / total_range
-
-    # Condition : corps >= 50%, wicks <= 20% chacun
     return body_ratio >= min_body_ratio and upper_wick_ratio <= 0.2 and lower_wick_ratio <= 0.2
 
-
-
-
-
-    # Fonction pour convertir une différence de prix en pips
-  
-
-# --- Exemple de définition de MAX_DISTANCE_PIPS si elle n'est pas dans le scope ---
-# MAX_DISTANCE_PIPS = {
-#     "XAU_USD": 1.0,     # = 100 pips (1 pip = 0.01)
-#     "USD_JPY": 0.08,     # = 8 pips (1 pip = 0.01)
-#     "NAS100_USD": 1.0,   # = 10 pips (1 pip ≈ 0.1)
-#     "AUD_USD": 0.0080,   # = 80 pips (1 pip = 0.0001)
-#     "EUR_USD": 0.0080,
-#     "GBP_USD": 0.0080,
-#     "USD_CAD": 0.0010, # = 10 pips
-#     "DEFAULT": 0.0010
-# }
-# --- Fin exemple ---
-
 def rr_points(rr: float) -> int:
-    """ 2 pts si RR >= 3.0 ; 1 pt si RR >= 2.0 ; sinon 0."""
     if rr >= 3.0:
         return 2
     if rr >= 2.0:
@@ -614,96 +410,53 @@ def rr_points(rr: float) -> int:
     return 0
 
 def detect_tbs_setup(df: pd.DataFrame) -> dict:
-    """
-    Détecte un potentiel TBS Setup (The Book Setup) sur le dataframe M15.
-    Un TBS typique peut être un Inside Bar (IB) suivi d'une cassure confirmée.
-    Retourne un dictionnaire avec 'type' ('TBS_IB_BULL', 'TBS_IB_SELL', 'TBS_PIN_BUY', 'TBS_PIN_SELL', '') et 'level'.
-    """
     if df.empty or len(df) < 3:
         return {"type": "", "level": None}
-
-    # Récupérer les dernières bougies
-    current_candle = df.iloc[-1]  # Bougie M15 actuelle
-    prev_candle = df.iloc[-2]     # Bougie M15 précédente
-    prev2_candle = df.iloc[-3]    # Bougie M15 avant la précédente
-
-    # 1.1. Vérifier si la bougie N-1 est un "Inside Bar" (IB) de la bougie N-2
+    current_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    prev2_candle = df.iloc[-3]
     is_inside_bar = (
         prev_candle['high'] < prev2_candle['high'] and
         prev_candle['low'] > prev2_candle['low']
     )
-
-    # 1.2. Vérifier si la bougie N (current) casse l'IB (haut ou bas)
     if is_inside_bar:
-        # Cassure haussière de l'IB
         if current_candle['high'] > prev_candle['high']:
-            # Vérifier si la bougie de cassure est forte (corps > 60% du range)
             body_size = abs(current_candle['close'] - current_candle['open'])
             total_range = current_candle['high'] - current_candle['low']
             if body_size > total_range * 0.6:
                 return {"type": "TBS_IB_BULL", "level": prev_candle['high']}
-        # Cassure baissière de l'IB
         elif current_candle['low'] < prev_candle['low']:
             body_size = abs(current_candle['close'] - current_candle['open'])
             total_range = current_candle['high'] - current_candle['low']
             if body_size > total_range * 0.6:
                 return {"type": "TBS_IB_SELL", "level": prev_candle['low']}
-
-    # 1.3. Vérifier si la bougie N-1 est une "Pin Bar" forte (par exemple, basse)
-    # On peut aussi chercher une Pin Bar à l'extérieur de l'IB ou d'une zone clé.
     pb_body = abs(prev_candle['close'] - prev_candle['open'])
     pb_range = prev_candle['high'] - prev_candle['low']
-    if pb_range > 0: # Éviter la division par zéro
+    if pb_range > 0:
         pb_body_ratio = pb_body / pb_range
         pb_upper_wick = prev_candle['high'] - max(prev_candle['open'], prev_candle['close'])
         pb_lower_wick = min(prev_candle['open'], prev_candle['close']) - prev_candle['low']
-
-        # Pin Bar haussière (mèche inférieure longue)
         if pb_lower_wick > pb_upper_wick * 2 and pb_body_ratio < 0.4:
-            # Si la bougie actuelle casse le haut de la pin bar
             if current_candle['high'] > prev_candle['high']:
                 return {"type": "TBS_PIN_BUY", "level": prev_candle['high']}
-        # Pin Bar baissière (mèche supérieure longue)
         elif pb_upper_wick > pb_lower_wick * 2 and pb_body_ratio < 0.4:
-            # Si la bougie actuelle casse le bas de la pin bar
             if current_candle['low'] < prev_candle['low']:
                 return {"type": "TBS_PIN_SELL", "level": prev_candle['low']}
-
-    # Aucun TBS Setup détecté
     return {"type": "", "level": None}
 
 def detect_crt_candle(candle: pd.Series, min_body_ratio: float = 0.5) -> bool:
-    """
-    Détecte une CRT Candle (corps large, wicks courts).
-    Utilise `min_body_ratio` pour la flexibilité (assoupli à 0.5 au lieu de 0.7).
-    """
     body = abs(candle['close'] - candle['open'])
     total_range = candle['high'] - candle['low']
     if total_range == 0:
         return False
     body_ratio = body / total_range
-
-    # Assouplissement : on accepte maintenant >= 0.5
-    # Vérifier que les wicks sont courts (ex: < 20% du range total)
     upper_wick = candle['high'] - max(candle['open'], candle['close'])
     lower_wick = min(candle['open'], candle['close']) - candle['low']
     upper_wick_ratio = upper_wick / total_range
     lower_wick_ratio = lower_wick / total_range
-
-    # Condition : corps >= 50%, wicks <= 20% chacun
     return body_ratio >= min_body_ratio and upper_wick_ratio <= 0.2 and lower_wick_ratio <= 0.2
-    
-def compute_confidence_score(
-    *,
-    bias_points: int,
-    structure_points: int,
-    rr: float,
-    nested_fvg_in_zone: bool = False,
-    other_bonuses: int = 0
-) -> int:
-    """
-    Petit utilitaire si tu veux composer un score en dehors de calculate_signal_confidence.
-    """
+
+def compute_confidence_score(*, bias_points: int, structure_points: int, rr: float, nested_fvg_in_zone: bool = False, other_bonuses: int = 0) -> int:
     score = 0
     score += bias_points
     score += structure_points
@@ -714,11 +467,10 @@ def compute_confidence_score(
     return score
 
 def get_pair_settings(pair: str) -> dict:
-    """Retourne les paramètres spécifiques à la paire."""
     return PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
 # =============================
-# LOGGING
+# LOGGING (inchangé)
 # =============================
 LOG_ASCII_SAFE = os.getenv("LOG_ASCII_SAFE", "true").lower() == "true"
 
@@ -744,9 +496,7 @@ _MOJIBAKE_ASCII_REPLACEMENTS_V82 = {
     "ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€š": "", "Ãƒâ€š": "",
 }
 
-
 def repair_mojibake_v82(value) -> str:
-    """Make old mojibake log strings readable before handlers write them."""
     text = str(value)
     for bad, good in _MOJIBAKE_ASCII_REPLACEMENTS_V82.items():
         text = text.replace(bad, good)
@@ -800,11 +550,8 @@ def repair_mojibake_v82(value) -> str:
             text = text.replace(bad, good)
     return text
 
-
 class ReadableLogFormatterV82(logging.Formatter):
-    # V83: Railway-safe logs: no emojis/mojibake, and normalized tags only.
     ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]")
-
     def _clean_message_v83(self, message: str, levelname: str) -> str:
         text = repair_mojibake_v82(str(message))
         text = "".join(ch for ch in text if ord(ch) < 128)
@@ -827,18 +574,16 @@ class ReadableLogFormatterV82(logging.Formatter):
         else:
             tag = "[INFO]"
         return f"{tag} {text}"
-
     def format(self, record):
         original_msg = record.msg
         original_args = record.args
         try:
-            record.msg = self._clean_message_v83(record.getMessage(), record.levelname)  # V83
+            record.msg = self._clean_message_v83(record.getMessage(), record.levelname)
             record.args = ()
             return super().format(record)
         finally:
             record.msg = original_msg
             record.args = original_args
-
 
 _log_formatter_v82 = ReadableLogFormatterV82(
     fmt="%(asctime)s | %(levelname)-8s | %(message)s",
@@ -855,9 +600,9 @@ logging.basicConfig(
     force=True,
 )
 
-for _noisy_logger_v82 in ("urllib3", "requests", "oandapyV20", "oandapy"):  # V83
-    logging.getLogger(_noisy_logger_v82).setLevel(logging.ERROR)  # V83
-    logging.getLogger(_noisy_logger_v82).propagate = False  # V83
+for _noisy_logger_v82 in ("urllib3", "requests", "oandapyV20", "oandapy"):
+    logging.getLogger(_noisy_logger_v82).setLevel(logging.ERROR)
+    logging.getLogger(_noisy_logger_v82).propagate = False
 
 logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
 
@@ -865,59 +610,39 @@ logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
 # GESTION DES SIGNAUX
 # =============================
 sent_signals = {}
-
-    # A placer en zone globale (à côté de sent_signals) :
-recent_signals = {}  # { (pair, direction, level): datetime }
+recent_signals = {}
 
 def is_duplicate(pair: str, direction: str, level: float, ttl_seconds: int = 1800) -> bool:
-    """
-    Anti-doublon : 1 envoi par (pair, direction, niveau) toutes les 30 minutes (par défaut).
-    """
-    from datetime import datetime
     now = datetime.utcnow()
     key = (pair, direction, round(float(level), 4))
     last = recent_signals.get(key)
-
     if last and (now - last).total_seconds() < ttl_seconds:
         return True
-
     recent_signals[key] = now
     return False
-    
+
 def detect_rsi_divergence_haussiere(df: pd.DataFrame, lookback: int = 14) -> bool:
-    """Détecte une divergence haussière (prix fait un nouveau bas, RSI non)."""
     if len(df) < lookback * 2 + 5:
         return False
-
     prices = df["close"].tail(lookback * 2).reset_index(drop=True)
     rsi_vals = calculate_rsi(df["close"]).tail(lookback * 2).reset_index(drop=True)
-
-    # Trouver les creux de prix
     price_lows = []
     for i in range(3, len(prices) - 3):
-        if (prices.iloc[i] < prices.iloc[i-3:i].min() and 
-            prices.iloc[i] < prices.iloc[i+1:i+4].min()):
+        if (prices.iloc[i] < prices.iloc[i-3:i].min() and prices.iloc[i] < prices.iloc[i+1:i+4].min()):
             price_lows.append((i, prices.iloc[i]))
-
-    # Trouver les creux de RSI
     rsi_lows = []
     for i in range(3, len(rsi_vals) - 3):
-        if (rsi_vals.iloc[i] < rsi_vals.iloc[i-3:i].min() and 
-            rsi_vals.iloc[i] < rsi_vals.iloc[i+1:i+4].min()):
+        if (rsi_vals.iloc[i] < rsi_vals.iloc[i-3:i].min() and rsi_vals.iloc[i] < rsi_vals.iloc[i+1:i+4].min()):
             rsi_lows.append((i, rsi_vals.iloc[i]))
-
     if len(price_lows) < 2 or len(rsi_lows) < 2:
         return False
-
     last_price_low = price_lows[-1][1]
     prev_price_low = price_lows[-2][1]
     last_rsi_low = rsi_lows[-1][1]
     prev_rsi_low = rsi_lows[-2][1]
-
     return last_price_low < prev_price_low and last_rsi_low > prev_rsi_low
 
 def calculate_macd_momentum(df: pd.DataFrame) -> pd.Series:
-    """Calcule l'histogramme MACD pour mesurer l'accélération du momentum."""
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
@@ -926,35 +651,27 @@ def calculate_macd_momentum(df: pd.DataFrame) -> pd.Series:
     return histogram
 
 def is_momentum_accelerating(df: pd.DataFrame, lookback: int = 3) -> bool:
-    
     hist = calculate_macd_momentum(df)
     recent_hist = hist.tail(lookback)
     if len(recent_hist) < lookback:
         return False
-    # Vérifie si l'histogramme est croissant (accélération haussière)
     is_accelerating_up = all(recent_hist.iloc[i] > recent_hist.iloc[i-1] for i in range(1, len(recent_hist)))
-    # Vérifie si l'histogramme est décroissant (accélération baissière)
     is_accelerating_down = all(recent_hist.iloc[i] < recent_hist.iloc[i-1] for i in range(1, len(recent_hist)))
-    # Pour un momentum haussier : croissant ET positif
     is_BUY = is_accelerating_up and (recent_hist.iloc[-1] > 0)
-    # Pour un momentum baissier : décroissant ET négatif
     is_SELL = is_accelerating_down and (recent_hist.iloc[-1] < 0)
     return is_BUY or is_SELL
 
 def is_candle_momentum_strong(candle: pd.Series, direction: str) -> bool:
-    """Vérifie si la bougie a une structure de momentum fort."""
     body_size = abs(candle['close'] - candle['open'])
     total_range = candle['high'] - candle['low']
     if total_range == 0:
         return False
     body_ratio = body_size / total_range
-    # Pour un SELL : bougie rouge avec petit wick haut
     if direction == "SELL":
         is_red = candle['close'] < candle['open']
         upper_wick = candle['high'] - max(candle['open'], candle['close'])
         upper_wick_ratio = upper_wick / total_range
         return is_red and body_ratio > 0.7 and upper_wick_ratio < 0.2
-    # Pour un BUY : bougie verte avec petit wick bas
     elif direction == "BUY":
         is_green = candle['close'] > candle['open']
         lower_wick = min(candle['open'], candle['close']) - candle['low']
@@ -963,19 +680,13 @@ def is_candle_momentum_strong(candle: pd.Series, direction: str) -> bool:
     return False
 
 def is_volume_confirming_momentum(df: pd.DataFrame, direction: str) -> bool:
-    """Vérifie si le volume confirme le momentum."""
     last_3_volumes = df['volume'].tail(3)
     avg_volume = df['volume'].rolling(window=20).mean().iloc[-1]
-    # Volume en hausse + supérieur à la moyenne
     volume_increasing = last_3_volumes.iloc[-1] > last_3_volumes.iloc[-2] > last_3_volumes.iloc[-3]
     volume_above_avg = last_3_volumes.iloc[-1] > avg_volume * 1.2
     return volume_increasing and volume_above_avg
 
 def validate_risk_reward(entry_price, stop_loss, take_profit, min_ratio=2.0) -> bool:
-    """
-    Vérifie RR >= min_ratio.
-    Correction : Ajuste TP si RR < min_ratio.
-    """
     if None in [entry_price, stop_loss, take_profit]:
         return False
     risk = abs(entry_price - stop_loss)
@@ -986,27 +697,17 @@ def validate_risk_reward(entry_price, stop_loss, take_profit, min_ratio=2.0) -> 
     return rr_ratio >= min_ratio
 
 def price_to_pips(price_diff: float, pair: str) -> float:
-    """
-    Convertit une différence de prix en pips.
-    ATTENTION: Nécessite une mise à jour si de nouvelles paires avec tailles de pip spécifiques sont ajoutées.
-    """
-    pair = pair.upper() # Assurez-vous du format
+    pair = pair.upper()
     if pair == "XAU_USD":
         pip_size = 0.01
     elif pair == "NAS100_USD":
-        pip_size = 0.1  # 1 pip = 0.1 point pour NAS100
+        pip_size = 0.1
     elif "JPY" in pair:
-        pip_size = 0.01 # 1 pip = 0.01 pour les autres JPY
+        pip_size = 0.01
     else:
-        pip_size = 0.0001 # 1 pip = 0.0001 pour les paires Forex majeures/mineures
-
+        pip_size = 0.0001
     return abs(price_diff) / pip_size
 
-# Vous devriez également corriger la récupération de la pip_value dans advanced_main
-# Remplacez la ligne :
-# pip_value_for_clustering = 0.01 if "JPY" in pair else 0.0001
-# Par une fonction similaire à celle-ci, ou une constante définie globalement.
-# Exemple :
 def get_pip_value_for_pair(pair: str) -> float:
     pair = pair.upper()
     if pair == "XAU_USD":
@@ -1018,14 +719,7 @@ def get_pip_value_for_pair(pair: str) -> float:
     else:
         return 0.0001
 
-# Et utilisez-la dans advanced_main :
-# pip_value_for_clustering = get_pip_value_for_pair(pair)
-
 def detect_rsi_momentum_acceleration(df, period=14, lookback=8) -> dict:
-    """
-    Détecte accélération RSI + divergence.
-    Correction : Normalisation slope + robustesse.
-    """
     if len(df) < lookback + period + 5:
         return {'direction': 'NEUTRAL', 'strength': 0.0, 'is_diverging': False}
     rsi = calculate_rsi(df['close'], period)
@@ -1039,39 +733,27 @@ def detect_rsi_momentum_acceleration(df, period=14, lookback=8) -> dict:
     return {'direction': 'NEUTRAL', 'strength': 0.0}
 
 def detect_rsi_divergence(df: pd.DataFrame, lookback: int = 14) -> bool:
-    """Détecte une divergence baissière (prix fait un nouveau haut, RSI non)."""
     if len(df) < lookback * 2 + 5:
         return False
-
     prices = df["close"].tail(lookback * 2).reset_index(drop=True)
     rsi_vals = calculate_rsi(df["close"]).tail(lookback * 2).reset_index(drop=True)
-
-    # Trouver les pics de prix
     price_peaks = []
     for i in range(3, len(prices) - 3):
-        if (prices.iloc[i] > prices.iloc[i-3:i].max() and 
-            prices.iloc[i] > prices.iloc[i+1:i+4].max()):
+        if (prices.iloc[i] > prices.iloc[i-3:i].max() and prices.iloc[i] > prices.iloc[i+1:i+4].max()):
             price_peaks.append((i, prices.iloc[i]))
-
-    # Trouver les pics de RSI
     rsi_peaks = []
     for i in range(3, len(rsi_vals) - 3):
-        if (rsi_vals.iloc[i] > rsi_vals.iloc[i-3:i].max() and 
-            rsi_vals.iloc[i] > rsi_vals.iloc[i+1:i+4].max()):
+        if (rsi_vals.iloc[i] > rsi_vals.iloc[i-3:i].max() and rsi_vals.iloc[i] > rsi_vals.iloc[i+1:i+4].max()):
             rsi_peaks.append((i, rsi_vals.iloc[i]))
-
     if len(price_peaks) < 2 or len(rsi_peaks) < 2:
         return False
-
     last_price_peak = price_peaks[-1][1]
     prev_price_peak = price_peaks[-2][1]
     last_rsi_peak = rsi_peaks[-1][1]
     prev_rsi_peak = rsi_peaks[-2][1]
-
     return last_price_peak > prev_price_peak and last_rsi_peak < prev_rsi_peak
-    
+
 def cleanup_old_signals():
-    """Nettoie les signaux de plus de 24 heures."""
     now = time.time()
     for key, timestamp in list(sent_signals.items()):
         if now - timestamp > 86400:
@@ -1079,74 +761,47 @@ def cleanup_old_signals():
             logger.debug(f"🧹 Signal nettoyé: {key}")
 
 def is_signal_in_recent_zone(pair: str, direction: str, price: float, zone_start: float, zone_end: float) -> bool:
-    
     global sent_signals
     now = time.time()
     zone_width = abs(zone_end - zone_start)
-    tolerance = zone_width * 0.5  # 50% de la zone
-
+    tolerance = zone_width * 0.5
     for (p, d, lvl, z_s, z_e), timestamp in sent_signals.items():
         if p != pair or d != direction:
             continue
-        # Nettoyage des signaux > 4h
         if now - timestamp > 1 * 3600:
             continue
-        # Vérifier si les zones se chevauchent ou sont proches
         if abs(price - lvl) <= tolerance:
             return True
     return False
 
-
 def is_signal_sent_recently(pair: str, direction: str, price: float, zone_start: float, zone_end: float) -> bool:
     global sent_signals
     now = time.time()
-    # Tolérance plus stricte pour éviter les spam sur le même niveau exact
-    tolerance_price = 0.00001 if "JPY" not in pair and pair != "XAU_USD" else 0.01 
-    
+    tolerance_price = 0.00001 if "JPY" not in pair and pair != "XAU_USD" else 0.01
     price_rounded = round(price, 5)
-    
-    # Nettoyage automatique des vieux signaux dans la boucle de vérification pour éviter que le dict ne grossisse indéfiniment
     keys_to_delete = []
-    
     is_sent = False
     for key, timestamp in sent_signals.items():
-        # key structure: (pair, direction, level, zone_start, zone_end)
         p, d, lvl, _, _ = key
-        
-        # Nettoyage : si > 4h, on marque pour suppression
         if now - timestamp > 4 * 3600:
             keys_to_delete.append(key)
             continue
-
         if p == pair and d == direction:
-            # Vérifie si on est très proche d'un niveau déjà envoyé
             if abs(price_rounded - lvl) < tolerance_price:
-                 # Délai anti-spam (ex: 2h)
-                if now - timestamp < 2 * 3600: 
+                if now - timestamp < 2 * 3600:
                     is_sent = True
-    
-    # Appliquer le nettoyage
     for k in keys_to_delete:
         sent_signals.pop(k, None)
-        
     return is_sent
-    # SUPPRIMER LA LIGNE: sent_signals[...] = now   <-- C'était l'erreur fatale
 
 def detect_macd_acceleration(df: pd.DataFrame, lookback: int = 5) -> str:
-    """
-    Detects if MACD histogram is accelerating (increasing/decreasing rapidly).
-    Returns: 'STRONG_BUY', 'STRONG_SELL', 'WEAK_BUY', 'WEAK_SELL', 'NEUTRAL'
-    """
     hist = calculate_macd_momentum(df)
     if len(hist) < lookback + 2:
         return 'NEUTRAL'
     recent_hist = hist.tail(lookback + 1).values
-    # Calculate acceleration: change in change
     changes = [recent_hist[i] - recent_hist[i-1] for i in range(1, len(recent_hist))]
-    acceleration = sum(changes) / len(changes)  # Avg acceleration
-    
+    acceleration = sum(changes) / len(changes)
     last_hist = recent_hist[-1]
-    
     if acceleration > 0.0002 and last_hist > 0:
         return 'STRONG_BUY'
     elif acceleration < -0.0002 and last_hist < 0:
@@ -1159,14 +814,8 @@ def detect_macd_acceleration(df: pd.DataFrame, lookback: int = 5) -> str:
         return 'NEUTRAL'
 
 def detect_failure_swing(df: pd.DataFrame, lookback: int = 20) -> dict:
-    """
-    Détecte un Failure Swing selon Investopedia.
-    Retourne 'BULLISH', 'BEARISH' ou None.
-    """
     if len(df) < lookback + 5:
         return {"type": None, "level": None}
-
-    # Trouver les swing highs et lows
     swing_highs = []
     swing_lows = []
     for i in range(lookback, len(df) - 1):
@@ -1178,77 +827,45 @@ def detect_failure_swing(df: pd.DataFrame, lookback: int = 20) -> dict:
         if (current_low < df["low"].iloc[i-lookback:i].min() and
             current_low < df["low"].iloc[i+1:i+lookback+1].min()):
             swing_lows.append({"index": i, "price": current_low})
-
     if len(swing_highs) < 2 or len(swing_lows) < 2:
         return {"type": None, "level": None}
-
-    # Détecter un Failure Swing Haussier (Bottom)
     last_swing_low = swing_lows[-1]
     prev_swing_low = swing_lows[-2]
-    # Un failure swing haussier se forme quand le prix crée un nouveau bas (prev_swing_low) mais ne parvient pas à descendre aussi bas que le précédent (last_swing_low).
-    # Le prix doit ensuite rebondir au-dessus du point de faille (le plus haut point du mouvement baissier entre les deux swings).
-    # Pour simplifier, on vérifie si le dernier swing low est plus haut que le précédent et que le prix actuel est au-dessus du niveau du dernier swing low.
     if last_swing_low["price"] > prev_swing_low["price"]:
-        # Vérifier que le prix a rebondi au-dessus du niveau du dernier swing low
         if df["close"].iloc[-1] > last_swing_low["price"]:
             return {"type": "BULLISH", "level": last_swing_low["price"], "time": df.index[-1]}
-
-    # Détecter un Failure Swing Baissier (Top)
     last_swing_high = swing_highs[-1]
     prev_swing_high = swing_highs[-2]
-    # Un failure swing baissier se forme quand le prix crée un nouveau haut (prev_swing_high) mais ne parvient pas à monter aussi haut que le précédent (last_swing_high).
-    # Le prix doit ensuite chuter en dessous du point de faille.
     if last_swing_high["price"] < prev_swing_high["price"]:
-        # Vérifier que le prix a baissé en dessous du niveau du dernier swing high
         if df["close"].iloc[-1] < last_swing_high["price"]:
             return {"type": "BEARISH", "level": last_swing_high["price"], "time": df.index[-1]}
-
     return {"type": None, "level": None}
 
-
-
 def validate_momentum_confluence(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_m15: pd.DataFrame, direction: str) -> int:
-    """
-    Returns 0, 1, 2, or 3 based on how many timeframes agree on momentum direction.
-    """
     score = 0
-    
-    # H4
     h4_mom = detect_rsi_momentum_acceleration(df_h4, period=14, lookback=8)
     if h4_mom['direction'] == ('STRONG_' + direction) or h4_mom['direction'] == direction:
         score += 1
-    
-    # H1
     h1_mom = detect_rsi_momentum_acceleration(df_h1, period=14, lookback=8)
     if h1_mom['direction'] == ('STRONG_' + direction) or h1_mom['direction'] == direction:
         score += 1
-    
-    # M15
     m15_mom = detect_rsi_momentum_acceleration(df_m15, period=14, lookback=8)
     if m15_mom['direction'] == ('STRONG_' + direction) or m15_mom['direction'] == direction:
         score += 1
-    
     return score
 
 def detect_volume_momentum(df: pd.DataFrame, window: int = 10) -> str:
-    """
-    Measures if volume is accelerating or decelerating relative to its moving average.
-    Returns: 'STRONG_BUY', 'STRONG_SELL', 'NEUTRAL'
-    """
     vol_ma = df['volume'].rolling(window=window).mean()
     vol_current = df['volume'].iloc[-1]
     vol_prev = df['volume'].iloc[-2]
     vol_ma_current = vol_ma.iloc[-1]
     vol_ma_prev = vol_ma.iloc[-2]
-    
-    # Volume increasing faster than MA
     vol_ratio = vol_current / vol_ma_current
-    vol_accel = (vol_current - vol_prev) / vol_prev  # % change
-    
+    vol_accel = (vol_current - vol_prev) / vol_prev
     if vol_ratio > 1.3 and vol_accel > 0.2:
         return 'STRONG_BUY'
     elif vol_ratio > 1.3 and vol_accel < -0.2:
-        return 'STRONG_SELL'  # Volume spike fading — trap
+        return 'STRONG_SELL'
     elif vol_ratio > 1.1 and vol_accel > 0.1:
         return 'BUY'
     elif vol_ratio > 1.1 and vol_accel < -0.1:
@@ -1257,139 +874,76 @@ def detect_volume_momentum(df: pd.DataFrame, window: int = 10) -> str:
         return 'NEUTRAL'
 
 def mark_signal_sent(pair: str, direction: str, entry_level: float, zone_start: float, zone_end: float):
-    """Marque un signal comme envoyé avec sa zone complète."""
     key = (pair, direction, round(entry_level, 5), round(zone_start, 5), round(zone_end, 5))
     sent_signals[key] = time.time()
     logger.info(f"✅ Signal marqué comme envoyé : {key}")
 
 def detect_bos(df: pd.DataFrame, lookback: int = 50) -> dict:
-    """
-    Détecte un vrai BOS (continuation) :
-    - BOS BUY = cassure du dernier swing high + close au-dessus.
-    - BOS SELL = cassure du dernier swing low + close en dessous.
-    """
     if len(df) < lookback + 10:
         return {"type": None, "level": None, "time": None}
-
     swing_highs, swing_lows = detect_swing_points(df, lookback=5)
     if len(swing_highs) < 1 or len(swing_lows) < 1:
         return {"type": None, "level": None, "time": None}
-
     current_close = df["close"].iloc[-1]
     current_high = df["high"].iloc[-1]
     current_low = df["low"].iloc[-1]
-
-    # Dernier swing high
     last_swing_high = swing_highs[-1]["price"]
-    # Dernier swing low
     last_swing_low = swing_lows[-1]["price"]
-
-    # BOS BUY : cassure du dernier swing high
     if current_close > last_swing_high and current_high > last_swing_high:
-        return {
-            "type": "BOS_BUY",
-            "level": last_swing_high,
-            "time": df.index[-1]
-        }
-
-    # BOS SELL : cassure du dernier swing low
+        return {"type": "BOS_BUY", "level": last_swing_high, "time": df.index[-1]}
     if current_close < last_swing_low and current_low < last_swing_low:
-        return {
-            "type": "BOS_SELL",
-            "level": last_swing_low,
-            "time": df.index[-1]
-        }
-
+        return {"type": "BOS_SELL", "level": last_swing_low, "time": df.index[-1]}
     return {"type": None, "level": None, "time": None}
 
-
 def detect_choch(df: pd.DataFrame, lookback: int = 50) -> dict:
-    
     if len(df) < lookback + 15:
         return {"type": None, "level": None, "time": None}
-
     swing_highs, swing_lows = detect_swing_points(df, lookback=5)
-
     if len(swing_highs) < 2 or len(swing_lows) < 2:
         return {"type": None, "level": None, "time": None}
-
     current_price = df["close"].iloc[-1]
     current_time = df.index[-1]
-
-    # === CAS 1 : CHoCH SELL (inversion haussière → baissière) ===
-    # Séquence attendue : HH → HL → **LL**
     if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-        hh = swing_highs[-2]["price"]  # avant-dernier high
-        lh = swing_highs[-1]["price"]  # dernier high (doit être < hh → HL)
-        hl = swing_lows[-2]["price"]   # avant-dernier low
-        ll = swing_lows[-1]["price"]   # dernier low (doit être < hl → LL)
-
-        # Vérifier structure haussière initiale
+        hh = swing_highs[-2]["price"]
+        lh = swing_highs[-1]["price"]
+        hl = swing_lows[-2]["price"]
+        ll = swing_lows[-1]["price"]
         is_uptrend = (
             hh > (swing_highs[-3]["price"] if len(swing_highs) >= 3 else 0) and
             hl > (swing_lows[-3]["price"] if len(swing_lows) >= 3 else 0)
         )
-
-        # Inversion : LL < HL
         if is_uptrend and ll < hl and current_price < ll:
-            return {
-                "type": "CHOCH_SELL",
-                "level": ll,
-                "time": current_time
-            }
-
-    # === CAS 2 : CHoCH BUY (inversion baissière → haussière) ===
-    # Séquence attendue : LL → LH → **HH**
+            return {"type": "CHOCH_SELL", "level": ll, "time": current_time}
     if len(swing_lows) >= 2 and len(swing_highs) >= 2:
         ll = swing_lows[-2]["price"]
-        hl = swing_lows[-1]["price"]   # doit être > ll → LH
+        hl = swing_lows[-1]["price"]
         lh = swing_highs[-2]["price"]
-        hh = swing_highs[-1]["price"]  # doit être > lh → HH
-
-        # Vérifier structure baissière initiale
+        hh = swing_highs[-1]["price"]
         is_downtrend = (
             ll < (swing_lows[-3]["price"] if len(swing_lows) >= 3 else float('inf')) and
             lh < (swing_highs[-3]["price"] if len(swing_highs) >= 3 else float('inf'))
         )
-
-        # Inversion : HH > LH
         if is_downtrend and hh > lh and current_price > hh:
-            return {
-                "type": "CHOCH_BUY",
-                "level": hh,
-                "time": current_time
-            }
-
+            return {"type": "CHOCH_BUY", "level": hh, "time": current_time}
     return {"type": None, "level": None, "time": None}
 
-
 def generate_bos_signal(df: pd.DataFrame, pair: str, lookback: int = 20, rsi_col: str = "RSI") -> dict:
-    """
-    Génère un signal BOS amélioré avec SL sur swing et TP sur zone clé/FVG/swing.
-    Score pondéré par confluence (wick, RSI, momentum)
-    """
     bos = detect_bos(df, lookback=lookback)
     if bos["type"] is None:
         return {}
-
     current_price = df["close"].iloc[-1]
     score = 0
     confluences = []
-
     candle = df.iloc[-1]
     body = abs(candle["close"] - candle["open"])
     upper_wick = candle["high"] - max(candle["close"], candle["open"])
     lower_wick = min(candle["close"], candle["open"]) - candle["low"]
-
-    # Wick rejection
     if bos["type"] == "BOS_BUY" and lower_wick > body:
         score += 1
         confluences.append("WICK_REJECTION_BUY")
     elif bos["type"] == "BOS_SELL" and upper_wick > body:
         score += 1
         confluences.append("WICK_REJECTION_SELL")
-
-    # RSI filter
     if rsi_col in df.columns:
         rsi = df[rsi_col].iloc[-1]
         if bos["type"] == "BOS_BUY" and rsi < 50:
@@ -1398,8 +952,6 @@ def generate_bos_signal(df: pd.DataFrame, pair: str, lookback: int = 20, rsi_col
         elif bos["type"] == "BOS_SELL" and rsi > 50:
             score += 0.5
             confluences.append("RSI_RESIST")
-
-    # Swing levels pour SL
     if bos["type"] == "BOS_BUY":
         swing_lows = [df["low"].iloc[i] for i in range(lookback, len(df)-lookback)
                       if df["low"].iloc[i] <= df["low"].iloc[i-lookback:i+lookback+1].min()]
@@ -1407,16 +959,12 @@ def generate_bos_signal(df: pd.DataFrame, pair: str, lookback: int = 20, rsi_col
             return {}
         stop_loss = min(swing_lows)
         risk = current_price - stop_loss
-
-        # TP basé sur prochaine zone clé / FVG / swing high
         tp_candidates = [level for level in df["high"].iloc[-lookback:] if level > current_price]
-        take_profit = max(tp_candidates + [current_price + risk*1.5])  # fallback si pas de zone
+        take_profit = max(tp_candidates + [current_price + risk*1.5])
         score += 1
         confluences.append("BOS_BUY")
-
         if score < 1.5:
             return {}
-
         return {
             "pair": pair,
             "direction": "BUY",
@@ -1429,7 +977,6 @@ def generate_bos_signal(df: pd.DataFrame, pair: str, lookback: int = 20, rsi_col
             "score": round(score,2),
             "confluences": confluences
         }
-
     elif bos["type"] == "BOS_SELL":
         swing_highs = [df["high"].iloc[i] for i in range(lookback, len(df)-lookback)
                        if df["high"].iloc[i] >= df["high"].iloc[i-lookback:i+lookback+1].max()]
@@ -1437,16 +984,12 @@ def generate_bos_signal(df: pd.DataFrame, pair: str, lookback: int = 20, rsi_col
             return {}
         stop_loss = max(swing_highs)
         risk = stop_loss - current_price
-
-        # TP basé sur prochaine zone clé / FVG / swing low
         tp_candidates = [level for level in df["low"].iloc[-lookback:] if level < current_price]
         take_profit = min(tp_candidates + [current_price - risk*1.5])
         score += 1
         confluences.append("BOS_SELL")
-
         if score < 1.5:
             return {}
-
         return {
             "pair": pair,
             "direction": "SELL",
@@ -1459,15 +1002,12 @@ def generate_bos_signal(df: pd.DataFrame, pair: str, lookback: int = 20, rsi_col
             "score": round(score,2),
             "confluences": confluences
         }
-
     return {}
 
-
 # =============================
-# FONCTION GET_CANDLES_WITH_RETRY (robuste)
+# FONCTION GET_CANDLES_WITH_RETRY
 # =============================
 def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 500, retries: int = 5) -> pd.DataFrame:
-    """Récupère les candles avec système de retry. Accepte des jeux de données réduits."""
     valid_granularities = ["S5", "S10", "S15", "S30",
                            "M1", "M2", "M4", "M5", "M10", "M15", "M30",
                            "H1", "H2", "H3", "H4", "H6", "H8", "H12",
@@ -1475,7 +1015,6 @@ def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 
     if granularity not in valid_granularities:
         logger.error(f"❌ Granularité invalide: {granularity}")
         return pd.DataFrame()
-    
     for attempt in range(retries):
         try:
             r = instruments.InstrumentsCandles(
@@ -1490,18 +1029,15 @@ def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 
             api.request(r)
             resp = getattr(r, "response", {}) or {}
             candles = resp.get("candles", [])
-            
             if not candles:
                 logger.warning(f"⚠️ Aucune candle reçue pour {instrument} {granularity} (tentative {attempt+1})")
                 time.sleep(3)
                 continue
-            
             data = []
             for c in candles:
                 mid = c.get("mid")
                 if not mid:
                     continue
-                # Filtrer les incomplètes uniquement sur M15/H1/H4/D
                 if not c.get("complete", False) and (granularity in ["M15", "H1", "H4", "D"]):
                     continue
                 try:
@@ -1516,42 +1052,33 @@ def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 
                 except Exception:
                     logger.debug(f"⚠️ Candle malformed skipped for {instrument}: {c}")
                     continue
-            
-            # ✅ CORRECTION : on accepte dès qu'on a AU MOINS 'count' ou ce qui est disponible
-            # Pour H1, on peut accepter 20 bougies (1 jour de trading)
             min_required = 20 if granularity == "H1" else min(count, 50)
             if len(data) < min_required:
-                # ⚠️ MAIS SEULEMENT SI ON EST SUR UN TF HAUT
-                if granularity in ["H4", "D"] and len(data) > 5:  # ← Si on a au moins 5 jours → OK
+                if granularity in ["H4", "D"] and len(data) > 5:
                     logger.info(f"ℹ️ Données D/{instrument}: {len(data)} candles (minimum requis: {min_required}) → Accepté malgré tout")
                 else:
                     logger.warning(f"⚠️ Données insuffisantes pour {instrument} {granularity}: {len(data)} < {min_required}")
                     time.sleep(3)
                     continue
-
             df = pd.DataFrame(data)
             df["time"] = pd.to_datetime(df["time"])
             df.set_index("time", inplace=True)
             df.attrs['instrument'] = instrument
             logger.info(f"✅ {instrument} {granularity}: {len(df)} candles (dernier prix: {df['close'].iloc[-1]:.5f})")
             return df
-            
         except oandapyV20.exceptions.V20Error as e:
             logger.warning(f"❌ Erreur OANDA {attempt + 1}/{retries} pour {instrument}: {e}")
             time.sleep(5 ** attempt if attempt < 4 else 5)
         except Exception as e:
             logger.warning(f"❌ Tentative {attempt + 1}/{retries} pour {instrument}: {e}")
             time.sleep(5 ** attempt if attempt < 4 else 5)
-    
     logger.error(f"❌ Échec après {retries} tentatives pour {instrument} {granularity}")
     return pd.DataFrame()
 
 # =============================
 # INDICATEURS TECHNIQUES
 # =============================
-
 def validate_volume_confirmation(df: pd.DataFrame, fvg: dict) -> bool:
-    """Vérifie si le volume est suffisant après le retest du FVG."""
     if "time" not in fvg:
         return False
     fvg_time = fvg["time"]
@@ -1563,45 +1090,31 @@ def validate_volume_confirmation(df: pd.DataFrame, fvg: dict) -> bool:
     return max_volume > avg_volume * 1.5
 
 def ema(series: pd.Series, period: int) -> pd.Series:
-   
     return series.ewm(span=period, adjust=False).mean()
 
 def _directional_score(raw_score: int, direction: str) -> int:
-    """Convertit un score de biais (+ haussier / - baissier) en score pour BUY/SELL."""
     return int(raw_score) if (direction or "").upper() == "BUY" else -int(raw_score)
 
 def score_ema_trend(df_h1: pd.DataFrame) -> int:
-    """
-    Score EMA50 H1 non bloquant, borné à [-3, +3].
-    Positif = contexte haussier, négatif = contexte baissier.
-    """
     if df_h1 is None or df_h1.empty or "close" not in df_h1 or len(df_h1) < 2:
         return 0
-
     ema50 = df_h1["close"].ewm(span=EMA_MEDIUM, adjust=False).mean()
     if len(ema50.dropna()) < 2:
         return 0
-
     price = float(df_h1["close"].iloc[-1])
     score = 2 if price > float(ema50.iloc[-1]) else -1
     score += 1 if float(ema50.iloc[-1]) > float(ema50.iloc[-2]) else -2
     return max(-3, min(3, int(score)))
 
 def score_market_structure(df_h1: pd.DataFrame) -> int:
-    """
-    Score structurel H1, borné à [-3, +3].
-    HH+HL => +3, HH seul => +1, LH+LL => -3, LL seul => -1, sinon 0.
-    """
     if df_h1 is None or df_h1.empty or len(df_h1) < 10:
         return 0
-
     try:
         swing_highs, swing_lows = detect_swing_points_advanced(df_h1, min(SWING_LOOKBACK, max(1, len(df_h1) // 10)))
         recent_highs = sorted(swing_highs, key=lambda x: x["index"])[-2:]
         recent_lows = sorted(swing_lows, key=lambda x: x["index"])[-2:]
     except Exception:
         recent_highs, recent_lows = [], []
-
     if len(recent_highs) < 2:
         highs = df_h1["high"].tail(20)
         split = max(2, len(highs) // 2)
@@ -1610,12 +1123,10 @@ def score_market_structure(df_h1: pd.DataFrame) -> int:
         lows = df_h1["low"].tail(20)
         split = max(2, len(lows) // 2)
         recent_lows = [{"price": lows.iloc[:split].min()}, {"price": lows.iloc[split:].min()}]
-
     higher_high = float(recent_highs[-1]["price"]) > float(recent_highs[-2]["price"])
     lower_high = float(recent_highs[-1]["price"]) < float(recent_highs[-2]["price"])
     higher_low = float(recent_lows[-1]["price"]) > float(recent_lows[-2]["price"])
     lower_low = float(recent_lows[-1]["price"]) < float(recent_lows[-2]["price"])
-
     if higher_high and higher_low:
         return 3
     if higher_high:
@@ -1627,7 +1138,6 @@ def score_market_structure(df_h1: pd.DataFrame) -> int:
     return 0
 
 def score_higher_timeframe_alignment(direction: str, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> int:
-    """Bonus/malus si les structures H1 et H4 sont alignées/opposées dans le sens du trade."""
     h1 = _directional_score(score_market_structure(df_h1), direction)
     h4 = _directional_score(score_market_structure(df_h4), direction)
     if h1 > 0 and h4 > 0:
@@ -1637,11 +1147,9 @@ def score_higher_timeframe_alignment(direction: str, df_h1: pd.DataFrame, df_h4:
     return 0
 
 def compute_final_score(score_components: dict) -> int:
-    """Addition centralisée des composantes du score final."""
     return int(sum(int(v or 0) for v in score_components.values()))
 
 def log_score_detail(score_components: dict, total: int, decision: str) -> None:
-    """Log détaillé demandé pour chaque signal scoré."""
     labels = [
         ("ICT", "ICT"),
         ("EMA", "EMA"),
@@ -1662,7 +1170,6 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
     logger.info(f"Decision = {decision}")
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-    """Calcule le RSI complet sur la série de prix."""
     delta = prices.diff()
     gain = (delta.where(delta > 0, 0)).fillna(0)
     loss = (-delta.where(delta < 0, 0)).fillna(0)
@@ -1674,10 +1181,6 @@ def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
 
 def calculate_stoch_rsi(prices: pd.Series, rsi_period: int = 14, stoch_period: int = 14,
                         smooth_k: int = 3, smooth_d: int = 3) -> tuple:
-    """
-    Stochastic RSI identique à l'indicateur TradingView 'Stoch RSI (3,3,14,14)'.
-    Retourne (K, D) en pourcentage [0-100]. Valeur < 20 = survendu, > 80 = surachat.
-    """
     try:
         rsi = calculate_rsi(prices, rsi_period)
         rsi_min = rsi.rolling(window=stoch_period).min()
@@ -1695,17 +1198,12 @@ def calculate_stoch_rsi(prices: pd.Series, rsi_period: int = 14, stoch_period: i
     except Exception:
         return 50.0, 50.0
 
-
 def get_last_rsi(prices: pd.Series, period: int = 14) -> float:
-    """
-    Calcule le RSI avec ta.momentum (fiable, pas de division par zéro).
-    """
     try:
         rsi_indicator = RSIIndicator(close=prices, window=period)
         rsi_values = rsi_indicator.rsi()
         return rsi_values.dropna().iloc[-1]
     except Exception:
-        # Fallback si ta.momentum échoue
         delta = prices.diff().dropna()
         gain = (delta.where(delta > 0, 0)).fillna(0)
         loss = (-delta.where(delta < 0, 0)).fillna(0)
@@ -1716,7 +1214,6 @@ def get_last_rsi(prices: pd.Series, period: int = 14) -> float:
         return rsi.dropna().iloc[-1] if len(rsi.dropna()) > 0 else 50.0
 
 def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
-   
     try:
         high = df['high'].values
         low = df['low'].values
@@ -1727,18 +1224,15 @@ def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
             raise ValueError("talib ATR invalid")
         return last
     except Exception:
-        # Fallback robuste
         tr1 = df['high'] - df['low']
         tr2 = (df['high'] - df['close'].shift(1)).abs()
         tr3 = (df['low'] - df['close'].shift(1)).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr_fallback = tr.ewm(alpha=1/period, adjust=False).mean().iloc[-1]
         if np.isnan(atr_fallback) or atr_fallback <= 0.0:
-            # Si même le fallback est nul → utiliser 0.0001 comme valeur minimale ABSOLUE
             logger.warning(f"⚠️ ATR fallback = 0 pour {df.attrs.get('instrument', 'N/A')} → Utilisation de 0.0001")
             return 0.0001
         return float(atr_fallback)
-
 
 def calculate_volatility_ratio(df: pd.DataFrame, pair: str) -> bool:
     atr = calculate_atr(df)
@@ -1755,93 +1249,58 @@ def calculate_volatility_ratio(df: pd.DataFrame, pair: str) -> bool:
 # =============================
 # VALIDATIONS ET FILTRES
 # =============================
-
-
 def validate_multi_timeframe_confluence(df_h4: pd.DataFrame, direction: str) -> bool:
-    """
-    Valide la confluence sur H4.
-    Correction :
-    - Autorise si H1 + M15 confirment même si H4 est neutre.
-    - Ajoute tolérance pour RR > 3.
-    """
     ema_h4_fast = df_h4["close"].ewm(span=20, adjust=False).mean().iloc[-1]
     ema_h4_slow = df_h4["close"].ewm(span=200, adjust=False).mean().iloc[-1]
-
     if direction == "BUY":
-        return ema_h4_fast > ema_h4_slow or True  # Autorise si autres TF confirment
+        return ema_h4_fast > ema_h4_slow or True
     elif direction == "SELL":
         return ema_h4_fast < ema_h4_slow or True
     return True
 
-
-def determine_trend_direction(
-    df: pd.DataFrame,
-    ema_fast_period=20,
-    ema_medium_period=50,
-    ema_slow_period=200
-) -> str:
-    """Détermine la tendance directionnelle avec les EMA."""
+def determine_trend_direction(df: pd.DataFrame, ema_fast_period=20, ema_medium_period=50, ema_slow_period=200) -> str:
     if len(df) < ema_slow_period + 10:
         return "NEUTRAL"
-
     ema_fast = ema(df["close"], ema_fast_period)
     ema_medium = ema(df["close"], ema_medium_period)
     ema_slow = ema(df["close"], ema_slow_period)
     current_price = df["close"].iloc[-1]
-
     logger.info(f"   📉 EMA{ema_fast_period}: {ema_fast.iloc[-1]:.5f}")
     logger.info(f"   📉 EMA{ema_medium_period}: {ema_medium.iloc[-1]:.5f}")
     logger.info(f"   📉 EMA{ema_slow_period}: {ema_slow.iloc[-1]:.5f}")
-
     if current_price > ema_slow.iloc[-1] and ema_fast.iloc[-1] > ema_slow.iloc[-1]:
         return "BUY"
     elif current_price < ema_slow.iloc[-1] and ema_fast.iloc[-1] < ema_slow.iloc[-1]:
         return "SELL"
     else:
         return "NEUTRAL"
-  
+
 def detect_mss(df: pd.DataFrame, lookback: int = 10) -> dict:
-    """Détecte un Market Structure Shift (MSS) avec labels BUY/SELL."""
     if df.empty or len(df) < lookback + 5:
         return {"type": None, "level": None}
-    
     highs = df["high"].rolling(window=lookback).max()
     lows = df["low"].rolling(window=lookback).min()
     last_close = df["close"].iloc[-1]
     last_time = df.index[-1]
     ema20 = df["close"].ewm(span=20).mean().iloc[-1]
-    
-    # MSS HAUSSE : cassure du dernier haut + close > EMA20
     if last_close > highs.iloc[-2] and last_close > ema20:
         return {"type": "MSS_BUY", "level": highs.iloc[-2], "time": last_time}
-    
-    # MSS BAISSE : cassure du dernier bas + close < EMA20
     if last_close < lows.iloc[-2] and last_close < ema20:
         return {"type": "MSS_SELL", "level": lows.iloc[-2], "time": last_time}
-    
     return {"type": None, "level": None}
-    
+
 def validate_signal_coherence(pair: str, direction: str, df_h4: pd.DataFrame, df_m15: pd.DataFrame) -> bool:
-    """
-    Valide que le signal est cohérent avec la tendance globale.
-    - Pour SELL : RSI M15 ne doit PAS être en surachat (mais peut être en survente modérée)
-    - Pour BUY : RSI M15 ne doit PAS être en survendu (mais peut être en surachat modéré)
-    """
     if direction not in ["BUY", "SELL"]:
         logger.error(f"❌ Direction invalide: {direction}. Doit être BUY ou SELL.")
         return False
-
     current_price = df_m15["close"].iloc[-1]
     rsi_m15 = get_last_rsi(df_m15["close"])
     rsi_h4 = get_last_rsi(df_h4["close"]) if df_h4 is not None else 50
     ema20_h4 = df_h4["close"].ewm(span=20).mean().iloc[-1] if len(df_h4) >= 20 else 0
     ema200_h4 = df_h4["close"].ewm(span=200).mean().iloc[-1] if len(df_h4) >= 200 else 0
-
     logger.info(f"   🔍 Vérification cohérence {pair} {direction}:")
     logger.info(f"   • Prix: {current_price:.5f}")
     logger.info(f"   • RSI M15: {rsi_m15:.1f}, RSI H4: {rsi_h4:.1f}")
-
-    # ✅ Pour un SELL : on accepte même si RSI M15 est à 25 (survente légère), mais pas s'il est à 90
     if direction == "SELL":
         if rsi_m15 > 85:
             logger.info("   ❌ RSI M15 trop haut → survendu impossible")
@@ -1853,7 +1312,6 @@ def validate_signal_coherence(pair: str, direction: str, df_h4: pd.DataFrame, df
             logger.info("   ✅ Tendance H4 baissière → SELL autorisé")
         else:
             logger.info("   ⚠️ EMA20 > EMA200 → risque de contre-tendance")
-    # ✅ Pour un BUY : on accepte RSI très bas (oversold = meilleure entrée FVG)
     elif direction == "BUY":
         if rsi_m15 < 5:
             logger.info("   ❌ RSI M15 trop bas → signal invalide")
@@ -1865,12 +1323,10 @@ def validate_signal_coherence(pair: str, direction: str, df_h4: pd.DataFrame, df
             logger.info("   ✅ Tendance H4 haussière → BUY autorisé")
         else:
             logger.info("   ⚠️ EMA20 < EMA200 → risque de contre-tendance")
-
     logger.info("   ✅ Signal cohérent")
     return True
-    
+
 def convert_direction_to_buy_sell(direction: str) -> str:
-    """Convertit BUY/SELL en BUY/SELL"""
     if direction == "BUY":
         return "BUY"
     elif direction == "SELL":
@@ -1881,24 +1337,15 @@ def convert_direction_to_buy_sell(direction: str) -> str:
         return "NEUTRAL"
 
 def detect_macd_divergence(df: pd.DataFrame, lookback: int = 14) -> str:
-    """
-    Détecte la divergence MACD (Régulière, Cachée, Exagérée).
-    Retourne 'BULLISH', 'BEARISH' ou 'NONE'.
-    """
     if len(df) < lookback * 2 + 5:
         return "NONE"
-
-    # Calculer le MACD
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     histogram = macd_line - signal_line
-
     prices = df["close"].tail(lookback * 2).reset_index(drop=True)
     macd_vals = macd_line.tail(lookback * 2).reset_index(drop=True)
-
-    # Trouver les pics et creux du prix
     price_peaks = []
     price_lows = []
     for i in range(3, len(prices) - 3):
@@ -1908,8 +1355,6 @@ def detect_macd_divergence(df: pd.DataFrame, lookback: int = 14) -> str:
         if (prices.iloc[i] < prices.iloc[i-3:i].min() and
             prices.iloc[i] < prices.iloc[i+1:i+4].min()):
             price_lows.append((i, prices.iloc[i]))
-
-    # Trouver les pics et creux du MACD
     macd_peaks = []
     macd_lows = []
     for i in range(3, len(macd_vals) - 3):
@@ -1919,82 +1364,54 @@ def detect_macd_divergence(df: pd.DataFrame, lookback: int = 14) -> str:
         if (macd_vals.iloc[i] < macd_vals.iloc[i-3:i].min() and
             macd_vals.iloc[i] < macd_vals.iloc[i+1:i+4].min()):
             macd_lows.append((i, macd_vals.iloc[i]))
-
-    # Vérification des divergences
     if len(price_peaks) >= 2 and len(macd_peaks) >= 2:
         last_price_peak = price_peaks[-1][1]
         prev_price_peak = price_peaks[-2][1]
         last_macd_peak = macd_peaks[-1][1]
         prev_macd_peak = macd_peaks[-2][1]
-
-        # Regular Bearish Divergence
         if last_price_peak > prev_price_peak and last_macd_peak < prev_macd_peak:
             return "BEARISH"
-        # Hidden Bullish Divergence
         elif last_price_peak < prev_price_peak and last_macd_peak > prev_macd_peak:
             return "BULLISH"
-
     if len(price_lows) >= 2 and len(macd_lows) >= 2:
         last_price_low = price_lows[-1][1]
         prev_price_low = price_lows[-2][1]
         last_macd_low = macd_lows[-1][1]
         prev_macd_low = macd_lows[-2][1]
-
-        # Regular Bullish Divergence
         if last_price_low < prev_price_low and last_macd_low > prev_macd_low:
             return "BULLISH"
-        # Hidden Bearish Divergence
         elif last_price_low > prev_price_low and last_macd_low < prev_macd_low:
             return "BEARISH"
-
     return "NONE"
 
 def validate_entry_momentum(df_m15: pd.DataFrame, df_h4: pd.DataFrame, direction: str) -> bool:
-    """
-    Valide momentum via RSI.
-    Correction :
-    - Autorise RSI extrême si divergence confirmée.
-    """
     rsi_m15 = get_last_rsi(df_m15["close"])
     rsi_h4 = get_last_rsi(df_h4["close"]) if df_h4 is not None else 50
-
     if direction == "BUY":
         return rsi_m15 > 25 or detect_rsi_divergence_haussiere(df_m15)
     elif direction == "SELL":
         return rsi_m15 < 75 or detect_rsi_divergence(df_m15)
     return False
-        
+
 def is_new_low_daily(df_daily: pd.DataFrame, lookback_days: int = 7) -> bool:
-    """
-    Détecte si le prix actuel est un nouveau bas hebdomadaire sur le timeframe D1.
-    Utilisé pour valider les signaux BUY après un 'New Low Area'.
-    """
     if df_daily.empty or len(df_daily) < lookback_days + 1:
         return False
-
     recent_lows = df_daily["low"].tail(lookback_days)
     current_low = recent_lows.iloc[-1]
-
     return current_low <= recent_lows.min()
 
 def get_min_gap_for_pair(pair: str) -> float:
-    """
-    Retourne la taille minimale du gap (en prix) pour un FVG.
-    """
     pair = pair.upper()
     if pair == "XAU_USD":
-        return 0.02  # 5 pips (car 1 pip = 0.01)
+        return 0.02
     elif "JPY" in pair:
-        return 0.03 
-     
+        return 0.03
     elif pair == "GBP_USD":
-        return 0.00015  # ✅ Ajustement demandé
-# 5 pips (car 1 pip = 0.01)
+        return 0.00015
     else:
-        return 0.0002  # 5 pips (car 1 pip = 0.0001)
+        return 0.0002
 
 def detect_sharp_drop(df: pd.DataFrame, threshold: float = 0.01) -> bool:
-    
     if len(df) < 2:
         return False
     last_close = df["close"].iloc[-1]
@@ -2006,74 +1423,50 @@ def detect_sharp_drop(df: pd.DataFrame, threshold: float = 0.01) -> bool:
 # GESTION DES ORDRES
 # =============================
 BUFFER_PIPS = {
-    "XAU_USD": 0.30,     # 30 cents = 3 pips sur l'or
+    "XAU_USD": 0.30,
     "USD_JPY": 0.03,
-    "NAS100_USD": 1.0,# 3 pips sur JPY
-    "DEFAULT": 0.00030   # 3 pips sur les paires standards
+    "NAS100_USD": 1.0,
+    "DEFAULT": 0.00030
 }
 
 def calculate_sl_tp(entry_price: float, atr: float, direction: str, pair: str,
-                    entry_type: str = "FVG_RETEST", fvg_data: dict = None, 
+                    entry_type: str = "FVG_RETEST", fvg_data: dict = None,
                     breaker_level: float = None) -> tuple:
-    """
-    Calcul SL/TP corrigé pour utiliser les limites réelles de l'Imbalance (FVG).
-    """
     try:
         if None in [entry_price, atr, direction, pair]:
             return None, None
-
         settings = SIGNAL_RISK_SETTINGS.get(entry_type, SIGNAL_RISK_SETTINGS["FVG_RETEST"])
         sl_mult = settings["sl_multiplier"]
         tp_mult = settings["tp_multiplier"]
-
         stop_loss = 0.0
         take_profit = 0.0
-
-        # --- CORRECTION STOP LOSS STRUCTUREL ---
         if direction == "BUY":
-            # Par défaut ATR
             stop_loss = entry_price - (atr * sl_mult)
-            
-            # Si c'est un FVG, le SL doit être SOUS le bas du FVG (low_level)
             if fvg_data and "low_level" in fvg_data:
                 fvg_bottom = float(fvg_data["low_level"])
-                # On place le SL un peu sous le bas du FVG (ex: 2 pips de marge)
-                pip_buffer = get_pip_value_for_pair(pair) * 20 # 2 pips/20 points
+                pip_buffer = get_pip_value_for_pair(pair) * 20
                 structural_sl = fvg_bottom - pip_buffer
-                # On prend le SL le plus sûr (le plus bas entre ATR et Structurel) pour éviter de se faire mèche
                 stop_loss = min(stop_loss, structural_sl)
-
             take_profit = entry_price + (atr * tp_mult)
-            
-        else: # SELL
-            # Par défaut ATR
+        else:
             stop_loss = entry_price + (atr * sl_mult)
-            
-            # Si c'est un FVG, le SL doit être AU-DESSUS du haut du FVG (high_level)
             if fvg_data and "high_level" in fvg_data:
                 fvg_top = float(fvg_data["high_level"])
-                # On place le SL un peu au dessus du haut du FVG
                 pip_buffer = get_pip_value_for_pair(pair) * 20
                 structural_sl = fvg_top + pip_buffer
-                # On prend le plus haut
                 stop_loss = max(stop_loss, structural_sl)
-
             take_profit = entry_price - (atr * tp_mult)
-
-        # Ajustement RR minimum 1:2
         risk = abs(entry_price - stop_loss)
-        if risk == 0: return None, None
-        
+        if risk == 0:
+            return None, None
         reward = abs(take_profit - entry_price)
         if reward / risk < 2.0:
             take_profit = entry_price + (risk * 2.0) if direction == "BUY" else entry_price - (risk * 2.0)
-
         return round(stop_loss, 5), round(take_profit, 5)
-
     except Exception as e:
         logger.error(f"Erreur SL/TP: {e}")
         return None, None
-        
+
 # =============================
 # ALERTES TELEGRAM
 # =============================
@@ -2081,20 +1474,14 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
                        stop_loss: float, take_profit: float, narrative: dict,
                        bias_analysis: dict, rsi: float, entry_type: str,
                        confidence_score: int = None):
-    """Envoie une alerte Telegram avec vérification de cohérence et gestion des None."""
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("⚠️ Telegram désactivé")
         return
-
-    # ✅ VÉRIFICATION DES VALEURS OBLIGATOIRES
     if None in [pair, direction, entry_price, stop_loss, take_profit, rsi, entry_type]:
         logger.error(f"❌ Valeur manquante pour Telegram: pair={pair}, direction={direction}, entry={entry_price}, sl={stop_loss}, tp={take_profit}, rsi={rsi}, type={entry_type}")
         return
-
-    # ✅ VÉRIFICATION DE COHÉRENCE AVANT ENVOI
     if direction == "BUY":
         if stop_loss > entry_price or take_profit < entry_price:
             logger.error(f"❌ INCOHÉRENCE SL/TP pour BUY: Entry={entry_price}, SL={stop_loss}, TP={take_profit}")
@@ -2106,21 +1493,15 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     else:
         logger.error(f"❌ Direction invalide: {direction}")
         return
-
-    # Extraction infos prédictives injectées dans bias_analysis par advanced_main
     win_rate = bias_analysis.get("win_rate", "") if bias_analysis else ""
     quality_label = bias_analysis.get("quality_label", "") if bias_analysis else ""
     score_details = bias_analysis.get("score_details", {}) if bias_analysis else {}
-
-    # Calcul RR pour affichage
     try:
         dist_sl = abs(entry_price - stop_loss)
         dist_tp = abs(take_profit - entry_price)
         rr_display = f"{dist_tp / dist_sl:.2f}" if dist_sl > 0 else "N/A"
     except Exception:
         rr_display = "N/A"
-
-    # Score info enrichi
     if confidence_score:
         score_info = (
             f"<b>Score:</b> {confidence_score}/{SCORING_CONFIG['MIN_CONFIDENCE_SCORE']} "
@@ -2130,8 +1511,6 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         )
     else:
         score_info = ""
-
-    # Confluences actives pour affichage condensé
     confluence_tags = []
     if score_details.get("D1_Trend", "").startswith("+"):
         confluence_tags.append("D1")
@@ -2144,8 +1523,6 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     if score_details.get("Session", "").startswith("+"):
         confluence_tags.append("SESSION")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
-
-    # ✅ GARANTIR que toutes les valeurs sont formatables
     safe_pair = str(pair) if pair else "N/A"
     safe_direction = str(direction) if direction else "N/A"
     safe_entry_type = str(entry_type) if entry_type else "N/A"
@@ -2154,7 +1531,6 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     safe_stop_loss = f"{stop_loss:.5f}" if stop_loss is not None else "N/A"
     safe_take_profit = f"{take_profit:.5f}" if take_profit is not None else "N/A"
     safe_rsi = f"{rsi:.1f}" if rsi is not None else "N/A"
-
     message = f"""
 <b>FVG ORDERFLOW TRADING SIGNAL</b>
 <b>Paire:</b> {safe_pair}
@@ -2168,41 +1544,27 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
 <b>RSI:</b> {safe_rsi}
 <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        response = requests.post(
-            url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"},
-            timeout=10,
-        )
+        response = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
         if response.status_code == 200:
             logger.info(f"✅ Telegram envoyé pour {safe_pair}")
         else:
             logger.error(f"❌ Échec Telegram: {response.text}")
     except Exception as e:
         logger.error(f"💥 Erreur réseau Telegram: {e}")
+
 # =============================
 # DÉTECTION LIQUIDITÉ HEBDOMADAIRE
 # =============================
 def detect_weekly_liquidity(df: pd.DataFrame) -> dict:
-    """Détecte les highs/lows hebdomadaires pour la liquidité."""
     if len(df) < 7:
         return {}
-
-    df_weekly = df.resample('W').agg({
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'open': 'first'
-    })
-
+    df_weekly = df.resample('W').agg({'high': 'max', 'low': 'min', 'close': 'last', 'open': 'first'})
     if len(df_weekly) < 2:
         return {}
-
     current_week = df_weekly.iloc[-1]
     previous_week = df_weekly.iloc[-2]
-
     return {
         "current_week_high": current_week["high"],
         "current_week_low": current_week["low"],
@@ -2212,91 +1574,44 @@ def detect_weekly_liquidity(df: pd.DataFrame) -> dict:
     }
 
 # =============================
-# DÉTECTION SWING POINTS AVANCÉE
+# DÉTECTION SWING POINTS
 # =============================
 def detect_swing_points(df: pd.DataFrame, lookback: int = 5) -> tuple:
-    """
-    Détecte les vrais swing highs et swing lows.
-    Un swing high = plus haut que 'lookback' bougies avant ET après.
-    """
     swing_highs = []
     swing_lows = []
-
     for i in range(lookback, len(df) - lookback):
         high = df["high"].iloc[i]
         low = df["low"].iloc[i]
-
-        # Swing High
         if (high == df["high"].iloc[i - lookback:i + lookback + 1].max()
-            and df["close"].iloc[i] < df["open"].iloc[i]):  # rejection candle idéale
-            swing_highs.append({
-                "index": i,
-                "time": df.index[i],
-                "price": high
-            })
-
-        # Swing Low
+            and df["close"].iloc[i] < df["open"].iloc[i]):
+            swing_highs.append({"index": i, "time": df.index[i], "price": high})
         if (low == df["low"].iloc[i - lookback:i + lookback + 1].min()
             and df["close"].iloc[i] > df["open"].iloc[i]):
-            swing_lows.append({
-                "index": i,
-                "time": df.index[i],
-                "price": low
-            })
-
+            swing_lows.append({"index": i, "time": df.index[i], "price": low})
     return swing_highs, swing_lows
 
 def detect_swing_points_advanced(df: pd.DataFrame, lookback: int = SWING_LOOKBACK) -> tuple:
-    """Détecte les swing highs et lows avec validation avancée."""
     swing_highs = []
     swing_lows = []
-
     for i in range(lookback, len(df) - lookback):
         try:
             if (df["high"].iloc[i] == df["high"].iloc[i-lookback:i+lookback+1].max() and
                 df["close"].iloc[i] < df["open"].iloc[i]):
-
-                swing_highs.append({
-                    "index": i,
-                    "time": df.index[i],
-                    "price": df["high"].iloc[i],
-                    "type": "SWING_HIGH",
-                    "strength": "STRONG"
-                })
+                swing_highs.append({"index": i, "time": df.index[i], "price": df["high"].iloc[i], "type": "SWING_HIGH", "strength": "STRONG"})
         except Exception:
             pass
-
         try:
             if (df["low"].iloc[i] == df["low"].iloc[i-lookback:i+lookback+1].min() and
                 df["close"].iloc[i] > df["open"].iloc[i]):
-
-                swing_lows.append({
-                    "index": i,
-                    "time": df.index[i],
-                    "price": df["low"].iloc[i],
-                    "type": "SWING_LOW",
-                    "strength": "STRONG"
-                })
+                swing_lows.append({"index": i, "time": df.index[i], "price": df["low"].iloc[i], "type": "SWING_LOW", "strength": "STRONG"})
         except Exception:
             pass
-
     return swing_highs, swing_lows
 
 # =============================
 # DÉTECTION FVG AVANCÉE
 # =============================
-# Corrected FVG detection helpers
-# File: main_fixed_detect_fvg.py
-# Purpose: replacement for detect_fvg_advanced (and small robustness fixes)
-
-
-
-
 def classify_fvg_type(current_candle, next_candle) -> str:
-    """
-    Same classification logic as original, kept for compatibility.
-    Returns: 'BREAKAWAY'|'REJECTION'|'PERFECT'|'UNKNOWN'
-    """
     try:
         body_size = abs(next_candle["close"] - next_candle["open"])
         total_range = next_candle["high"] - next_candle["low"]
@@ -2312,50 +1627,29 @@ def classify_fvg_type(current_candle, next_candle) -> str:
     except Exception:
         return "UNKNOWN"
 
-
-
-
 def detect_fvg_advanced(df: pd.DataFrame, max_lookback_hours: int = 36) -> List[Dict]:
-    """
-    Détection avancée des Fair Value Gaps (FVG) selon la logique ICT.
-    - Corrige l'erreur offset-naive vs offset-aware (timezone).
-    - Ajoute la clé 'index' pour compatibilité avec detect_orderflow_legs_advanced().
-    - Priorise FVG récents (< max_lookback_hours).
-    - Respecte seuil dynamique via get_min_gap_for_pair().
-    """
-
     fvgs = []
     if df is None or len(df) < 3:
         return fvgs
-
-    # Uniformisation des datetimes (UTC aware)
     now = datetime.utcnow().replace(tzinfo=timezone.utc)
     min_time = now - timedelta(hours=max_lookback_hours)
-
-    # Conversion robuste de l'index en UTC
     df_index_times = pd.to_datetime(df.index)
     if df_index_times.tz is None:
         df_index_times = df_index_times.tz_localize('UTC')
     else:
         df_index_times = df_index_times.tz_convert('UTC')
-
     pair_name = str(df.attrs.get("instrument", ""))
     min_gap_size = get_min_gap_for_pair(pair_name)
-
     for i in range(1, len(df) - 1):
         candle_time = df_index_times[i]
         if candle_time < min_time:
             continue
-
         prev_candle = df.iloc[i - 1]
         next_candle = df.iloc[i + 1]
-
         prev_high = float(prev_candle["high"])
         prev_low = float(prev_candle["low"])
         next_high = float(next_candle["high"])
         next_low = float(next_candle["low"])
-
-        # FVG haussier (BUY)
         if prev_high < next_low:
             gap_size = next_low - prev_high
             if gap_size >= min_gap_size:
@@ -2369,8 +1663,6 @@ def detect_fvg_advanced(df: pd.DataFrame, max_lookback_hours: int = 36) -> List[
                     "time": candle_time,
                     "midpoint": (prev_high + next_low) / 2
                 })
-
-        # FVG baissier (SELL)
         if prev_low > next_high:
             gap_size = prev_low - next_high
             if gap_size >= min_gap_size:
@@ -2384,52 +1676,30 @@ def detect_fvg_advanced(df: pd.DataFrame, max_lookback_hours: int = 36) -> List[
                     "time": candle_time,
                     "midpoint": (next_high + prev_low) / 2
                 })
-
     return fvgs
 
-
-
 def is_fvg_retest_valid(df: pd.DataFrame, fvg: dict, current_price: float, pair: str = "EUR_USD") -> bool:
-    """
-    Retest FVG valide si le prix est proche du midpoint du FVG.
-    Tolérance en pips basée sur l'ATR M15, bornée entre 10 et 50 pips.
-    Aucune logique de tendance, de RSI ou de "respect" → réservé au scoring.
-    """
     if "low_level" not in fvg or "high_level" not in fvg:
         return False
-
     fvg_mid = (float(fvg["low_level"]) + float(fvg["high_level"])) / 2.0
     distance = abs(current_price - fvg_mid)
     max_dist_pips = get_dynamic_max_distance(df, pair, atr_multiplier=1.5)
     return price_to_pips(distance, pair) <= max_dist_pips
 
-
- 
 def is_fvg_unmitigated(df: pd.DataFrame, fvg: dict) -> bool:
-    """
-    Vérifie qu'un FVG n'a jamais été touché avant le retest.
-    C'est le concept "Unmitigated FVG" d'Arjo.io.
-    """
-    # Trouver toutes les bougies après le FVG
     after_data = df[df.index > fvg["time"]]
     if len(after_data) == 0:
         return False
-
     if fvg["direction"] == "BUY":
-        # Pour un FVG haussier : le prix ne doit pas avoir touché le niveau bas du FVG
         return after_data["low"].min() > fvg["low_level"]
     elif fvg["direction"] == "SELL":
-        # Pour un FVG baissier : le prix ne doit pas avoir touché le niveau haut du FVG
         return after_data["high"].max() < fvg["high_level"]
     return False
-    
+
 def is_fvg_respected_with_wick_rejection(df: pd.DataFrame, fvg: dict) -> bool:
-    """Vérifie si un FVG est respecté via Wick Rejection."""
     if "time" not in fvg:
         return False
-
     recent_candles = df[df.index > fvg["time"]].head(5)
-
     for _, candle in recent_candles.iterrows():
         if fvg["direction"] == "BUY":
             if candle["low"] <= fvg["low_level"] and candle["close"] > fvg["low_level"]:
@@ -2437,87 +1707,65 @@ def is_fvg_respected_with_wick_rejection(df: pd.DataFrame, fvg: dict) -> bool:
         elif fvg["direction"] == "SELL":
             if candle["high"] >= fvg["high_level"] and candle["close"] < fvg["high_level"]:
                 return True
-
     return False
 
 def calculate_poc_and_liquidity(df: pd.DataFrame, bin_size: float = None) -> dict:
-    """Calcule le Point of Control (POC) et les niveaux de liquidité."""
     if df.empty:
         return {"poc": None, "liquidity_high": None, "liquidity_low": None}
-
     pair = df.attrs.get('instrument', '')
     price_range = df["high"].max() - df["low"].min()
     min_tick = 0.5 if "XAU" in pair else 0.01
-
     if bin_size is None:
         bin_size = max(price_range / 100, min_tick)
-
     try:
         price_bins = (df["close"] // bin_size) * bin_size
         volume_profile = df.groupby(price_bins)["volume"].sum()
-        
         if volume_profile.empty:
             return {"poc": None, "liquidity_high": None, "liquidity_low": None}
-
         poc = volume_profile.idxmax()
-        
-        return {
-            "poc": float(poc),
-            "liquidity_high": float(df["high"].max()),
-            "liquidity_low": float(df["low"].min()),
-        }
+        return {"poc": float(poc), "liquidity_high": float(df["high"].max()), "liquidity_low": float(df["low"].min())}
     except Exception:
         return {"poc": None, "liquidity_high": None, "liquidity_low": None}
 
 def detect_candlestick_patterns(df: pd.DataFrame) -> dict:
-    """Détecte des patterns de chandeliers japonais."""
     open_price = df["open"]
     close_price = df["close"]
     high_price = df["high"]
     low_price = df["low"]
-
     hammer = (
         (close_price > open_price)
         & ((high_price - close_price) / (high_price - low_price) < 0.1)
         & ((close_price - open_price) / (high_price - low_price) > 0.6)
     )
-
     shooting_star = (
         (open_price > close_price)
         & ((high_price - open_price) / (high_price - low_price) < 0.1)
         & ((open_price - close_price) / (high_price - low_price) > 0.6)
     )
-
     return {"hammer": hammer.iloc[-1], "shooting_star": shooting_star.iloc[-1]}
 
 # =============================
-# DÉTECTION FVG IMBRIQUÉS (NESTED FVG)
+# DÉTECTION NESTED FVG
 # =============================
 def detect_nested_fvg(df: pd.DataFrame, min_nesting: int = 2) -> list:
-    """Détecte les FVG imbriqués (Nested FVG) en BUY/SELL."""
     fvgs = detect_fvg_advanced(df)
     nested_fvgs = []
-    
     for i in range(len(fvgs) - min_nesting + 1):
         current_fvg = fvgs[i]
         next_fvg = fvgs[i + 1]
-
         if current_fvg.get("direction") == next_fvg.get("direction"):
             direction = current_fvg["direction"]
-
             if direction == "BUY":
                 entry_zone = (
                     min(float(current_fvg["high_level"]), float(next_fvg["low_level"])),
                     max(float(current_fvg["high_level"]), float(next_fvg["low_level"]))
                 )
-            else:  # SELL
+            else:
                 entry_zone = (
                     min(float(current_fvg["low_level"]), float(next_fvg["high_level"])),
                     max(float(current_fvg["low_level"]), float(next_fvg["high_level"]))
                 )
-
             midpoint = (entry_zone[0] + entry_zone[1]) / 2
-
             nested_fvgs.append({
                 "direction": direction,
                 "levels": [current_fvg, next_fvg],
@@ -2529,16 +1777,13 @@ def detect_nested_fvg(df: pd.DataFrame, min_nesting: int = 2) -> list:
                 "high_level": max(current_fvg["high_level"], next_fvg["high_level"]),
                 "low_level": min(current_fvg["low_level"], next_fvg["low_level"])
             })
-
     return nested_fvgs
 
 # =============================
-# DRT (DISPLACEMENT RETRACEMENT THEORY)
+# DRT
 # =============================
 def calculate_drt_levels(swing_high: float, swing_low: float) -> dict:
-    """Calcule les niveaux DRT pour un range donné."""
     range_size = swing_high - swing_low
-
     return {
         "0.236": swing_high - 0.236 * range_size,
         "0.382": swing_high - 0.382 * range_size,
@@ -2553,14 +1798,12 @@ def calculate_drt_levels(swing_high: float, swing_low: float) -> dict:
     }
 
 # =============================
-# DÉTECTION ORDER FLOW LEGS AVANCÉE
+# ORDER FLOW LEGS
 # =============================
 def detect_orderflow_legs_advanced(df: pd.DataFrame) -> list:
     swing_highs, swing_lows = detect_swing_points_advanced(df, lookback=5)
     fvgs = detect_fvg_advanced(df, max_lookback_hours=36)
     ofls = []
-
-    # === BUY ORDER FLOW LEGS ===
     for swing_low in swing_lows:
         sl_idx = swing_low.get("index")
         sl_price = float(swing_low.get("price", 0))
@@ -2583,8 +1826,6 @@ def detect_orderflow_legs_advanced(df: pd.DataFrame) -> list:
                 if sh_price <= float(fvg.get("high_level", 0)):
                     continue
                 ofls.append({"direction": "BUY", "start": swing_low, "fvg": fvg, "end": swing_high})
-
-    # === SELL ORDER FLOW LEGS ===
     for swing_high in swing_highs:
         sh_idx = swing_high.get("index")
         sh_price = float(swing_high.get("price", 0))
@@ -2607,38 +1848,28 @@ def detect_orderflow_legs_advanced(df: pd.DataFrame) -> list:
                 if sl_price >= float(fvg.get("low_level", 0)):
                     continue
                 ofls.append({"direction": "SELL", "start": swing_high, "fvg": fvg, "end": swing_low})
-
-    # Ajouter les FVG simples
     for fvg in fvgs:
         ofls.append({"direction": fvg.get("direction"), "fvg": fvg})
-
     logger.info(f"📊 OFL FINAL: {len(ofls)} legs détectés")
     return ofls
- 
+
 # =============================
 # VALIDATION FVG RESPECTÉ AVEC LIQUIDITÉ
 # =============================
 def is_fvg_respected_with_liquidity(df: pd.DataFrame, fvg: dict, liquidity_levels: dict) -> bool:
-    """Vérifie si un FVG a été respecté avec une logique réaliste."""
     if "high_level" not in fvg or "low_level" not in fvg or "time" not in fvg or "direction" not in fvg:
         return False
     fvg_time = fvg["time"]
     subsequent_data = df[df.index > fvg_time]
     if subsequent_data.empty:
         return False
-    # --- LOGIQUE RÉALISTE DU "RESPECT" ---
-    # Pour un FVG haussier : Le prix doit avoir dépassé le haut du FVG (confirmation de force)
-    # Pour un FVG baissier : Le prix doit avoir dépassé le bas du FVG (confirmation de force)
     if fvg["direction"] == "BUY":
-        # Le prix a dépassé le haut du FVG → FVG respecté
         basic_respect = subsequent_data["high"].max() > fvg["high_level"]
     else:
-        # Le prix a dépassé le bas du FVG → FVG respecté
         basic_respect = subsequent_data["low"].min() < fvg["low_level"]
     if not basic_respect:
         logger.debug(f"   ❌ FVG non respecté : prix n'a pas confirmé la cassure")
         return False
-    # --- VALIDATION PAR LIQUIDITÉ (OPTIONNELLE) ---
     if not liquidity_levels:
         logger.debug("   💧 Pas de niveaux de liquidité → Validation par prix uniquement")
         return True
@@ -2651,34 +1882,28 @@ def is_fvg_respected_with_liquidity(df: pd.DataFrame, fvg: dict, liquidity_level
             logger.debug("   💧 FVG respecté + confirmation par liquidité")
         else:
             logger.debug("   ⚠️ FVG respecté mais pas de confirmation par liquidité → Accepté quand même")
-        return True  # ← On accepte le FVG tant que basic_respect est OK
+        return True
     except Exception as e:
         logger.warning(f"   ❗ Erreur lors de la vérification de la liquidité: {e}")
         return True
+
 # =============================
-# DÉTECTION DES POINTS D'INTÉRÊT (POI) AVEC WICKS
+# DÉTECTION WICK REJECTION POI
 # =============================
 def detect_wick_rejection_poi(df: pd.DataFrame, bias: str, min_wick_ratio: float = 0.7) -> list:
-    """
-    Détecte les wicks de rejet AVEC CONFIRMATION OBLIGATOIRE par la bougie suivante.
-    ✅ Filtrage de proximité dynamique selon la paire.
-    """
     poi_list = []
     pair = df.attrs.get("instrument", "DEFAULT")
-
-    # Tolérance de distance dynamique selon la paire (en PRIX, pas en pips)
     pip_tolerance_map = {
-        "XAU_USD": 20,       # ≈ 50 pips
-        "USD_JPY": 0.50,         # ≈ 10 pips
+        "XAU_USD": 20,
+        "USD_JPY": 0.50,
         "AUD_USD": 0.0050,
         "EUR_USD": 0.0020,
         "USD_CAD": 0.0050,
         "GBP_USD": 0.0050,
-        "DEFAULT": 0.0010     # ≈ 5 pips (Forex)
+        "DEFAULT": 0.0010
     }
     pip_tolerance = pip_tolerance_map.get(pair, pip_tolerance_map["DEFAULT"])
-
-    for i in range(1, len(df) - 1):  # -1 pour avoir une bougie de confirmation
+    for i in range(1, len(df) - 1):
         rejection_candle = df.iloc[i]
         confirmation_candle = df.iloc[i + 1]
         upper_wick = rejection_candle["high"] - max(rejection_candle["open"], rejection_candle["close"])
@@ -2687,11 +1912,8 @@ def detect_wick_rejection_poi(df: pd.DataFrame, bias: str, min_wick_ratio: float
         total_range = rejection_candle["high"] - rejection_candle["low"]
         if total_range == 0:
             continue
-
         rsi_m15 = get_last_rsi(df["close"].iloc[:i+1])
         current_price = df["close"].iloc[-1]
-
-        # === WICK REJECTION BUY ===
         if (
             bias in ["BUY", "NEUTRAL"]
             and lower_wick >= body_size * min_wick_ratio
@@ -2702,7 +1924,6 @@ def detect_wick_rejection_poi(df: pd.DataFrame, bias: str, min_wick_ratio: float
             and confirmation_candle["close"] > rejection_candle["high"]
             and (confirmation_candle["close"] - confirmation_candle["open"]) >= 0.7 * (confirmation_candle["high"] - confirmation_candle["low"])
         ):
-            # ✅ VÉRIFICATION DE PROXIMITÉ
             if abs(current_price - rejection_candle["low"]) <= pip_tolerance:
                 poi_list.append({
                     "type": "WICK_REJECTION",
@@ -2715,8 +1936,6 @@ def detect_wick_rejection_poi(df: pd.DataFrame, bias: str, min_wick_ratio: float
                     "rsi_at_rejection": rsi_m15,
                     "pair": pair
                 })
-
-        # === WICK REJECTION SELL ===
         elif (
             bias in ["SELL", "NEUTRAL"]
             and upper_wick >= body_size * min_wick_ratio
@@ -2727,7 +1946,6 @@ def detect_wick_rejection_poi(df: pd.DataFrame, bias: str, min_wick_ratio: float
             and confirmation_candle["close"] < rejection_candle["low"]
             and (confirmation_candle["open"] - confirmation_candle["close"]) >= 0.7 * (confirmation_candle["high"] - confirmation_candle["low"])
         ):
-            # ✅ VÉRIFICATION DE PROXIMITÉ
             if abs(current_price - rejection_candle["high"]) <= pip_tolerance:
                 poi_list.append({
                     "type": "WICK_REJECTION",
@@ -2740,22 +1958,18 @@ def detect_wick_rejection_poi(df: pd.DataFrame, bias: str, min_wick_ratio: float
                     "rsi_at_rejection": rsi_m15,
                     "pair": pair
                 })
-
     return poi_list
- 
+
 # =============================
-# DÉTERMINATION DU BIAS AVANCÉ
+# BIAS AVANCÉ
 # =============================
 def determine_advanced_bias(df: pd.DataFrame) -> dict:
-    """Détermine le bias H4 en se basant SUR LE MSS (Market Structure Shift)."""
     mss = detect_mss(df, lookback=20)
-    
     if mss["type"] == "MSS_BUY":
         return {"bias": "BUY", "mss_detected": mss}
     elif mss["type"] == "MSS_SELL":
         return {"bias": "SELL", "mss_detected": mss}
     else:
-        # Fallback sur EMA
         ema20 = df["close"].ewm(span=20).mean().iloc[-1]
         ema50 = df["close"].ewm(span=50).mean().iloc[-1]
         if ema20 > ema50:
@@ -2764,11 +1978,10 @@ def determine_advanced_bias(df: pd.DataFrame) -> dict:
             return {"bias": "SELL", "mss_detected": mss}
         else:
             return {"bias": "NEUTRAL", "mss_detected": mss}
-# =============================
-# DÉTERMINATION DE LA NARRATIVE AVANCÉE
-# =============================
 
-
+# =============================
+# NARRATIVE AVANCÉE
+# =============================
 def determine_advanced_narrative(
     df_m15: pd.DataFrame,
     bias_analysis: dict,
@@ -2777,11 +1990,6 @@ def determine_advanced_narrative(
     df_d1: pd.DataFrame = None,
     df_h1: pd.DataFrame = None
 ) -> dict:
-    """
-    Narrative intraday avancée — CORRIGÉE :
-      - Ajout du FILTRE DE TENDANCE H1 (EMA 50) pour éviter les contre-flux violents.
-      - PAS DE REJET des signaux IRL (seulement flagging + pénalité dans le scoring).
-    """
     if df_m15 is None or df_m15.empty or len(df_m15) < 3:
         logger.warning("❌ DataFrame vide ou insuffisant")
         return {
@@ -2790,8 +1998,6 @@ def determine_advanced_narrative(
             "potential_entries": [],
             "timestamp": datetime.now().isoformat()
         }
-
-    # --- Compteurs & exemples (uniques) pour les FVG non valides ---
     _invalid_retest_counts = {"BUY": 0, "SELL": 0}
     _invalid_retest_samples = {"BUY": set(), "SELL": set()}
 
@@ -2819,26 +2025,19 @@ def determine_advanced_narrative(
         bias = (bias_analysis.get("bias", "NEUTRAL") or "NEUTRAL").upper()
         current_price = float(df_m15["close"].iloc[-1])
         logger.info(f"🎯 ANALYSE {pair} - Prix: {current_price:.5f}, Bias: {bias}")
-
-        # === 1. CALCUL EMA 50 H1 (FILTRE DE FLUX) ===
         ema50_h1 = None
         if df_h1 is not None and len(df_h1) >= 50:
             ema50_h1 = df_h1['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-            # Indicateur visuel dans les logs
             trend_h1 = "HAUSSIER" if current_price > ema50_h1 else "BAISSIER"
             logger.info(f"   🌊 Tendance H1 (EMA50): {trend_h1} (Prix: {current_price:.5f} vs EMA: {ema50_h1:.5f})")
-        # ============================================
-
         rsi_m15 = get_last_rsi(df_m15["close"])
         rsi_h4 = 50.0
         if df_h4 is not None and not df_h4.empty:
             rsi_h4 = get_last_rsi(df_h4["close"])
-
         ofls = detect_orderflow_legs_advanced(df_m15)
         nested_fvgs = detect_nested_fvg(df_m15)
         poi_respects = detect_wick_rejection_poi(df_m15, bias)
         liquidity_levels = (bias_analysis.get("liquidity_levels", {}) or {})
-
         narrative = {
             "bias": bias,
             "current_price": current_price,
@@ -2850,11 +2049,9 @@ def determine_advanced_narrative(
         }
 
         def is_rsi_valid(direction: str) -> bool:
-            # RSI extrême à une zone FVG/imbalance = setup haute probabilité → ne pas bloquer
             stoch_k_local, _ = calculate_stoch_rsi(df_m15["close"])
             if pair == "XAU_USD":
                 if direction == "BUY":
-                    # Stoch RSI < 25 à FVG = confirmation oversold → toujours valide
                     if stoch_k_local < 25:
                         return rsi_m15 < 85 and rsi_h4 > 10
                     return (rsi_m15 > 20) and (rsi_m15 < 85) and (10 < rsi_h4 < 80)
@@ -2891,7 +2088,6 @@ def determine_advanced_narrative(
         else:
             logger.info("🔍 Aucune Dealing Range détectée")
 
-        # --- Filtrage des FVG récents ---
         logger.info(f"🔎 Filtrage des FVG récents pour {pair}:")
         recent_ofls = []
         ancient_fvg_count = 0
@@ -2915,18 +2111,15 @@ def determine_advanced_narrative(
             except Exception as e:
                 logger.warning(f" ⚠️ Erreur conversion time FVG: {e}")
                 continue
-
             entry_level = get_fvg_midpoint(fvg)
             if entry_level is None:
                 continue
-
             tolerance = get_tolerance(entry_level, pair)
             distance = abs(current_price - entry_level)
             is_in_zone = (entry_level - tolerance <= current_price <= entry_level + tolerance)
             is_very_close = distance <= tolerance
             factor_reasonable = 2 if pair == "XAU_USD" else 3
             is_within_reasonable = distance <= tolerance * factor_reasonable
-
             if is_recent and (is_in_zone or is_very_close or is_within_reasonable):
                 recent_ofls.append(ofl)
                 status = "dans zone" if is_in_zone else "très proche" if is_very_close else "distance raisonnable"
@@ -2938,16 +2131,13 @@ def determine_advanced_narrative(
                 )
             else:
                 ancient_fvg_count += 1
-
         ofls = recent_ofls
         logger.info(f"📊 FVG récents et proches: {len(ofls)} (anciens rejetés: {ancient_fvg_count})")
         narrative["recent_ofls"] = ofls
-
         bos = detect_bos(df_h1, lookback=50)
         choch = detect_choch(df_h1, lookback=50)
         narrative["structure_analysis"] = {"bos": bos, "choch": choch}
 
-        # --- FVG RETEST — AVEC FILTRE TENDANCE H1 ---
         for ofl in ofls:
             fvg = ofl.get("fvg", {})
             if not isinstance(fvg, dict) or not all(k in fvg for k in ["direction", "high_level", "low_level", "time"]):
@@ -2955,52 +2145,35 @@ def determine_advanced_narrative(
             entry_level = get_fvg_midpoint(fvg)
             if entry_level is None:
                 continue
-
-            # ✅ Définir fvg_direction TÔT
             fvg_direction = str(fvg.get("direction", "")).upper()
             if fvg_direction not in {"BUY", "SELL"}:
                 continue
-
-            # EMA50 H1 n'est plus un filtre bloquant: elle est prise en compte au scoring final.
-
             if not is_fvg_retest_valid(df_m15, fvg, current_price, pair):
                 _note_invalid_retest(fvg.get('direction'), entry_level)
                 continue
-            
             tolerance = get_tolerance(entry_level, pair)
             is_in_entry_zone = (entry_level - tolerance <= current_price <= entry_level + tolerance)
             is_within_reasonable = abs(current_price - entry_level) <= tolerance * 2
             if not (is_in_entry_zone or is_within_reasonable):
                 continue
-
             fvg_type = fvg.get("type", "UNKNOWN")
             if (bias in ["NEUTRAL", fvg_direction]) and is_rsi_valid(fvg_direction):
                 irl_erl_type = classify_zone_irl_erl(entry_level, dealing_range)
-
-                # --- Flags IRL (sans rejet) ---
                 is_near_key_level = False
                 is_rsi_extreme = False
                 is_trend_aligned = False
-
                 if irl_erl_type == "IRL":
-                    # Vérifier si proche d'un niveau clé (support/resistance)
                     distance_to_support = abs(current_price - liquidity_levels.get("previous_week_low", current_price))
                     distance_to_resistance = abs(current_price - liquidity_levels.get("previous_week_high", current_price))
                     tol = get_tolerance(current_price, pair) * 2
                     is_near_key_level = (distance_to_support <= tol or distance_to_resistance <= tol)
-
-                    # Vérifier si RSI en zone extrême
                     rsi_m15_val = float(get_last_rsi(df_m15["close"]))
                     is_rsi_extreme = (fvg_direction == "BUY" and rsi_m15_val < 30) or (fvg_direction == "SELL" and rsi_m15_val > 70)
-
-                    # Vérifier si tendance alignée
                     is_trend_aligned = bias in ["NEUTRAL", fvg_direction]
-
                     logger.info(
                         f"ℹ️ IRL détecté (narrative): near_key={is_near_key_level}, "
                         f"rsi_extreme={is_rsi_extreme}, trend_aligned={is_trend_aligned}"
                     )
-
                 entry = {
                     "type": f"FVG_RETEST_{fvg_type}",
                     "direction": fvg_direction,
@@ -3017,17 +2190,14 @@ def determine_advanced_narrative(
                     "is_rsi_extreme": is_rsi_extreme,
                     "trend_aligned": is_trend_aligned,
                 }
-
                 narrative["potential_entries"].append(entry)
                 irl_erl_label = f" ({irl_erl_type})" if irl_erl_type else " (No Range)"
                 _log_fvg_added_once(
                     pair, fvg_direction, entry_level, fvg_type,
                     f" 🎯 FVG {fvg_direction} AJOUTÉ: {entry_level:.5f} (type: {fvg_type}){irl_erl_label}"
                 )
-
         _flush_invalid_retest_summary()
 
-        # --- Nested FVG ---
         for nfvg in nested_fvgs:
             entry_level = nfvg.get("midpoint")
             if not entry_level:
@@ -3037,13 +2207,9 @@ def determine_advanced_narrative(
             is_within_reasonable = abs(current_price - entry_level) <= tolerance * 2
             if not (is_in_entry_zone or is_within_reasonable):
                 continue
-
             nfvg_direction = nfvg.get("direction", "").upper()
             if nfvg_direction not in {"BUY", "SELL"}:
                 continue
-
-            # EMA50 H1 n'est plus un filtre bloquant pour les Nested FVG.
-
             fake_fvg = {
                 "direction": nfvg["direction"],
                 "high_level": nfvg["high_level"],
@@ -3052,10 +2218,8 @@ def determine_advanced_narrative(
             }
             if not is_fvg_unmitigated(df_m15, fake_fvg):
                 continue
-
             if (bias in ["NEUTRAL", nfvg_direction]) and is_rsi_valid(nfvg_direction):
                 irl_erl_type = classify_zone_irl_erl(entry_level, dealing_range)
-
                 entry = {
                     "type": "NESTED_FVG",
                     "direction": nfvg_direction,
@@ -3069,7 +2233,6 @@ def determine_advanced_narrative(
                     "structure_analysis": narrative["structure_analysis"],
                     "irl_erl_type": irl_erl_type,
                 }
-
                 narrative["potential_entries"].append(entry)
                 irl_erl_label = f" ({irl_erl_type})" if irl_erl_type else " (No Range)"
                 _log_fvg_added_once(
@@ -3077,7 +2240,6 @@ def determine_advanced_narrative(
                     f" 🎯 Nested FVG {nfvg_direction} AJOUTÉ: {entry_level:.5f}{irl_erl_label}"
                 )
 
-        # --- Wick Rejection ---
         for poi in poi_respects:
             entry_level = poi.get("price_level")
             if not entry_level:
@@ -3087,14 +2249,11 @@ def determine_advanced_narrative(
             is_within_reasonable = abs(current_price - entry_level) <= tolerance * 2
             if not (is_in_entry_zone or is_within_reasonable):
                 continue
-
             poi_direction = poi.get("direction", "").upper()
             if poi_direction not in {"BUY", "SELL"}:
                 continue
-
             if (bias in ["NEUTRAL", poi_direction]) and is_rsi_valid(poi_direction):
                 irl_erl_type = classify_zone_irl_erl(entry_level, dealing_range)
-
                 entry = {
                     "type": "WICK_REJECTION",
                     "direction": poi_direction,
@@ -3108,7 +2267,6 @@ def determine_advanced_narrative(
                     "structure_analysis": narrative["structure_analysis"],
                     "irl_erl_type": irl_erl_type,
                 }
-
                 narrative["potential_entries"].append(entry)
                 irl_erl_label = f" ({irl_erl_type})" if irl_erl_type else " (No Range)"
                 _log_fvg_added_once(
@@ -3116,11 +2274,8 @@ def determine_advanced_narrative(
                     f" 🎯 Wick Rejection {poi_direction} AJOUTÉ: {entry_level:.5f}{irl_erl_label}"
                 )
 
-        # --- Liquidity Draw ---
         liq_high = liquidity_levels.get("previous_week_high")
         liq_low = liquidity_levels.get("previous_week_low")
-
-        # LIQUIDITY_DRAW : exige que le prix soit proche d'un FVG + Stoch RSI confirme
         liq_stoch_k, _ = calculate_stoch_rsi(df_m15["close"])
         liq_tolerance = get_tolerance(current_price, pair) * 4
 
@@ -3166,7 +2321,6 @@ def determine_advanced_narrative(
                 narrative["potential_entries"].append(entry)
                 logger.info(f" 🎯 Liquidity Draw SELL AJOUTÉ à {liq_low:.5f} (Type: {irl_erl_type or 'No Range'}, StochRSI: {liq_stoch_k:.1f})")
 
-        # --- BISI ---
         if bos.get("type") in ["BOS_BUY", "BOS_SELL"]:
             bos_level = bos["level"]
             bos_direction = "BUY" if bos["type"] == "BOS_BUY" else "SELL"
@@ -3183,7 +2337,6 @@ def determine_advanced_narrative(
                         mid = nfvg.get("midpoint")
                         if mid:
                             all_fvgs.append({"level": mid, "type": "NESTED_FVG"})
-
                 for fvg_info in all_fvgs:
                     fvg_level = fvg_info["level"]
                     distance_bos_fvg = abs(bos_level - fvg_level)
@@ -3193,9 +2346,7 @@ def determine_advanced_narrative(
                         is_within_reasonable = abs(current_price - fvg_level) <= tolerance * 2
                         if not (is_in_entry_zone or is_within_reasonable):
                             continue
-
                         irl_erl_type = classify_zone_irl_erl(fvg_level, dealing_range)
-
                         entry = {
                             "type": "BISI",
                             "direction": bos_direction,
@@ -3214,15 +2365,12 @@ def determine_advanced_narrative(
                             "structure_analysis": narrative["structure_analysis"],
                             "irl_erl_type": irl_erl_type,
                         }
-
                         narrative["potential_entries"].append(entry)
                         irl_erl_label = f" ({irl_erl_type})" if irl_erl_type else " (No Range)"
                         logger.info(f"🎯 BISI DÉTECTÉ : {bos_direction} à {fvg_level:.5f}{irl_erl_label}")
-
         logger.info(f"📝 Narrative {pair} TERMINÉE: {len(narrative['potential_entries'])} entrées détectées")
         _log_narrative_list(narrative["potential_entries"], top_n=10)
         return narrative
-
     except Exception as e:
         logger.error(f"❌ Erreur dans determine_advanced_narrative: {e}")
         logger.error(traceback.format_exc())
@@ -3233,30 +2381,23 @@ def determine_advanced_narrative(
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }
-# =============================
-# HELPERS SCORING AVANCÉ
-# =============================
 
+# =============================
+# HELPERS SCORING
+# =============================
 def get_session_quality_bonus(pair: str) -> tuple:
-    """
-    Bonus/malus selon la session de trading active (UTC).
-    London 07-16 UTC, NY 12-21 UTC = sessions à haute liquidité.
-    """
     hour = datetime.utcnow().hour
     is_london = 7 <= hour < 16
     is_ny = 12 <= hour < 21
-    is_overlap = is_london and is_ny  # 12-16 UTC = meilleur moment
-
+    is_overlap = is_london and is_ny
     forex_euro = ["EUR_USD", "GBP_USD", "USD_CAD", "AUD_USD"]
-    jpy_pairs = ["USD_JPY", "GBP_JPY"]  # GBP/JPY actif en session asiatique
+    jpy_pairs = ["USD_JPY", "GBP_JPY"]
     is_asian = not (is_london or is_ny)
-
     if is_overlap:
         return 2, "+2 (Overlap London/NY)"
     elif is_london or is_ny:
         return 1, "+1 (Session active)"
     else:
-        # Session asiatique
         if pair in jpy_pairs:
             return 1, "+1 (Session asiatique, JPY actif)"
         elif pair in forex_euro:
@@ -3264,13 +2405,7 @@ def get_session_quality_bonus(pair: str) -> tuple:
         else:
             return 0, "0 (Session neutre)"
 
-
 def get_d1_trend_bonus(df_d1, direction: str) -> tuple:
-    """
-    Confirmation tendance Daily (D1).
-    EMA50 D1 : +2 si aligné, -2 si contre.
-    EMA200 D1 : +1 bonus supplémentaire si aussi aligné.
-    """
     if df_d1 is None or df_d1.empty or len(df_d1) < 52:
         return 0, "0 (D1 insuffisant)"
     try:
@@ -3295,12 +2430,7 @@ def get_d1_trend_bonus(df_d1, direction: str) -> tuple:
     except Exception:
         return 0, "0 (Erreur D1)"
 
-
 def get_macd_h1_bonus(df_h1, direction: str) -> tuple:
-    """
-    Confirmation MACD histogram H1.
-    Histogramme dans le bon sens + en accélération = +2.
-    """
     if df_h1 is None or df_h1.empty or len(df_h1) < 35:
         return 0, "0 (H1 insuffisant pour MACD)"
     try:
@@ -3325,12 +2455,7 @@ def get_macd_h1_bonus(df_h1, direction: str) -> tuple:
     except Exception:
         return 0, "0 (Erreur MACD H1)"
 
-
 def get_rsi_divergence_bonus(df_h1, df_m15, direction: str) -> tuple:
-    """
-    Bonus si divergence RSI détectée (H1 ou M15).
-    Divergence haussière sur BUY, baissière sur SELL.
-    """
     try:
         if direction == "BUY":
             if detect_rsi_divergence_haussiere(df_h1):
@@ -3338,7 +2463,6 @@ def get_rsi_divergence_bonus(df_h1, df_m15, direction: str) -> tuple:
             if detect_rsi_divergence_haussiere(df_m15):
                 return 2, "+2 (Divergence RSI M15 haussière)"
         elif direction == "SELL":
-            # Divergence baissière = inverse : prix fait nouveau haut, RSI non
             def detect_bearish_div(df):
                 if len(df) < 30:
                     return False
@@ -3359,11 +2483,7 @@ def get_rsi_divergence_bonus(df_h1, df_m15, direction: str) -> tuple:
         pass
     return 0, "0 (Pas de divergence RSI)"
 
-
 def estimate_win_rate(score: int, confluences: dict) -> str:
-    """
-    Estime le taux de gain probable basé sur le score et les confluences.
-    """
     if score >= 16:
         base = 78
     elif score >= 14:
@@ -3374,7 +2494,6 @@ def estimate_win_rate(score: int, confluences: dict) -> str:
         base = 58
     else:
         base = 48
-
     if confluences.get("d1_aligned"):
         base += 3
     if confluences.get("rsi_divergence"):
@@ -3385,12 +2504,9 @@ def estimate_win_rate(score: int, confluences: dict) -> str:
         base += 3
     if confluences.get("bos_confirmed"):
         base += 2
-
     return f"~{min(base, 88)}%"
 
-
 def get_signal_quality_label(score: int) -> str:
-    """Label qualité du signal basé sur le score total."""
     if score >= 16:
         return "SNIPER"
     elif score >= 14:
@@ -3400,7 +2516,6 @@ def get_signal_quality_label(score: int) -> str:
     elif score >= 10:
         return "B+"
     return "B"
-
 
 # =============================
 # SYSTÈME DE SCORING
@@ -3418,17 +2533,6 @@ def calculate_signal_confidence(
     tbs_setup_type: str = "",
     df_d1: pd.DataFrame = None,
 ) -> dict:
-    """
-    V3 STRICTE - logique A+ uniquement.
-
-    Objectif : arrêter les signaux tardifs vus dans les logs :
-    - BUY alors que Stoch RSI est déjà suracheté,
-    - score gonflé par D1/H4/session/MACD,
-    - entrée acceptée alors que le prix est trop loin du niveau.
-
-    Cette version privilégie :
-    tendance H4/H1 + pullback propre + momentum pas étendu + rejet M15.
-    """
     score_components = {
         "ICT": 0,
         "EMA": 0,
@@ -3444,17 +2548,12 @@ def calculate_signal_confidence(
     score = 0
     details: dict = {}
     min_required = SCORING_CONFIG.get("MIN_CONFIDENCE_SCORE", 10)
-
     direction = (direction or "").upper()
     entry_level = entry.get("entry_level")
     entry_type = str(entry.get("type", "FVG_RETEST")).upper()
-
     if entry_level is None or direction not in ["BUY", "SELL"]:
         return {"passed": False, "total_score": 0, "final_confidence": "LOW", "details": {"VETO": "Entrée/direction invalide"}}
-
     entry_level = float(entry_level)
-
-    # === ATR / SL TP ===
     atr_value = calculate_atr(df_m15)
     fvg_data = entry.get("fvg") if "fvg" in entry else None
     stop_loss, take_profit = calculate_sl_tp(
@@ -3465,7 +2564,6 @@ def calculate_signal_confidence(
         entry_type=entry_type,
         fvg_data=fvg_data,
     )
-
     if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
         score_components["ICT"] += 3
         details["Trend_H4"] = "+3 (Aligné)"
@@ -3475,8 +2573,6 @@ def calculate_signal_confidence(
     else:
         score_components["ICT"] -= 2
         details["Trend_H4"] = "-2 (H4 opposé, non bloquant)"
-
-    # === V78 : distance = malus progressif, plus veto brutal ===
     try:
         distance = abs(float(current_price) - entry_level)
         pip = get_pip_value_for_pair(pair)
@@ -3490,7 +2586,6 @@ def calculate_signal_confidence(
         }
         max_pips = entry_type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]))
         max_distance_price = max(float(atr_value) * 1.20, pip * max_pips)
-
         if distance <= max_distance_price * 0.50:
             score_components["Risk_RR_Distance"] += 2
             details["Distance"] = f"+2 proche ({distance:.5f} <= {max_distance_price * 0.50:.5f})"
@@ -3500,7 +2595,6 @@ def calculate_signal_confidence(
             score_components["Risk_RR_Distance"] -= 2
             details["Distance"] = f"-2 un peu loin ({distance:.5f} > {max_distance_price:.5f})"
         else:
-            # Seul cas où on bloque encore: entrée vraiment trop éloignée.
             return {
                 "passed": False,
                 "total_score": -50,
@@ -3512,8 +2606,6 @@ def calculate_signal_confidence(
             }
     except Exception as exc:
         details["Distance_Error"] = str(exc)
-
-    # === Tendance H1 EMA50 scorée (non bloquante) ===
     try:
         ema_score = max(-2, min(2, _directional_score(score_ema_trend(df_h1), direction)))
         structure_score = _directional_score(score_market_structure(df_h1), direction)
@@ -3526,12 +2618,9 @@ def calculate_signal_confidence(
         details["HTF_Alignment"] = f"{htf_score:+d} (alignement H1/H4)"
     except Exception as exc:
         details["Trend_H1_Error"] = str(exc)
-
-    # === VETO 4 : Stoch RSI anti-entrée tardive ===
     try:
         stoch_k_h1, _ = calculate_stoch_rsi(df_h1["close"])
         stoch_k_m15, _ = calculate_stoch_rsi(df_m15["close"])
-
         if direction == "BUY":
             if stoch_k_h1 >= 80 or stoch_k_m15 >= 85:
                 return {"passed": False, "total_score": -100, "final_confidence": "LOW", "details": {"VETO": f"BUY trop tardif StochRSI H1={stoch_k_h1:.1f} M15={stoch_k_m15:.1f}"}, "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value}
@@ -3543,7 +2632,6 @@ def calculate_signal_confidence(
                 details["StochRSI"] = f"+1 (survente BUY M15={stoch_k_m15:.1f})"
             else:
                 details["StochRSI"] = f"0 (neutre BUY M15={stoch_k_m15:.1f})"
-
         elif direction == "SELL":
             if stoch_k_h1 <= 20 or stoch_k_m15 <= 15:
                 return {"passed": False, "total_score": -100, "final_confidence": "LOW", "details": {"VETO": f"SELL trop tardif StochRSI H1={stoch_k_h1:.1f} M15={stoch_k_m15:.1f}"}, "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value}
@@ -3557,8 +2645,6 @@ def calculate_signal_confidence(
                 details["StochRSI"] = f"0 (neutre SELL M15={stoch_k_m15:.1f})"
     except Exception as exc:
         details["StochRSI_Error"] = str(exc)
-
-    # === Setup / zone d'entrée ===
     if "LIQUIDITY" in entry_type:
         score_components["Liquidity"] += 3
         score_components["ICT"] += 1
@@ -3577,12 +2663,9 @@ def calculate_signal_confidence(
     else:
         score_components["ICT"] += 1
         details["Setup_Type"] = f"+1 ({entry_type})"
-
     if "PERFECT" in entry_type:
         score_components["Imbalance"] = min(2, score_components["Imbalance"] + 1)
         details["Perfect"] = "+1"
-
-    # === Rejet M15 réel : dernière bougie doit aller dans le sens du trade ===
     try:
         last = df_m15.iloc[-1]
         body = abs(float(last["close"]) - float(last["open"]))
@@ -3601,8 +2684,6 @@ def calculate_signal_confidence(
             details["M15_Rejection"] = "-2 (pas de rejet confirmé)"
     except Exception:
         pass
-
-    # === RR ===
     rr_ratio = 0.0
     try:
         dist_sl = abs(entry_level - stop_loss)
@@ -3619,8 +2700,6 @@ def calculate_signal_confidence(
             details["RR"] = f"+2 (correct {rr_ratio:.2f})"
     except Exception:
         pass
-
-    # === Bonus secondaires plafonnés : ils ne doivent plus fabriquer un signal seuls ===
     d1_aligned = False
     try:
         d1_bonus, d1_label = get_d1_trend_bonus(df_d1, direction)
@@ -3632,7 +2711,6 @@ def calculate_signal_confidence(
             details["D1_Trend"] = d1_label
     except Exception:
         pass
-
     macd_confirmed = False
     try:
         macd_bonus, macd_label = get_macd_h1_bonus(df_h1, direction)
@@ -3644,7 +2722,6 @@ def calculate_signal_confidence(
             details["MACD_H1"] = macd_label
     except Exception:
         pass
-
     try:
         session_bonus, session_label = get_session_quality_bonus(pair)
         if session_bonus > 0:
@@ -3654,8 +2731,6 @@ def calculate_signal_confidence(
             details["Session"] = session_label
     except Exception:
         pass
-
-    # === Verdict ===
     score = compute_final_score(score_components)
     decision = direction if score >= min_required else "REJECTED"
     log_score_detail(score_components, score, decision)
@@ -3670,7 +2745,6 @@ def calculate_signal_confidence(
     }
     win_rate = estimate_win_rate(score, confluences)
     quality_label = get_signal_quality_label(score)
-
     return {
         "total_score": score,
         "details": details,
@@ -3685,108 +2759,70 @@ def calculate_signal_confidence(
         "quality_label": quality_label,
         "confluences": confluences,
     }
-    
+
 def get_fvg_midpoint(fvg: dict) -> float:
-    """
-    Calcule le 50% d'un FVG avec précision.
-    """
     if not all(k in fvg for k in ["high_level", "low_level"]):
         return None
-    
     high = float(fvg["high_level"])
     low = float(fvg["low_level"])
-    
-    # ✅ Éviter les FVG avec niveaux identiques
     if high == low:
         return None
-        
     midpoint = (high + low) / 2
-    
-    # ✅ Retourner avec la même précision que les prix
-    return round(midpoint, 5)  # 5 décimales pour Forex
-
-
+    return round(midpoint, 5)
 
 # =============================
 # BOUCLE PRINCIPALE AVEC SCORING
 # =============================
-
-
 def advanced_main():
-    """
-    Boucle principale avec toutes les corrections appliquées.
-    """
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
-
     for pair in PAIR_LIST:
         _reset_log_dedup()
         try:
             logger.info(f"\n🔍 Début de l'analyse avancée de {pair}")
-
-            # === Récupération des données ===
             df_h4 = get_candles_with_retry(api, pair, GRANULARITY_H4, 300)
             df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
             df_m15 = get_candles_with_retry(api, pair, GRANULARITY_M15, 250)
             df_d1 = get_candles_with_retry(api, pair, "D", count=250)
-
             if any(df.empty for df in [df_h4, df_h1, df_m15]):
                 logger.warning(f"⚠️ Données manquantes pour {pair}, analyse ignorée")
                 continue
-
             current_price = float(df_m15["close"].iloc[-1])
             logger.info(f"💰 {pair} Prix actuel M15 : {current_price:.5f}")
-
-            # === Détection Bias & Narrative ===
             bias_analysis = determine_advanced_bias(df_h4)
             bias = bias_analysis.get("bias", "NEUTRAL")
             logger.info(f"📍 Bias H4 : {bias}")
-
             narrative = determine_advanced_narrative(
                 df_m15, bias_analysis, pair, df_h4=df_h4, df_d1=df_d1, df_h1=df_h1
             )
-
-            # === Détections avancées ===
             breaker = detect_breaker(df_m15)
             amd_phase = detect_amd_phase(df_m15)
             logger.info(f"🔍 AMD Phase détectée: {amd_phase}")
-            
             if breaker['type']:
                 logger.info(f"🔍 Breaker détecté: {breaker['type']} à {breaker['level']}")
-
-            # ✅ CORRECTION : Initialiser les variables
             crt_detected = False
             tbs_setup_type = ""
-
-            # === Détection CRT Candle ===
             crt_detected = is_crt_candle(df_h4.iloc[-1])
             logger.info(f"🔍 CRT Candle détectée: {crt_detected}")
-
-            # === Détection TBS Setup ===
             tbs_setup = detect_tbs_setup(df_m15)
             tbs_setup_type = tbs_setup['type']
             logger.info(f"🔍 TBS Setup détecté: {tbs_setup_type} à {tbs_setup['level']}" if tbs_setup_type else "❌ Aucun TBS Setup")
-
-            # === Filtrage proximité ===
             max_distance = MAX_DISTANCE_PIPS.get(pair, MAX_DISTANCE_PIPS["DEFAULT"])
             filtered_entries = []
             kept_for_log = []
-
             for entry in narrative["potential_entries"]:
                 entry_level = entry.get("entry_level")
                 if entry_level is None:
                     continue
-
                 distance = abs(current_price - entry_level)
                 zone_start, zone_end = entry.get("entry_zone", (entry_level, entry_level))
                 is_in_zone = zone_start <= current_price <= zone_end
                 is_very_close = distance <= max_distance
-                is_within_reasonable_distance = False  # V3 strict : on ne garde plus les entrées à max_distance * 3
-
+                is_within_reasonable_distance = False
                 if is_in_zone or is_very_close or is_within_reasonable_distance:
                     filtered_entries.append(entry)
                     status = "dans zone" if is_in_zone else "très proche" if is_very_close else "distance raisonnable"
@@ -3799,58 +2835,38 @@ def advanced_main():
                     })
                 else:
                     logger.warning(f"❌ Entrée rejetée: {entry_level:.5f} (trop éloignée: {distance:.5f} > {max_distance:.5f})")
-
             narrative["potential_entries"] = filtered_entries
             logger.info(f"📝 Entrées après filtrage proximité: {len(narrative['potential_entries'])}")
             _log_kept_compact(pair, kept_for_log, top_n=8)
-
-            # === Clustering ===
             pip_value_for_clustering = get_pip_value_for_pair(pair)
             max_distance_pips_for_clustering_arg = (max_distance / pip_value_for_clustering) if max_distance else None
             if max_distance_pips_for_clustering_arg:
                 max_distance_pips_for_clustering_arg = max(5.0, min(20.0, max_distance_pips_for_clustering_arg))
-
             clustered_entries = cluster_signals(narrative["potential_entries"], pair, max_distance_pips_for_clustering_arg)
             narrative["potential_entries"] = clustered_entries
             logger.info(f"📝 Entrées après clustering: {len(narrative['potential_entries'])}")
-
-            # === Analyse / Envoi ===
             nb_envoyes = 0
             for entry in narrative["potential_entries"]:
                 direction = entry.get("direction", "").upper()
                 entry_zone = entry.get("entry_zone", None)
                 entry_type = entry.get("type", "UNKNOWN")
                 entry_level = entry.get("entry_level")
-
                 if not direction or not entry_zone or entry_level is None:
                     continue
-
                 zone_start, zone_end = entry_zone
                 entry_level_key = round(float(entry_level), 5)
-
                 logger.info(f"\n🔍 Analyse signal: {direction}")
                 logger.info(f" Type: {entry_type}")
                 logger.info(f" Zone: {zone_start:.5f}-{zone_end:.5f}")
                 logger.info(f" Niveau: {entry_level:.5f}")
                 logger.info(f" Prix actuel: {current_price:.5f} → Distance: {abs(current_price - entry_level):.5f}")
-
                 if is_signal_sent_recently(pair, direction, entry_level_key, zone_start, zone_end):
                     logger.info(" ❌ Signal déjà envoyé récemment → Ignoré")
                     continue
-
-                liquidity_levels_context = narrative.get("liquidity_targets", {})
-                nested_fvgs_context = narrative.get("nested_fvgs", [])
-                recent_ofls_context = narrative.get("recent_ofls", [])
-                structure_analysis_context = narrative.get("structure_analysis", {})
-
-               
-
-                # Calcul du score de confiance (avec D1 pour confirmation tendance longue)
                 confidence_result = calculate_signal_confidence(
                     pair, direction, df_h4, df_h1, df_m15, entry, bias, current_price,
                     crt_detected, tbs_setup_type, df_d1=df_d1
                 )
-                
                 stop_loss, take_profit = calculate_sl_tp(
                     entry_price=entry['entry_level'],
                     atr=confidence_result['atr_value'],
@@ -3859,17 +2875,14 @@ def advanced_main():
                     entry_type=entry.get("type", "FVG_RETEST"),
                     breaker_level=breaker['level']
                 )
-
                 score = confidence_result["total_score"]
                 quality = confidence_result.get("quality_label", "B")
                 win_rate = confidence_result.get("win_rate", "~55%")
                 logger.info(f" 📊 Score: {score}/{SCORING_CONFIG['MIN_CONFIDENCE_SCORE']} | Qualité: {quality} | Win Rate estimé: {win_rate}")
                 logger.info(f" 📋 Détails: {confidence_result.get('details', {})}")
-
                 if confidence_result.get("passed", False):
                     logger.info(f" ✅ Signal {quality} confirmé → envoi Telegram")
                     rsi_value = get_last_rsi(df_m15["close"])
-                    # On enrichit le bias_analysis avec les infos prédictives pour le message
                     enriched_bias = dict(bias_analysis) if bias_analysis else {}
                     enriched_bias["win_rate"] = win_rate
                     enriched_bias["quality_label"] = quality
@@ -3890,72 +2903,17 @@ def advanced_main():
                     nb_envoyes += 1
                 else:
                     logger.info(" ❌ Signal rejeté (score insuffisant)")
-
             total_signals_processed = len(narrative.get("potential_entries", []))
             logger.info(f"🏁 Scan {pair} terminé. Signaux finaux envoyés: {nb_envoyes}. Signaux traités/clusters: {total_signals_processed}")
-
         except Exception as e:
             logger.error(f"💥 Erreur critique sur {pair} : {str(e)}")
             logger.error(traceback.format_exc())
             continue
-
     logger.info("🏁 Analyse avancée terminée pour toutes les paires")
-# --- Exemple de définition de cluster_signals (doit correspondre à ce que vous avez mis à jour) ---
-# def cluster_signals(signals: List[Dict], pair: str, max_distance_pips_for_clustering: float = None) -> List[Dict]:
-#     # ... (Implémentation corrigée avec signature à 3 arguments)
-#     pass
-
-# --- Exemple de définition de get_pip_value_for_pair (doit être corrigée) ---
-# def get_pip_value_for_pair(pair: str) -> float:
-#     pair = pair.upper()
-#     if pair == "XAU_USD":
-#         return 0.01
-#     elif pair == "NAS100_USD":
-#         return 0.1
-#     elif "JPY" in pair:
-#         return 0.01
-#     else:
-#         return 0.0001
-
-# --- Exemple de définition de is_in_key_zone_or_consolidation (doit être ajoutée) ---
-# def is_in_key_zone_or_consolidation(
-#     current_price: float, pair: str, df_m15: pd.DataFrame,
-#     liquidity_levels: dict, nested_fvgs: list, recent_ofls: list,
-#     structure_analysis: dict, max_zone_width_pips: float = 30.0
-# ) -> bool:
-#     # ... (Implémentation fournie précédemment)
-#     pass
-
-# --- Exemple de définition de cluster_signals (doit correspondre à ce que vous avez mis à jour) ---
-# def cluster_signals(signals: List[Dict], pair: str, max_distance_pips_for_clustering: float = None) -> List[Dict]:
-#     # ... (Implémentation corrigée avec signature à 3 arguments)
-#     pass
-
-# --- Exemple de définition de get_tolerance dans determine_advanced_narrative (doit inclure NAS100_USD) ---
-# def get_tolerance(entry_level: float, pair_local: str) -> float:
-#     if pair_local == "XAU_USD":
-#         return 5.0
-#     elif pair_local in ["AUD_USD", "EUR_USD", "NZD_USD", "USD_CAD", "USD_CHF"]:
-#         return 0.0030
-#     elif pair_local == "GBP_USD":
-#         return 0.0030
-#     elif pair_local == "USD_JPY":
-#         return 1.0
-#     elif pair_local == "NAS100_USD": # <-- CETTE LIGNE EST CRUCIALE
-#         return 20.0                 # <-- CETTE LIGNE EST CRUCIALE
-#     else:
-#         return 0.0010
-
 
 # ============================================================
-# V78 BALANCED BUY/SELL - PATCH PRODUCTION
-# Objectif : maximum 1 BUY + 1 SELL par paire.
-# Correction V77 :
-# - WICK_REJECTION et NESTED_FVG ne sont plus créés puis rejetés.
-# - On garde les filtres sérieux : tendance H1, direction H4,
-#   StochRSI, distance, score, anti-doublon, risk management OANDA.
+# V78 STRICT BUY/SELL - FILTRES
 # ============================================================
-
 STRICT_ALLOWED_ENTRY_TYPES = {
     "FVG_RETEST_PERFECT",
     "FVG_RETEST",
@@ -3965,10 +2923,7 @@ STRICT_ALLOWED_ENTRY_TYPES = {
     "WICK_REJECTION",
     "LIQUIDITY_DRAW",
 }
-
 STRICT_MAX_DISTANCE_PIPS = {
-    # V78 : distances élargies pour laisser vivre les retests M15/H1.
-    # Le scoring garde ensuite un malus si le prix est loin.
     "XAU_USD": 35.0,
     "USD_JPY": 18.0,
     "GBP_JPY": 22.0,
@@ -3982,98 +2937,58 @@ STRICT_MAX_DISTANCE_PIPS = {
     "DEFAULT": 15.0,
 }
 
-
 def strict_price_distance(pair: str, pips: float) -> float:
-    """Convertit une distance en pips vers distance prix."""
     return float(pips) * get_pip_value_for_pair(pair)
 
-
 def strict_entry_type_allowed(entry_type: str) -> bool:
-    """
-    V77 : autorise les vrais setups directionnels du moteur.
-    Correction du bug V76/V5:
-    le moteur ajoutait WICK_REJECTION / NESTED_FVG puis les rejetait
-    immédiatement avec "type non autorisé V78".
-
-    On garde désactivés les setups expérimentaux trop bruyants:
-    TBS / AMD / CRT / PIN.
-    """
     et = (entry_type or "").upper().strip()
-
     if et in STRICT_ALLOWED_ENTRY_TYPES:
         return True
-
-    # Compatibilité avec variantes de nommage
     if et.startswith("FVG_RETEST"):
         return True
     if "NESTED" in et and "FVG" in et:
         return True
     if "WICK" in et and "REJECTION" in et:
         return True
-
-    # Setups expérimentaux toujours exclus
     blocked_keywords = ("TBS", "AMD", "CRT", "PIN_BUY", "PIN_SELL")
     if any(k in et for k in blocked_keywords):
         return False
-
     return False
 
-
 def strict_stoch_veto(direction: str, df_h1: pd.DataFrame, df_m15: pd.DataFrame) -> tuple:
-    """
-    Veto anti entrée tardive.
-    BUY interdit si H1 déjà suracheté.
-    SELL interdit si H1 déjà survendu.
-    M15 sert de filtre de timing.
-    """
     try:
         k_h1, d_h1 = calculate_stoch_rsi(df_h1["close"])
         k_m15, d_m15 = calculate_stoch_rsi(df_m15["close"])
         k_h1 = float(k_h1)
         k_m15 = float(k_m15)
-
         if direction == "BUY" and k_h1 >= 80:
             return False, f"BUY interdit: StochRSI H1 surachat {k_h1:.1f}"
         if direction == "SELL" and k_h1 <= 20:
             return False, f"SELL interdit: StochRSI H1 survendu {k_h1:.1f}"
-
-        # Timing M15 : on refuse de rentrer après l'impulsion.
         if direction == "BUY" and k_m15 >= 85:
             return False, f"BUY trop tardif: StochRSI M15 {k_m15:.1f}"
         if direction == "SELL" and k_m15 <= 15:
             return False, f"SELL trop tardif: StochRSI M15 {k_m15:.1f}"
-
         return True, f"StochRSI OK H1={k_h1:.1f} M15={k_m15:.1f}"
     except Exception as exc:
-        # En cas de doute, on ne bloque pas pour éviter une panne complète.
         return True, f"StochRSI indisponible: {exc}"
 
-
 def strict_trend_veto(direction: str, current_price: float, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> tuple:
-    """Compatibilité: aucun veto EMA50, la tendance est scorée ailleurs."""
     try:
         ema50_h1 = df_h1["close"].ewm(span=50, adjust=False).mean().iloc[-1]
         return True, f"EMA50 H1 scorée sans veto (prix={current_price:.5f}, EMA50={ema50_h1:.5f})"
     except Exception as exc:
         return True, f"EMA50 H1 indisponible, aucun veto: {exc}"
 
-
 def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tuple:
-    """
-    V78 : filtre de proximité assoupli.
-    Il évite seulement les entrées vraiment trop éloignées.
-    La distance fine est ensuite pénalisée/bonifiée dans calculate_signal_confidence().
-    """
     entry_level = entry.get("entry_level")
     if entry_level is None:
         return False, "entry_level manquant"
-
     entry_level = float(entry_level)
     zone_start, zone_end = entry.get("entry_zone", (entry_level, entry_level))
     zone_start = float(zone_start)
     zone_end = float(zone_end)
     is_in_zone = min(zone_start, zone_end) <= current_price <= max(zone_start, zone_end)
-
     entry_type = str(entry.get("type", "")).upper()
     type_max_pips = {
         "FVG_RETEST_PERFECT": 18.0,
@@ -4083,31 +2998,25 @@ def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tupl
         "BISI": 20.0,
         "BREAKER": 18.0,
     }
-
     max_pips = max(
         STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]),
         type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"])),
     )
     max_price_distance = strict_price_distance(pair, max_pips)
     distance = abs(current_price - entry_level)
-
     if is_in_zone:
         return True, f"dans zone distance={distance:.5f}"
     if distance <= max_price_distance:
         return True, f"distance acceptable={distance:.5f} <= {max_price_distance:.5f} ({max_pips:.1f} pips)"
     return False, f"vraiment trop loin distance={distance:.5f} > {max_price_distance:.5f} ({max_pips:.1f} pips)"
 
-
 def strict_keep_best_per_direction(scored_entries: list) -> list:
-    """Maximum 1 BUY + 1 SELL, on garde le meilleur score par direction."""
     best = {}
     for item in scored_entries:
         entry = item["entry"]
         direction = entry.get("direction", "").upper()
         score = item["confidence"].get("total_score", -999)
         entry_type = entry.get("type", "")
-
-        # priorité au score, puis aux FVG perfect/BISI plutôt qu'aux signaux faibles
         priority = 0
         if "PERFECT" in entry_type:
             priority += 3
@@ -4119,33 +3028,13 @@ def strict_keep_best_per_direction(scored_entries: list) -> list:
             priority += 2
         if entry_type == "WICK_REJECTION":
             priority += 1
-
         key_score = (score, priority)
         if direction not in best or key_score > best[direction]["key_score"]:
             item["key_score"] = key_score
             best[direction] = item
-
-    # ordre stable : meilleur score d'abord
     return sorted(best.values(), key=lambda x: x["key_score"], reverse=True)
 
-
-
-
-# ============================================================
-# V78 BALANCED BUY/SELL - PATCH ANTI BIAIS BUY
-# Objectif : ne plus bloquer mécaniquement les SELL quand H4 est BUY.
-# On garde le mode tendance, mais on ajoute un mode contre-mouvement contrôlé.
-# ============================================================
-
 def strict_direction_permission_v77(direction: str, bias: str, current_price: float, df_h1: pd.DataFrame, df_m15: pd.DataFrame, entry_type: str) -> tuple:
-    """
-    Autorise :
-    - les trades dans le biais H4,
-    - les contre-trades uniquement si StochRSI H1 est extrême + timing M15 cohérent.
-
-    Exemple : H4 BUY mais StochRSI H1 > 75 => on peut accepter un SELL de correction,
-    au lieu de le rejeter automatiquement.
-    """
     try:
         direction = (direction or "").upper()
         bias = (bias or "NEUTRAL").upper()
@@ -4154,16 +3043,10 @@ def strict_direction_permission_v77(direction: str, bias: str, current_price: fl
         k_m15, d_m15 = calculate_stoch_rsi(df_m15["close"])
         k_h1 = float(k_h1)
         k_m15 = float(k_m15)
-
-        # Si biais neutre, pas de blocage directionnel.
         if bias not in {"BUY", "SELL"}:
             return True, f"Biais neutre: direction {direction} autorisée"
-
-        # Direction alignée au biais H4 : OK.
         if direction == bias:
             return True, f"Direction alignée H4 {bias}"
-
-        # Contre-biais autorisé seulement en correction d'extrême.
         allowed_counter_types = {
             "BREAKER",
             "BISI",
@@ -4173,46 +3056,30 @@ def strict_direction_permission_v77(direction: str, bias: str, current_price: fl
             "WICK_REJECTION",
         }
         is_allowed_counter_type = entry_type in allowed_counter_types or entry_type.startswith("FVG_RETEST")
-
         if direction == "SELL" and bias == "BUY":
             if k_h1 >= 75 and k_m15 <= 70 and is_allowed_counter_type:
                 return True, f"SELL contre H4 BUY autorisé V78: H1 surachat {k_h1:.1f}, M15 refroidit {k_m15:.1f}, type={entry_type}"
             return False, f"SELL contre H4 BUY refusé: H1={k_h1:.1f}, M15={k_m15:.1f}, type={entry_type}"
-
         if direction == "BUY" and bias == "SELL":
             if k_h1 <= 25 and k_m15 >= 30 and is_allowed_counter_type:
                 return True, f"BUY contre H4 SELL autorisé V78: H1 survendu {k_h1:.1f}, M15 rebondit {k_m15:.1f}, type={entry_type}"
             return False, f"BUY contre H4 SELL refusé: H1={k_h1:.1f}, M15={k_m15:.1f}, type={entry_type}"
-
         return False, f"Direction {direction} non autorisée contre biais {bias}"
     except Exception as exc:
         return False, f"permission direction indisponible: {exc}"
 
-
 def strict_trend_veto_v77(direction: str, current_price: float, df_h1: pd.DataFrame, df_h4: pd.DataFrame, bias: str = "NEUTRAL") -> tuple:
-    """
-    V83 : EMA50 H1 n'est plus un veto pour BUY ni SELL.
-    La fonction reste pour compatibilité avec le pipeline strict, mais elle ne bloque plus.
-    """
     try:
         ema50_h1 = float(df_h1["close"].ewm(span=50, adjust=False).mean().iloc[-1])
         return True, f"EMA50 H1 non bloquante: prix={current_price:.5f}, EMA50={ema50_h1:.5f}"
     except Exception as exc:
         return True, f"EMA H1 indisponible, aucun veto: {exc}"
 
-
-
 def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
-    """
-    V78 : supprime les doublons exacts/near-identiques avant scoring.
-    Exemple vu dans les logs: 5 x FVG_RETEST_PERFECT au même prix AUD_USD.
-    """
     if not entries:
         return []
-
     pip = get_pip_value_for_pair(pair)
     precision_step = max(pip * 0.5, 1e-9)
-
     def priority(entry: dict) -> tuple:
         et = str(entry.get("type", "")).upper()
         score = 0
@@ -4231,7 +3098,6 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
         except Exception:
             lvl = 0.0
         return (score, -abs(lvl))
-
     seen = {}
     for entry in entries:
         try:
@@ -4240,13 +3106,10 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
             lvl = float(entry.get("entry_level"))
         except Exception:
             continue
-
         rounded_bucket = round(lvl / precision_step)
         key = (direction, et, rounded_bucket)
-
         if key not in seen or priority(entry) > priority(seen[key]):
             seen[key] = entry
-
     deduped = list(seen.values())
     removed = len(entries) - len(deduped)
     if removed > 0:
@@ -4254,103 +3117,74 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return deduped
 
 def advanced_main():
-    """
-    V78 BALANCED BUY/SELL.
-    - conserve ton moteur de données OANDA et tes fonctions existantes,
-    - mais filtre agressivement la narrative,
-    - conserve WICK/NESTED/FVG mais supprime TBS/AMD/CRT trop bruyants,
-    - score tous les candidats propres,
-    - envoie maximum 1 BUY + 1 SELL par paire.
-    """
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
-
     for pair in PAIR_LIST:
         _reset_log_dedup()
         try:
             logger.info(f"\n🔍 Début de l'analyse V78 BALANCED BUY/SELL de {pair}")
-
             df_h4 = get_candles_with_retry(api, pair, GRANULARITY_H4, 300)
             df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
             df_m15 = get_candles_with_retry(api, pair, GRANULARITY_M15, 250)
             df_d1 = get_candles_with_retry(api, pair, "D", count=250)
-
             if any(df.empty for df in [df_h4, df_h1, df_m15]):
                 logger.warning(f"⚠️ Données manquantes pour {pair}, analyse ignorée")
                 continue
-
             current_price = float(df_m15["close"].iloc[-1])
             logger.info(f"💰 {pair} Prix actuel M15 : {current_price:.5f}")
-
             bias_analysis = determine_advanced_bias(df_h4)
             bias = bias_analysis.get("bias", "NEUTRAL")
             logger.info(f"📍 Bias H4 : {bias}")
-
             narrative = determine_advanced_narrative(
                 df_m15, bias_analysis, pair, df_h4=df_h4, df_d1=df_d1, df_h1=df_h1
             )
-
             raw_entries_raw = narrative.get("potential_entries", [])
             logger.info(f"🧹 V78: entrées brutes narrative: {len(raw_entries_raw)}")
             raw_entries = dedupe_raw_entries_v771(raw_entries_raw, pair)
             logger.info(f"🧹 V78: entrées après dédup: {len(raw_entries)}")
-
             breaker = detect_breaker(df_m15)
             scored_entries = []
             rejected = 0
-
             for entry in raw_entries:
                 direction = entry.get("direction", "").upper()
                 entry_type = entry.get("type", "UNKNOWN")
                 entry_level = entry.get("entry_level")
-
                 if direction not in {"BUY", "SELL"} or entry_level is None:
                     rejected += 1
                     continue
-
                 if not strict_entry_type_allowed(entry_type):
                     logger.info(f"⛔ {pair} rejet {direction} {entry_type}: type non autorisé V78")
                     rejected += 1
                     continue
-
-                # V77 : on ne rejette plus automatiquement les SELL quand H4 est BUY.
-                # On autorise les contre-signaux uniquement si le StochRSI H1 est extrême.
                 ok, reason = strict_direction_permission_v77(direction, bias, current_price, df_h1, df_m15, entry_type)
                 if not ok:
                     logger.info(f"⛔ {pair} rejet {direction} {entry_type}: {reason}")
                     rejected += 1
                     continue
-
                 ok, reason = strict_trend_veto_v77(direction, current_price, df_h1, df_h4, bias)
                 if not ok:
                     logger.info(f"⛔ {pair} rejet {direction} {entry_type}: {reason}")
                     rejected += 1
                     continue
-
                 ok, reason = strict_stoch_veto(direction, df_h1, df_m15)
                 if not ok:
                     logger.info(f"⛔ {pair} rejet {direction} {entry_type}: {reason}")
                     rejected += 1
                     continue
-
                 ok, reason = strict_distance_filter(pair, current_price, entry)
                 if not ok:
                     logger.info(f"⛔ {pair} rejet {direction} {entry_type} @{float(entry_level):.5f}: {reason}")
                     rejected += 1
                     continue
-
                 logger.info(f"✅ {pair} candidat propre {direction} {entry_type} @{float(entry_level):.5f}: {reason}")
-
                 confidence_result = calculate_signal_confidence(
                     pair, direction, df_h4, df_h1, df_m15, entry, bias, current_price,
                     False, "", df_d1=df_d1
                 )
-
-                # V4 : un signal doit passer le score ET ne pas être seulement une collection de bonus secondaires.
                 if not confidence_result.get("passed", False):
                     logger.info(
                         f"❌ {pair} rejet score {direction} {entry_type}: "
@@ -4359,14 +3193,11 @@ def advanced_main():
                     )
                     rejected += 1
                     continue
-
                 scored_entries.append({"entry": entry, "confidence": confidence_result})
-
             finalists = strict_keep_best_per_direction(scored_entries)
             logger.info(
                 f"🧹 V78: candidats scorés={len(scored_entries)}, finalistes={len(finalists)}, rejetés={rejected}"
             )
-
             nb_envoyes = 0
             for item in finalists:
                 entry = item["entry"]
@@ -4378,11 +3209,9 @@ def advanced_main():
                 zone_start = float(zone_start)
                 zone_end = float(zone_end)
                 entry_level_key = round(entry_level, 5)
-
                 if is_signal_sent_recently(pair, direction, entry_level_key, zone_start, zone_end):
                     logger.info(f"❌ {pair} {direction} déjà envoyé récemment → ignoré")
                     continue
-
                 stop_loss, take_profit = calculate_sl_tp(
                     entry_price=entry_level,
                     atr=confidence_result["atr_value"],
@@ -4391,7 +3220,6 @@ def advanced_main():
                     entry_type=entry_type,
                     breaker_level=breaker.get("level") if isinstance(breaker, dict) else None,
                 )
-
                 score = confidence_result.get("total_score", 0)
                 quality = confidence_result.get("quality_label", "B")
                 win_rate = confidence_result.get("win_rate", "~55%")
@@ -4400,17 +3228,14 @@ def advanced_main():
                     f"Score {score}/{SCORING_CONFIG['MIN_CONFIDENCE_SCORE']} | Qualité {quality} | WR {win_rate}"
                 )
                 logger.info(f"📋 Détails: {confidence_result.get('details', {})}")
-
                 enriched_bias = dict(bias_analysis) if bias_analysis else {}
                 enriched_bias["win_rate"] = win_rate
                 enriched_bias["quality_label"] = quality
                 enriched_bias["score_details"] = confidence_result.get("details", {})
                 enriched_bias["v77_filter"] = "V78: max 1 BUY + 1 SELL, WICK/NESTED autorisés, contre-signaux seulement sur StochRSI extrême"
-
                 rsi_value = get_last_rsi(df_m15["close"])
-
                 # V86 : exécution via execute_oanda_trade_v76 (modifiée V86)
-                trade_id = execute_oanda_trade_v76(
+                trade_id = execute_oanda_trade_v86(
                     pair=pair,
                     direction=direction,
                     entry_price=entry_level,
@@ -4419,7 +3244,6 @@ def advanced_main():
                     score=score,
                     entry_type=entry_type,
                 )
-
                 if trade_id:
                     send_telegram_alert(
                         pair=pair,
@@ -4437,26 +3261,18 @@ def advanced_main():
                     nb_envoyes += 1
                 else:
                     logger.info(f"{pair}: V86 ordre non exécuté, zone NON enregistrée.")
-
             logger.info(
                 f"🏁 Scan {pair} terminé. Signaux envoyés: {nb_envoyes}. "
                 f"Finalistes: {len(finalists)}"
             )
-
         except Exception as e:
             logger.error(f"💥 Erreur critique sur {pair} : {str(e)}")
             logger.error(traceback.format_exc())
             continue
-
     logger.info("🏁 Analyse V86 BALANCED BUY/SELL terminée pour toutes les paires")
-
-
 
 # =========================================================
 # V86 - OANDA EXECUTION + TRADE MANAGER (modifié)
-# Base V76 prod conservée.
-# Ajouts: exécution réelle OANDA, sizing risque, 1 trade/pair, MAX 9 trades,
-# break-even +1R avec offset, puis création d'un Trailing Stop Loss natif OANDA.
 # =========================================================
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
@@ -4467,27 +3283,25 @@ MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "1250"))
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "9"))
 ONE_TRADE_PER_PAIR = os.getenv("ONE_TRADE_PER_PAIR", "true").lower() == "true"
 
-BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))  # V83 (pas utilisé dans V86)
+BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))
 BREAKEVEN_OFFSET_PIPS = float(os.getenv("BREAKEVEN_OFFSET_PIPS", "1.0"))
 
-PIP_SIZE_V76 = {
+PIP_SIZE_V86 = {
     "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
     "USD_CAD": 0.0001, "AUD_CAD": 0.0001,
     "USD_JPY": 0.01, "AUD_JPY": 0.01, "GBP_JPY": 0.01,
     "XAU_USD": 0.01,
     "NAS100_USD": 0.1, "US30_USD": 1.0, "SPX500_USD": 0.1,
 }
-PRICE_DECIMALS_V76 = {
+PRICE_DECIMALS_V86 = {
     "EUR_USD": 5, "GBP_USD": 5, "AUD_USD": 5,
     "USD_CAD": 5, "AUD_CAD": 5,
     "USD_JPY": 3, "AUD_JPY": 3, "GBP_JPY": 3,
     "XAU_USD": 3,
     "NAS100_USD": 1, "US30_USD": 1, "SPX500_USD": 1,
 }
-MIN_UNITS_V76 = {"XAU_USD": 0.1, "DEFAULT": 1000}
+MIN_UNITS_V86 = {"XAU_USD": 0.1, "DEFAULT": 1000}
 
-# V79 money-management constants used by calculate_units_v76().
-# Keep sizing rounded and capped before sending any order to OANDA.
 UNIT_STEP_BY_PAIR = {
     "XAU_USD": 1,
     "EUR_USD": 1000,
@@ -4503,7 +3317,6 @@ UNIT_STEP_BY_PAIR = {
     "SPX500_USD": 1,
     "DEFAULT": 1000,
 }
-
 MIN_UNITS_BY_PAIR = {
     "XAU_USD": 1,
     "NAS100_USD": 1,
@@ -4511,7 +3324,6 @@ MIN_UNITS_BY_PAIR = {
     "SPX500_USD": 1,
     "DEFAULT": 1000,
 }
-
 MAX_UNITS_BY_PAIR = {
     "XAU_USD": 100,
     "EUR_USD": 200000,
@@ -4530,15 +3342,11 @@ MAX_UNITS_BY_PAIR = {
 
 MAX_MARGIN_USAGE_PER_TRADE_PERCENT = float(os.getenv("MAX_MARGIN_USAGE_PER_TRADE_PERCENT", "5.0"))
 OANDA_CACHE_TTL_SECONDS_V83 = float(os.getenv("OANDA_CACHE_TTL_SECONDS_V83", "3.0"))
-_OANDA_CACHE_V83 = {}
-_INITIAL_RISK_BY_TRADE_V83 = {}
+_OANDA_CACHE_V86 = {}
+_INITIAL_RISK_BY_TRADE_V86 = {}
+_TRAILING_CREATED_V86 = set()  # V86 pour mémoriser les trades pour lesquels le trailing a été créé
 
-# V86 - Set pour mémoriser les trades pour lesquels le trailing a déjà été créé
-_TRAILING_CREATED_V86 = set()
-
-
-def compact_json_v76(obj, max_len: int = 6000) -> str:
-    """JSON compact pour diagnostiquer les réponses OANDA sans saturer les logs."""
+def compact_json_v86(obj, max_len: int = 6000) -> str:
     try:
         import json
         text = json.dumps(obj, ensure_ascii=False, default=str)
@@ -4546,33 +3354,28 @@ def compact_json_v76(obj, max_len: int = 6000) -> str:
         text = str(obj)
     return text if len(text) <= max_len else text[:max_len] + " ...[TRONQUÉ]"
 
-
-
-def v76_client():
+def v86_client():
     token = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN")
     return oandapyV20.API(access_token=token, environment=OANDA_ENVIRONMENT)
 
-
-def _cache_get_v83(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V83):
-    item = _OANDA_CACHE_V83.get(key)
+def _cache_get_v86(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V83):
+    item = _OANDA_CACHE_V86.get(key)
     if not item:
         return None
     ts, value = item
     if time.time() - ts > ttl_seconds:
-        _OANDA_CACHE_V83.pop(key, None)
+        _OANDA_CACHE_V86.pop(key, None)
         return None
     return value
 
-
-def _cache_set_v83(key: str, value):
-    _OANDA_CACHE_V83[key] = (time.time(), value)
+def _cache_set_v86(key: str, value):
+    _OANDA_CACHE_V86[key] = (time.time(), value)
     return value
 
+def clear_scan_cache_v86():
+    _OANDA_CACHE_V86.clear()
 
-def clear_scan_cache_v83():
-    _OANDA_CACHE_V83.clear()
-
-def is_market_open_utc_v76(now_dt: datetime) -> bool:
+def is_market_open_utc_v86(now_dt: datetime) -> bool:
     wd = now_dt.weekday()
     t = now_dt.time()
     if wd == 5:
@@ -4583,15 +3386,12 @@ def is_market_open_utc_v76(now_dt: datetime) -> bool:
         return False
     return True
 
+def round_price_v86(pair: str, price: float) -> str:
+    return f"{float(price):.{PRICE_DECIMALS_V86.get(pair, 5)}f}"
 
-def round_price_v76(pair: str, price: float) -> str:
-    return f"{float(price):.{PRICE_DECIMALS_V76.get(pair, 5)}f}"
-
-
-
-def oanda_safe_request_v76(endpoint, label: str = ""):
+def oanda_safe_request_v86(endpoint, label: str = ""):
     try:
-        api = v76_client()
+        api = v86_client()
         resp = api.request(endpoint)
         return resp
     except Exception as e:
@@ -4599,12 +3399,12 @@ def oanda_safe_request_v76(endpoint, label: str = ""):
         logger.error(traceback.format_exc())
         return None
 
-def get_account_summary_v76() -> dict:
-    cached = _cache_get_v83("account_summary")
+def get_account_summary_v86() -> dict:
+    cached = _cache_get_v86("account_summary")
     if cached is not None:
         return cached
     r = accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID)
-    resp = oanda_safe_request_v76(r, "AccountSummary")
+    resp = oanda_safe_request_v86(r, "AccountSummary")
     if not resp:
         return {}
     acc = resp.get("account", {})
@@ -4614,51 +3414,26 @@ def get_account_summary_v76() -> dict:
         f"openTradeCount={acc.get('openTradeCount')} openPositionCount={acc.get('openPositionCount')} "
         f"lastTransactionID={resp.get('lastTransactionID') or acc.get('lastTransactionID')}"
     )
-    return _cache_set_v83("account_summary", resp)
+    return _cache_set_v86("account_summary", resp)
 
-
-def get_account_summary_v76() -> dict:
-    cached = _cache_get_v83("account_summary")
-    if cached is not None:
-        return cached
-    r = accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID)
-    resp = oanda_safe_request_v76(r, "AccountSummary")
-    if not resp:
-        return {}
-    acc = resp.get("account", {})
-    logger.info(
-        f"DEBUG OANDA SUMMARY | account={OANDA_ACCOUNT_ID} env={OANDA_ENVIRONMENT} "
-        f"balance={acc.get('balance')} NAV={acc.get('NAV')} "
-        f"openTradeCount={acc.get('openTradeCount')} openPositionCount={acc.get('openPositionCount')} "
-        f"lastTransactionID={resp.get('lastTransactionID') or acc.get('lastTransactionID')}"
-    )
-    return _cache_set_v83("account_summary", resp)
-
-
-def get_balance_v76() -> float:
-    resp = get_account_summary_v76()
+def get_balance_v86() -> float:
+    resp = get_account_summary_v86()
     try:
         return float(resp.get("account", {}).get("balance", 0))
     except Exception:
         return 0.0
 
-
-def get_open_trades_v76(log_raw: bool = False) -> list:
-    """
-    V86: lecture officielle OpenTrades, comme V75.
-    Ne bloque que si OANDA renvoie un trade avec currentUnits non nul.
-    """
+def get_open_trades_v86(log_raw: bool = False) -> list:
     cache_key = "open_trades_raw"
-    resp = _cache_get_v83(cache_key)
+    resp = _cache_get_v86(cache_key)
     if resp is None:
         r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
-        resp = oanda_safe_request_v76(r, "OpenTrades")
+        resp = oanda_safe_request_v86(r, "OpenTrades")
         if resp:
-            _cache_set_v83(cache_key, resp)
+            _cache_set_v86(cache_key, resp)
     if not resp:
         logger.warning("[RISK] OPEN TRADES response missing; using empty list to avoid false blocking.")
         return []
-
     raw_trades = resp.get("trades", []) or []
     open_trades = []
     for t in raw_trades:
@@ -4668,10 +3443,9 @@ def get_open_trades_v76(log_raw: bool = False) -> list:
             units = 0.0
         if abs(units) > 0:
             open_trades.append(t)
-
     logger.info(f"DEBUG OPEN TRADES | account={OANDA_ACCOUNT_ID} env={OANDA_ENVIRONMENT} count={len(open_trades)} raw_count={len(raw_trades)}")
     if log_raw:
-        logger.info(f"DEBUG OPEN TRADES RAW={compact_json_v76(resp)}")
+        logger.info(f"DEBUG OPEN TRADES RAW={compact_json_v86(resp)}")
     for t in open_trades:
         logger.info(
             f"DEBUG TRADE | id={t.get('id')} instrument={t.get('instrument')} "
@@ -4680,17 +3454,15 @@ def get_open_trades_v76(log_raw: bool = False) -> list:
         )
     return open_trades
 
-
-def get_open_positions_v76(log_raw: bool = False) -> list:
-    """Lecture OpenPositions pour confirmer l'état réel du compte, comme V75."""
+def get_open_positions_v86(log_raw: bool = False) -> list:
     try:
         cache_key = "open_positions_raw"
-        resp = _cache_get_v83(cache_key)
+        resp = _cache_get_v86(cache_key)
         if resp is None:
             r = positions.OpenPositions(accountID=OANDA_ACCOUNT_ID)
-            resp = oanda_safe_request_v76(r, "OpenPositions")
+            resp = oanda_safe_request_v86(r, "OpenPositions")
             if resp:
-                _cache_set_v83(cache_key, resp)
+                _cache_set_v86(cache_key, resp)
         if not resp:
             return []
         open_positions = resp.get("positions", []) or []
@@ -4703,13 +3475,12 @@ def get_open_positions_v76(log_raw: bool = False) -> list:
                 long_units, short_units = 0.0, 0.0
             if abs(long_units) > 0 or abs(short_units) > 0:
                 live_positions.append(p)
-
         logger.info(
             f"DEBUG OPEN POSITIONS | account={OANDA_ACCOUNT_ID} env={OANDA_ENVIRONMENT} "
             f"count={len(live_positions)} raw_count={len(open_positions)}"
         )
         if log_raw:
-            logger.info(f"DEBUG OPEN POSITIONS RAW={compact_json_v76(resp)}")
+            logger.info(f"DEBUG OPEN POSITIONS RAW={compact_json_v86(resp)}")
         for p in live_positions:
             logger.info(
                 f"DEBUG POSITION | instrument={p.get('instrument')} "
@@ -4721,40 +3492,29 @@ def get_open_positions_v76(log_raw: bool = False) -> list:
         logger.exception(f"DEBUG OPEN POSITIONS impossible: {exc}")
         return []
 
-
-def has_open_trade_v76(pair: str) -> bool:
-    """
-    V86: vérifie OpenTrades ET OpenPositions comme la V75.
-    Pas de cache interne. Pas de faux blocage si OANDA répond vide.
-    """
-    open_trades = get_open_trades_v76(log_raw=True)
+def has_open_trade_v86(pair: str) -> bool:
+    open_trades = get_open_trades_v86(log_raw=True)
     trade_exists = any(t.get("instrument") == pair for t in open_trades)
-
-    open_positions = get_open_positions_v76(log_raw=True)
+    open_positions = get_open_positions_v86(log_raw=True)
     position_exists = any(p.get("instrument") == pair for p in open_positions)
-
     exists = bool(trade_exists or position_exists)
     logger.info(f"{pair}: has_open_trade={exists} | trade_exists={trade_exists} | position_exists={position_exists}")
     return exists
 
+def open_trade_count_v86() -> int:
+    return len(get_open_trades_v86(log_raw=True))
 
-def open_trade_count_v76() -> int:
-    """Nombre total de trades réellement ouverts côté OANDA."""
-    return len(get_open_trades_v76(log_raw=True))
-
-
-def log_account_snapshot_v76(label: str) -> None:
+def log_account_snapshot_v86(label: str) -> None:
     logger.info(f"========== OANDA ACCOUNT SNAPSHOT {label} ==========")
     try:
-        get_account_summary_v76()
+        get_account_summary_v86()
     except Exception as exc:
         logger.exception(f"SNAPSHOT SUMMARY impossible: {exc}")
-    get_open_trades_v76(log_raw=True)
-    get_open_positions_v76(log_raw=True)
+    get_open_trades_v86(log_raw=True)
+    get_open_positions_v86(log_raw=True)
     logger.info(f"========== FIN SNAPSHOT {label} ==========")
 
-
-def extract_oanda_trade_or_order_id_v76(resp: dict) -> str | None:
+def extract_oanda_trade_or_order_id_v86(resp: dict) -> str | None:
     fill = resp.get("orderFillTransaction", {}) or {}
     trade_opened = fill.get("tradeOpened") or {}
     if trade_opened.get("tradeID"):
@@ -4764,9 +3524,8 @@ def extract_oanda_trade_or_order_id_v76(resp: dict) -> str | None:
         return str(trades_opened[0]["tradeID"])
     return str(fill.get("id") or resp.get("orderCreateTransaction", {}).get("id") or "") or None
 
-
-def log_oanda_order_response_v76(pair: str, resp: dict) -> None:
-    logger.info(f"DEBUG ORDER RESPONSE RAW {pair}={compact_json_v76(resp, max_len=8000)}")
+def log_oanda_order_response_v86(pair: str, resp: dict) -> None:
+    logger.info(f"DEBUG ORDER RESPONSE RAW {pair}={compact_json_v86(resp, max_len=8000)}")
     for key in ["orderCreateTransaction", "orderFillTransaction", "orderCancelTransaction", "orderRejectTransaction"]:
         tx = resp.get(key)
         if not tx:
@@ -4777,79 +3536,48 @@ def log_oanda_order_response_v76(pair: str, resp: dict) -> None:
             f"reason={tx.get('reason')} rejectReason={tx.get('rejectReason')}"
         )
     if resp.get("orderRejectTransaction"):
-        logger.error(f"ORDRE REJETÉ {pair} | {compact_json_v76(resp.get('orderRejectTransaction'))}")
+        logger.error(f"ORDRE REJETÉ {pair} | {compact_json_v86(resp.get('orderRejectTransaction'))}")
     if resp.get("orderCancelTransaction"):
-        logger.warning(f"ORDRE ANNULÉ {pair} | {compact_json_v76(resp.get('orderCancelTransaction'))}")
+        logger.warning(f"ORDRE ANNULÉ {pair} | {compact_json_v86(resp.get('orderCancelTransaction'))}")
 
-def has_open_trade_v76(pair: str) -> bool:
-    """
-    V86: bloque seulement si OANDA confirme un trade actif sur la même paire.
-    Ne se base pas sur un cache interne.
-    """
-    for t in get_open_trades_v76():
-        instrument = t.get("instrument")
-        raw_units = t.get("currentUnits", t.get("units", "0"))
-
-        try:
-            units = float(raw_units)
-        except Exception:
-            units = 0.0
-
-        if instrument == pair and abs(units) > 0:
-            logger.info(f"{pair}: trade actif confirmé côté OANDA id={t.get('id')} units={raw_units}.")
-            return True
-
-    logger.info(f"{pair}: aucun trade actif confirmé côté OANDA, ordre autorisé si autres conditions OK.")
-    return False
-
-
-def quote_currency_v76(pair: str) -> str:
+def quote_currency_v86(pair: str) -> str:
     return pair.split("_")[1]
 
-
-def get_fx_rate_to_usd_v76(currency: str) -> float:
-    """Retourne la valeur USD de 1 unité de devise 'currency'."""
+def get_fx_rate_to_usd_v86(currency: str) -> float:
     if currency == "USD":
         return 1.0
-    cached = _cache_get_v83(f"fx_to_usd:{currency}", ttl_seconds=60.0)
+    cached = _cache_get_v86(f"fx_to_usd:{currency}", ttl_seconds=60.0)
     if cached is not None:
         return float(cached)
-    # Exemples utiles pour nos paires : JPY via USD_JPY, CAD via USD_CAD
     direct = f"{currency}_USD"
     inverse = f"USD_{currency}"
     try:
         if direct in PAIR_LIST:
-            api = v76_client()
+            api = v86_client()
             df = get_candles_with_retry(api, direct, "M5", 10)
             if df is not None and not df.empty:
-                return float(_cache_set_v83(f"fx_to_usd:{currency}", float(df["close"].iloc[-1])))
+                return float(_cache_set_v86(f"fx_to_usd:{currency}", float(df["close"].iloc[-1])))
         if inverse in PAIR_LIST:
-            api = v76_client()
+            api = v86_client()
             df = get_candles_with_retry(api, inverse, "M5", 10)
             if df is not None and not df.empty:
-                return float(_cache_set_v83(f"fx_to_usd:{currency}", 1.0 / float(df["close"].iloc[-1])))
+                return float(_cache_set_v86(f"fx_to_usd:{currency}", 1.0 / float(df["close"].iloc[-1])))
     except Exception:
         pass
     logger.warning(f"⚠️ V86 conversion {currency}->USD inconnue, fallback 1.0")
     return 1.0
 
-
-
-def get_oanda_margin_rate_v78(pair: str) -> float:
-    """
-    Retourne la marge requise OANDA approximative.
-    Si l'info instrument est inaccessible, fallback conservateur 3.33%.
-    """
-    cached = _cache_get_v83(f"instrument:{pair}", ttl_seconds=300.0)
+def get_oanda_margin_rate_v86(pair: str) -> float:
+    cached = _cache_get_v86(f"instrument:{pair}", ttl_seconds=300.0)
     if cached is not None:
         return float(cached.get("marginRate", 0.0333) or 0.0333)
     try:
-        api = v76_client()
+        api = v86_client()
         r = accounts.AccountInstruments(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
         resp = api.request(r)
         instruments_data = resp.get("instruments", [])
         if instruments_data:
-            _cache_set_v83(f"instrument:{pair}", instruments_data[0])
+            _cache_set_v86(f"instrument:{pair}", instruments_data[0])
             margin_rate = float(instruments_data[0].get("marginRate", 0.0333))
             if margin_rate > 0:
                 return margin_rate
@@ -4857,9 +3585,8 @@ def get_oanda_margin_rate_v78(pair: str) -> float:
         logger.warning(f"V86 marginRate indisponible pour {pair}, fallback 0.0333: {exc}")
     return 0.0333
 
-
-def get_available_margin_v83(account_summary: dict | None = None) -> float:
-    account_summary = account_summary or get_account_summary_v76()
+def get_available_margin_v86(account_summary: dict | None = None) -> float:
+    account_summary = account_summary or get_account_summary_v86()
     account = account_summary.get("account", {}) if isinstance(account_summary, dict) else {}
     for key in ("marginAvailable", "NAV", "balance"):
         try:
@@ -4870,10 +3597,9 @@ def get_available_margin_v83(account_summary: dict | None = None) -> float:
             continue
     return 0.0
 
-
-def calculate_margin(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:
-    margin_required = estimate_margin_used_v78(pair, units, entry_price)
-    available = get_available_margin_v83(account_summary)
+def calculate_margin_v86(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:
+    margin_required = estimate_margin_used_v86(pair, units, entry_price)
+    available = get_available_margin_v86(account_summary)
     return {
         "pair": pair,
         "units": abs(int(units or 0)),
@@ -4883,9 +3609,8 @@ def calculate_margin(pair: str, units: int, entry_price: float, account_summary:
         "sufficient": bool(available <= 0 or margin_required <= available),
     }
 
-
-def risk_report(pair: str, entry: float, stop_loss: float, units: int, balance: float) -> dict:
-    quote_to_usd = get_fx_rate_to_usd_v76(quote_currency_v76(pair))
+def risk_report_v86(pair: str, entry: float, stop_loss: float, units: int, balance: float) -> dict:
+    quote_to_usd = get_fx_rate_to_usd_v86(quote_currency_v86(pair))
     risk_per_unit_usd = abs(float(entry) - float(stop_loss)) * quote_to_usd
     estimated_risk = abs(int(units or 0)) * risk_per_unit_usd
     estimated_risk_pct = estimated_risk / float(balance) * 100.0 if balance else 0.0
@@ -4904,20 +3629,13 @@ def risk_report(pair: str, entry: float, stop_loss: float, units: int, balance: 
     )
     return report
 
-
-def estimate_margin_used_v78(pair: str, units: int, entry_price: float) -> float:
-    """
-    Estimation marge en USD.
-    C'est un garde-fou, pas un calcul comptable parfait.
-    """
+def estimate_margin_used_v86(pair: str, units: int, entry_price: float) -> float:
     units = abs(int(units))
-    margin_rate = get_oanda_margin_rate_v78(pair)
-
+    margin_rate = get_oanda_margin_rate_v86(pair)
     try:
         base, quote = pair.split("_")
     except Exception:
         base, quote = "", "USD"
-
     if pair == "XAU_USD":
         notional_usd = units * entry_price
     elif quote == "USD":
@@ -4925,60 +3643,38 @@ def estimate_margin_used_v78(pair: str, units: int, entry_price: float) -> float
     elif base == "USD":
         notional_usd = units
     else:
-        q_to_usd = get_fx_rate_to_usd_v76(quote)
+        q_to_usd = get_fx_rate_to_usd_v86(quote)
         notional_usd = units * entry_price * q_to_usd
-
     return float(notional_usd * margin_rate)
 
-
-def cap_units_absolute_v78(pair: str, units: int) -> int:
+def cap_units_absolute_v86(pair: str, units: int) -> int:
     max_units = MAX_UNITS_BY_PAIR.get(pair, MAX_UNITS_BY_PAIR["DEFAULT"])
     if units > max_units:
         logger.warning(f"V86 ABS CAP {pair}: units {units} -> {max_units}")
         return max_units
     return units
 
-
-def cap_units_by_margin_v78(pair: str, units: int, entry_price: float, balance: float) -> int:
-    """
-    Plafonne les unités pour ne pas utiliser trop de marge par trade.
-    Défaut: max 5% du compte en marge par trade.
-    """
+def cap_units_by_margin_v86(pair: str, units: int, entry_price: float, balance: float) -> int:
     if units <= 0 or balance <= 0:
         return 0
-
-    margin_info = calculate_margin(pair, units, entry_price)
+    margin_info = calculate_margin_v86(pair, units, entry_price)
     account_available = margin_info["margin_available"]
     max_margin_usd = min(balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0), account_available) if account_available > 0 else balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0)
     estimated_margin = margin_info["margin_required"]
-
     if estimated_margin <= max_margin_usd:
         return units
-
     ratio = max_margin_usd / estimated_margin if estimated_margin > 0 else 0
     capped = int(units * ratio)
-
     step = UNIT_STEP_BY_PAIR.get(pair, UNIT_STEP_BY_PAIR["DEFAULT"])
     capped = int(capped // step * step)
-
     logger.warning(
-        f"[RISK] V83 MARGIN CAP {pair}: units {units} -> {capped} | "
+        f"[RISK] V86 MARGIN CAP {pair}: units {units} -> {capped} | "
         f"estimated_margin=${estimated_margin:.2f} > max_margin=${max_margin_usd:.2f} "
         f"({MAX_MARGIN_USAGE_PER_TRADE_PERCENT:.2f}% balance)"
     )
     return max(capped, 0)
 
-
-def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: float) -> float:
-    """
-    V86: sizing sécurisé.
-    Ancien problème: le calcul pouvait produire 1M+ unités.
-    Nouveau:
-    - risque théorique via distance SL
-    - arrondi vers le bas
-    - plafond unités par paire
-    - plafond marge utilisée par trade
-    """
+def calculate_units_v86(pair: str, entry: float, stop_loss: float, balance: float) -> float:
     try:
         balance = float(balance)
         entry = float(entry)
@@ -4986,48 +3682,33 @@ def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: floa
     except Exception:
         logger.error(f"V86: paramètres sizing invalides pair={pair} entry={entry} stop={stop_loss} balance={balance}")
         return 0
-
     risk_usd = min(balance * (RISK_PERCENTAGE / 100.0), MAX_RISK_USD)
     distance_quote = abs(entry - stop_loss)
-
     if balance <= 0 or risk_usd <= 0 or distance_quote <= 0:
-        logger.error(
-            f"V86: sizing impossible {pair}: balance={balance}, risk_usd={risk_usd}, distance={distance_quote}"
-        )
+        logger.error(f"V86: sizing impossible {pair}: balance={balance}, risk_usd={risk_usd}, distance={distance_quote}")
         return 0
-
-    quote = quote_currency_v76(pair)
-    quote_to_usd = get_fx_rate_to_usd_v76(quote)
-
+    quote = quote_currency_v86(pair)
+    quote_to_usd = get_fx_rate_to_usd_v86(quote)
     if quote_to_usd <= 0:
         logger.error(f"V86: conversion quote_to_usd invalide {quote}->{quote_to_usd}, trade bloqué.")
         return 0
-
     risk_per_unit_usd = distance_quote * quote_to_usd
     if risk_per_unit_usd <= 0:
         logger.error(f"V86: risk_per_unit_usd invalide {pair}: {risk_per_unit_usd}")
         return 0
-
     raw_units = risk_usd / risk_per_unit_usd
     step = UNIT_STEP_BY_PAIR.get(pair, UNIT_STEP_BY_PAIR["DEFAULT"])
     min_units = MIN_UNITS_BY_PAIR.get(pair, MIN_UNITS_BY_PAIR["DEFAULT"])
-
     units_before_caps = int(raw_units // step * step)
-    units = cap_units_absolute_v78(pair, units_before_caps)
-    units = cap_units_by_margin_v78(pair, units, entry, balance)
-
+    units = cap_units_absolute_v86(pair, units_before_caps)
+    units = cap_units_by_margin_v86(pair, units, entry, balance)
     if units < min_units:
-        logger.warning(
-            f"V86: units trop faibles après caps {pair}: {units} < min={min_units}. "
-            f"Trade bloqué. raw_units={raw_units:.2f}"
-        )
+        logger.warning(f"V86: units trop faibles après caps {pair}: {units} < min={min_units}. Trade bloqué.")
         return 0
-
-    estimated_margin = estimate_margin_used_v78(pair, units, entry)
+    estimated_margin = estimate_margin_used_v86(pair, units, entry)
     estimated_risk = units * risk_per_unit_usd
     estimated_risk_pct = estimated_risk / balance * 100.0 if balance > 0 else 0.0
     margin_pct = estimated_margin / balance * 100.0 if balance > 0 else 0.0
-
     logger.info(
         f"V86 RISK LOT {pair}: balance=${balance:.2f} risk_cap=${risk_usd:.2f} "
         f"entry={entry:.5f} SL={stop_loss:.5f} dist_quote={distance_quote:.5f} "
@@ -5036,25 +3717,22 @@ def calculate_units_v76(pair: str, entry: float, stop_loss: float, balance: floa
         f"estimated_risk=${estimated_risk:.2f} ({estimated_risk_pct:.2f}%) "
         f"estimated_margin=${estimated_margin:.2f} ({margin_pct:.2f}%)"
     )
-    risk_report(pair, entry, stop_loss, units, balance)
-
+    risk_report_v86(pair, entry, stop_loss, units, balance)
     return int(units)
 
-
-def get_recent_m5_price_v76(pair: str) -> float:
-    api = v76_client()
+def get_recent_m5_price_v86(pair: str) -> float:
+    api = v86_client()
     df = get_candles_with_retry(api, pair, "M5", 10)
     if df is None or df.empty:
         return 0.0
     return float(df["close"].iloc[-1])
 
-
-def get_price_spread_v83(pair: str) -> dict:
-    cached = _cache_get_v83(f"pricing:{pair}", ttl_seconds=2.0)
+def get_price_spread_v86(pair: str) -> dict:
+    cached = _cache_get_v86(f"pricing:{pair}", ttl_seconds=2.0)
     if cached is not None:
         return cached
     try:
-        api = v76_client()
+        api = v86_client()
         r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
         resp = api.request(r)
         prices = resp.get("prices", []) or []
@@ -5064,60 +3742,44 @@ def get_price_spread_v83(pair: str) -> dict:
             ask = float(item.get("asks", [{}])[0].get("price", 0) or 0)
             mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0
             data = {"bid": bid, "ask": ask, "mid": mid, "spread": max(ask - bid, 0.0)}
-            return _cache_set_v83(f"pricing:{pair}", data)
+            return _cache_set_v86(f"pricing:{pair}", data)
     except Exception as exc:
-        logger.warning(f"[RISK] V83 pricing unavailable for {pair}: {exc}")
-    fallback_price = get_recent_m5_price_v76(pair)
-    fallback_spread = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair)) * 2.0
+        logger.warning(f"[RISK] V86 pricing unavailable for {pair}: {exc}")
+    fallback_price = get_recent_m5_price_v86(pair)
+    fallback_spread = PIP_SIZE_V86.get(pair, get_pip_value_for_pair(pair)) * 2.0
     return {"bid": fallback_price, "ask": fallback_price, "mid": fallback_price, "spread": fallback_spread}
 
-
-def get_atr_m15_v83(pair: str) -> float:
-    cached = _cache_get_v83(f"atr_m15:{pair}", ttl_seconds=60.0)
+def get_atr_m15_v86(pair: str) -> float:
+    cached = _cache_get_v86(f"atr_m15:{pair}", ttl_seconds=60.0)
     if cached is not None:
         return float(cached)
-    api = v76_client()
+    api = v86_client()
     df = get_candles_with_retry(api, pair, "M15", max(ATR_PERIOD + 10, 40))
     if df is None or df.empty:
         return 0.0
     atr = float(calculate_atr(df, ATR_PERIOD) or 0.0)
-    return float(_cache_set_v83(f"atr_m15:{pair}", atr))
+    return float(_cache_set_v86(f"atr_m15:{pair}", atr))
 
 # ============================================================
 # V86 - SUPPRESSION DES FONCTIONS DE TRAILING PYTHON
 # ============================================================
-# Les fonctions suivantes ont été supprimées :
-# - manage_open_trades_v76
-# - move_sl_to_breakeven_v85
-# - lock_profit_v85
-# - trail_to_swing_v85
-# - compute_swing_sl
-# - trade_current_r_v76 (si présente)
-# - trade_direction_v76 (si présente, on garde une version simplifiée)
-# ============================================================
-
-# V86 - Fonction utilitaire pour obtenir la direction d'un trade (conservée pour le BE)
+# V86 - Fonction utilitaire pour obtenir la direction d'un trade
 def trade_direction_v86(trade: dict) -> str:
-    """Retourne 'BUY' ou 'SELL' selon les unités du trade."""
     try:
         units = float(trade.get("currentUnits", trade.get("units", 0)))
         return "BUY" if units > 0 else "SELL"
     except:
         return "UNKNOWN"
 
-# V86 - Fonction de modification du SL (utilisée par check_breakeven_simple)
-def modify_trade_sl_v76(trade_id: str, pair: str, new_sl: float) -> bool:
-    """
-    Modifie le Stop Loss d'un trade existant.
-    Retourne True si succès.
-    """
+# V86 - Fonction de modification du SL
+def modify_trade_sl_v86(trade_id: str, pair: str, new_sl: float) -> bool:
     try:
-        api = v76_client()
+        api = v86_client()
         order_data = {
             "order": {
                 "type": "STOP_LOSS",
                 "tradeID": trade_id,
-                "price": round_price_v76(pair, new_sl),
+                "price": round_price_v86(pair, new_sl),
                 "timeInForce": "GTC"
             }
         }
@@ -5132,47 +3794,48 @@ def modify_trade_sl_v76(trade_id: str, pair: str, new_sl: float) -> bool:
         logger.error(f"Erreur modification SL trade {trade_id}: {e}")
         return False
 
-# V86 - Création d'un Trailing Stop Loss natif OANDA (avec TrailingStopLossOrderRequest)
-def create_oanda_trailing_stop(
-        api,
-        account_id: str,
-        trade_id: str,
-        distance: float
-) -> bool:
+# V86 - Création d'un Trailing Stop Loss natif OANDA (en dictionnaire pur)
+def create_oanda_trailing_stop_v86(api, account_id: str, trade_id: str, distance: float) -> bool:
     """
-    Crée un TrailingStopLossOrderRequest pour un trade ouvert.
-    Utilise l'objet dédié TrailingStopLossOrderRequest.
-    Retourne True si succès.
+    Crée un TrailingStopLossOrder via un dictionnaire JSON (compatible avec toutes les versions d'oandapyV20).
+    Retourne True si succès, False sinon avec logs détaillés.
     """
     try:
-        # Construction de l'ordre avec l'objet dédié
-        from oandapyV20 import order
-        trailing_order = order.TrailingStopLossOrderRequest(
-            tradeID=trade_id,
-            distance=str(distance),
-            timeInForce="GTC"
-        )
-        # Le paramètre attendu par OrderCreate est un dict contenant la clé "order"
-        req = orders.OrderCreate(accountID=account_id, data={"order": trailing_order.dict()})
-        resp = api.request(req)
+        order_data = {
+            "order": {
+                "type": "TRAILING_STOP_LOSS",
+                "tradeID": trade_id,
+                "distance": str(distance),
+                "timeInForce": "GTC"
+            }
+        }
+        logger.info(f"[TSL] Tentative de création pour trade {trade_id} avec distance {distance:.5f}")
+        r = orders.OrderCreate(accountID=account_id, data=order_data)
+        resp = api.request(r)
+        # Log détaillé de la réponse
+        logger.info(f"[TSL] Réponse OANDA: {compact_json_v86(resp)}")
         if resp.get("orderRejectTransaction"):
             logger.error(f"[TSL] Rejeté: {resp.get('orderRejectTransaction')}")
             return False
-        logger.info(f"[TSL] Succès pour trade {trade_id}")
-        return True
+        if resp.get("orderCreateTransaction") and not resp.get("orderRejectTransaction"):
+            logger.info(f"[TSL] Succès pour trade {trade_id}")
+            return True
+        logger.warning(f"[TSL] Réponse inattendue: {compact_json_v86(resp)}")
+        return False
     except Exception as e:
         logger.error(f"[TSL] Erreur: {e}")
+        logger.error(traceback.format_exc())
         return False
 
 # V86 - Fonction de vérification du Break Even et activation du trailing
-def check_breakeven_simple():
+def check_breakeven_simple_v86():
     """
     Parcourt les trades ouverts :
     - Si R >= 1.0, déplace le SL au BE (avec offset).
     - Puis, si le trailing n'a pas encore été créé pour ce trade, le crée via OANDA.
     """
     try:
-        open_trades = get_open_trades_v76()
+        open_trades = get_open_trades_v86()
         for t in open_trades:
             trade_id = str(t.get("id"))
             pair = t.get("instrument")
@@ -5182,7 +3845,7 @@ def check_breakeven_simple():
             if not sl_order.get("price"):
                 continue
             current_sl = float(sl_order["price"])
-            current_price = get_recent_m5_price_v76(pair)
+            current_price = get_recent_m5_price_v86(pair)
             if current_price <= 0:
                 continue
 
@@ -5199,8 +3862,8 @@ def check_breakeven_simple():
 
             # Étape 1 : Break-even si R >= 1.0
             if r >= 1.0:
-                pip = PIP_SIZE_V76.get(pair, get_pip_value_for_pair(pair))
-                spread = get_price_spread_v83(pair)["spread"]
+                pip = PIP_SIZE_V86.get(pair, get_pip_value_for_pair(pair))
+                spread = get_price_spread_v86(pair)["spread"]
                 offset = max(spread, pip * 1.0)  # 1 pip d'offset
                 if direction == "BUY":
                     be_sl = entry + offset
@@ -5208,88 +3871,100 @@ def check_breakeven_simple():
                     be_sl = entry - offset
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl} -> {be_sl}")
-                    modify_trade_sl_v76(trade_id, pair, be_sl)
-                    _OANDA_CACHE_V83.pop("open_trades_raw", None)
-                    # On rafraîchit le SL pour la suite
-                    current_sl = be_sl  # met à jour pour la création du trailing
+                    if modify_trade_sl_v86(trade_id, pair, be_sl):
+                        # On recharge le trade pour confirmer le SL
+                        time.sleep(1)  # petit délai pour laisser OANDA appliquer
+                        # On rafraîchit le cache pour le prochain appel
+                        _OANDA_CACHE_V86.pop("open_trades_raw", None)
+                        # On met à jour current_sl pour la suite
+                        current_sl = be_sl
+                    else:
+                        continue
 
             # Étape 2 : Création du trailing si R >= 1.0 ET que le trailing n'a pas encore été créé
-            # On vérifie que le SL est bien au BE (ou mieux) et que le trade est en profit
             if trade_id not in _TRAILING_CREATED_V86 and r >= 1.0:
                 # Vérification que le SL est du bon côté (protection)
                 if direction == "BUY" and current_sl >= entry:
-                    atr = get_atr_m15_v83(pair)
-                    spread = get_price_spread_v83(pair)["spread"]
+                    atr = get_atr_m15_v86(pair)
+                    spread = get_price_spread_v86(pair)["spread"]
                     distance = max(atr * 1.3, spread * 8)
-                    distance = round(distance, PRICE_DECIMALS_V76.get(pair, 5))
+                    distance = round(distance, PRICE_DECIMALS_V86.get(pair, 5))
                     if distance > 0:
-                        api = v76_client()
-                        if create_oanda_trailing_stop(api, OANDA_ACCOUNT_ID, trade_id, distance):
+                        api = v86_client()
+                        if create_oanda_trailing_stop_v86(api, OANDA_ACCOUNT_ID, trade_id, distance):
                             _TRAILING_CREATED_V86.add(trade_id)
                             logger.info(f"[TSL] Trailing activé pour {pair} trade {trade_id} après BE")
+                        else:
+                            logger.warning(f"[TSL] Échec création trailing pour {pair} trade {trade_id}")
+                    else:
+                        logger.warning(f"[TSL] Distance invalide ({distance}) pour {pair}")
                 elif direction == "SELL" and current_sl <= entry:
-                    atr = get_atr_m15_v83(pair)
-                    spread = get_price_spread_v83(pair)["spread"]
+                    atr = get_atr_m15_v86(pair)
+                    spread = get_price_spread_v86(pair)["spread"]
                     distance = max(atr * 1.3, spread * 8)
-                    distance = round(distance, PRICE_DECIMALS_V76.get(pair, 5))
+                    distance = round(distance, PRICE_DECIMALS_V86.get(pair, 5))
                     if distance > 0:
-                        api = v76_client()
-                        if create_oanda_trailing_stop(api, OANDA_ACCOUNT_ID, trade_id, distance):
+                        api = v86_client()
+                        if create_oanda_trailing_stop_v86(api, OANDA_ACCOUNT_ID, trade_id, distance):
                             _TRAILING_CREATED_V86.add(trade_id)
                             logger.info(f"[TSL] Trailing activé pour {pair} trade {trade_id} après BE")
+                        else:
+                            logger.warning(f"[TSL] Échec création trailing pour {pair} trade {trade_id}")
+                    else:
+                        logger.warning(f"[TSL] Distance invalide ({distance}) pour {pair}")
     except Exception as e:
-        logger.error(f"Erreur check_breakeven_simple: {e}")
+        logger.error(f"Erreur check_breakeven_simple_v86: {e}")
         logger.error(traceback.format_exc())
 
 # =============================
-# MODIFICATION DE execute_oanda_trade_v76 (V86)
+# MODIFICATION DE execute_oanda_trade_v86
 # =============================
-def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_loss: float,
+def execute_oanda_trade_v86(pair: str, direction: str, entry_price: float, stop_loss: float,
                             take_profit: float, score: int, entry_type: str) -> str | None:
     """
     V86 : ouverture d'un Market Order, puis enregistrement du trade.
-    Le trailing stop sera créé plus tard par check_breakeven_simple.
+    Le trailing stop sera créé plus tard par check_breakeven_simple_v86.
     """
     logger.info(f"V86 EXECUTION START {pair} {direction} type={entry_type} score={score}")
     logger.info(
-        f"DEBUG EXEC INPUT | pair={pair} direction={direction} entry={round_price_v76(pair, entry_price)} "
-        f"SL={round_price_v76(pair, stop_loss)} TP={round_price_v76(pair, take_profit)} "
+        f"DEBUG EXEC INPUT | pair={pair} direction={direction} entry={round_price_v86(pair, entry_price)} "
+        f"SL={round_price_v86(pair, stop_loss)} TP={round_price_v86(pair, take_profit)} "
         f"account={OANDA_ACCOUNT_ID} env={OANDA_ENVIRONMENT} execute={EXECUTE_TRADES}"
     )
 
-    log_account_snapshot_v76("BEFORE_EXECUTION")
+    log_account_snapshot_v86("BEFORE_EXECUTION")
 
     if ONE_TRADE_PER_PAIR:
-        has_trade = has_open_trade_v76(pair)
+        has_trade = has_open_trade_v86(pair)
         logger.info(f"DEBUG STEP has_open_trade({pair})={has_trade}")
         if has_trade:
             logger.info(f"{pair}: trade déjà ouvert détecté par OANDA, aucun nouvel ordre.")
             return None
 
-    count = open_trade_count_v76()
+    count = open_trade_count_v86()
     logger.info(f"DEBUG STEP open_trade_count={count} / max={MAX_TRADES_TOTAL}")
     if count >= MAX_TRADES_TOTAL:
         logger.info(f"Limite trades ouverts atteinte ({count}/{MAX_TRADES_TOTAL}). Aucun ordre POST /orders ne sera envoyé.")
         return None
 
-    balance = get_balance_v76()
+    balance = get_balance_v86()
     logger.info(f"DEBUG STEP balance={balance}")
     if balance <= 0:
         logger.error("V86: balance invalide, ordre annulé.")
         return None
 
-    units = calculate_units_v76(pair, entry_price, stop_loss, balance)
+    units = calculate_units_v86(pair, entry_price, stop_loss, balance)
     logger.info(f"DEBUG STEP calculated_units={units}")
     if not units or float(units) <= 0:
         logger.error(f"V86: units invalides pour {pair}: {units}")
         return None
-    margin_info = calculate_margin(pair, units, entry_price)
+    margin_info = calculate_margin_v86(pair, units, entry_price)
     logger.info(
         f"[RISK] {pair} margin_required=${margin_info['margin_required']:.2f} "
         f"available=${margin_info['margin_available']:.2f} sufficient={margin_info['sufficient']}"
     )
     if not margin_info["sufficient"]:
-        units = cap_units_by_margin_v78(pair, units, entry_price, balance)
+        units = cap_units_by_margin_v86(pair, units, entry_price, balance)
         if not units or units <= 0:
             logger.error(f"[RISK] {pair} order blocked: insufficient margin after unit reduction.")
             return None
@@ -5301,8 +3976,8 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
             "instrument": pair,
             "units": str(signed_units),
             "positionFill": "DEFAULT",
-            "stopLossOnFill": {"price": round_price_v76(pair, stop_loss), "timeInForce": "GTC"},
-            "takeProfitOnFill": {"price": round_price_v76(pair, take_profit), "timeInForce": "GTC"},
+            "stopLossOnFill": {"price": round_price_v86(pair, stop_loss), "timeInForce": "GTC"},
+            "takeProfitOnFill": {"price": round_price_v86(pair, take_profit), "timeInForce": "GTC"},
             # V86 : pas de trailing stop à l'ouverture
         }
     }
@@ -5311,11 +3986,11 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
     logger.info(
         f"SIGNAL V86 {pair} {direction} | "
-        f"entry≈{round_price_v76(pair, entry_price)} SL={round_price_v76(pair, stop_loss)} "
-        f"TP={round_price_v76(pair, take_profit)} RR={rr:.2f} score={score} "
+        f"entry≈{round_price_v86(pair, entry_price)} SL={round_price_v86(pair, stop_loss)} "
+        f"TP={round_price_v86(pair, take_profit)} RR={rr:.2f} score={score} "
         f"units={units} signed_units={signed_units} type={entry_type}"
     )
-    logger.info(f"ORDER PAYLOAD {pair}={compact_json_v76(order_data)}")
+    logger.info(f"ORDER PAYLOAD {pair}={compact_json_v86(order_data)}")
 
     if not EXECUTE_TRADES:
         logger.info("EXECUTE_TRADES=false : ordre non envoyé à OANDA.")
@@ -5324,42 +3999,42 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
 
     try:
         logger.info(f"DEBUG POST /orders START | pair={pair} account={OANDA_ACCOUNT_ID} env={OANDA_ENVIRONMENT}")
-        api = v76_client()
+        api = v86_client()
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         resp = api.request(r)
         logger.info(f"DEBUG POST /orders END | pair={pair}")
-        log_oanda_order_response_v76(pair, resp)
+        log_oanda_order_response_v86(pair, resp)
 
         if resp.get("orderRejectTransaction"):
             logger.error(f"DEBUG EXECUTION RESULT | status=REJECTED | pair={pair}")
-            log_account_snapshot_v76("AFTER_REJECT")
+            log_account_snapshot_v86("AFTER_REJECT")
             return None
 
         if resp.get("orderCancelTransaction") and not resp.get("orderFillTransaction"):
             logger.error(f"DEBUG EXECUTION RESULT | status=CANCELLED_NO_FILL | pair={pair}")
-            log_account_snapshot_v76("AFTER_CANCEL")
+            log_account_snapshot_v86("AFTER_CANCEL")
             return None
 
-        trade_id = extract_oanda_trade_or_order_id_v76(resp)
+        trade_id = extract_oanda_trade_or_order_id_v86(resp)
         if not trade_id:
             logger.error(f"ORDRE NON CONFIRMÉ {pair}: aucune transaction Fill/Create exploitable.")
             logger.error(f"DEBUG EXECUTION RESULT | status=NO_TRADE_ID | pair={pair}")
-            log_account_snapshot_v76("AFTER_NO_TRADE_ID")
+            log_account_snapshot_v86("AFTER_NO_TRADE_ID")
             return None
 
         logger.info(f"✅ ORDRE RÉEL CONFIRMÉ {pair} | ID={trade_id}")
         logger.info(f"DEBUG EXECUTION RESULT | status=CONFIRMED | pair={pair} trade_or_order_id={trade_id}")
 
         # V86 : On enregistre le risque initial pour le BE (pas de trailing immédiat)
-        _INITIAL_RISK_BY_TRADE_V83[trade_id] = abs(float(entry_price) - float(stop_loss))
+        _INITIAL_RISK_BY_TRADE_V86[trade_id] = abs(float(entry_price) - float(stop_loss))
 
-        log_account_snapshot_v76("AFTER_ORDER_CREATE")
-        open_after = get_open_trades_v76(log_raw=True)
+        log_account_snapshot_v86("AFTER_ORDER_CREATE")
+        open_after = get_open_trades_v86(log_raw=True)
         opened_for_pair = [t for t in open_after if t.get("instrument") == pair]
         if opened_for_pair:
             actual_trade_id = str(opened_for_pair[0].get("id") or trade_id)
-            _INITIAL_RISK_BY_TRADE_V83[actual_trade_id] = abs(float(opened_for_pair[0].get("price", entry_price)) - float(stop_loss))
-            logger.info(f"CONFIRMATION OPEN TRADE {pair}: {compact_json_v76(opened_for_pair)}")
+            _INITIAL_RISK_BY_TRADE_V86[actual_trade_id] = abs(float(opened_for_pair[0].get("price", entry_price)) - float(stop_loss))
+            logger.info(f"CONFIRMATION OPEN TRADE {pair}: {compact_json_v86(opened_for_pair)}")
         else:
             logger.warning(f"ATTENTION {pair}: ordre accepté mais OpenTrades ne montre pas encore la position.")
 
@@ -5368,11 +4043,11 @@ def execute_oanda_trade_v76(pair: str, direction: str, entry_price: float, stop_
     except Exception as exc:
         logger.exception(f"Erreur ordre OANDA {pair}: {exc}")
         logger.error(f"DEBUG EXECUTION RESULT | status=EXCEPTION | pair={pair} error={exc}")
-        log_account_snapshot_v76("EXCEPTION_ORDER_CREATE")
+        log_account_snapshot_v86("EXCEPTION_ORDER_CREATE")
         return None
 
 # =============================
-# MODIFICATION DE LA BOUCLE PRINCIPALE (V86)
+# BOUCLE PRINCIPALE (V86)
 # =============================
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V86 (Trailing Stop OANDA)")
@@ -5381,19 +4056,19 @@ if __name__ == "__main__":
 
     while True:
         try:
-            clear_scan_cache_v83()
+            clear_scan_cache_v86()
             now_dt = datetime.utcnow()
-            if not is_market_open_utc_v76(now_dt):
+            if not is_market_open_utc_v86(now_dt):
                 logger.info("Marché Forex fermé. Attente 5 minutes.")
                 time.sleep(300)
                 continue
 
             # V86 : Vérification du Break Even et activation du trailing
-            check_breakeven_simple()
+            check_breakeven_simple_v86()
 
-            current_open_count_v83 = open_trade_count_v76()
-            if current_open_count_v83 >= MAX_TRADES_TOTAL:
-                logger.info(f"Limite trades ouverts atteinte ({current_open_count_v83}/{MAX_TRADES_TOTAL}). Scan entrées ignoré.")
+            current_open_count = open_trade_count_v86()
+            if current_open_count >= MAX_TRADES_TOTAL:
+                logger.info(f"Limite trades ouverts atteinte ({current_open_count}/{MAX_TRADES_TOTAL}). Scan entrées ignoré.")
                 time.sleep(300)
                 continue
 
