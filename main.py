@@ -2,10 +2,10 @@
 # main(75).py - Version V88.1 "Audit + API Officielle + Confirmation Serveur"
 # 
 # Modifications V88.1 :
-# - Modification du Stop Loss via trades.Trade.set_dependent_orders (API officielle)
-# - Création du Trailing Stop via trades.Trade.set_dependent_orders (API officielle)
-# - Confirmation serveur après chaque BE : GET /trades/{tradeID} et vérification du SL
-# - Confirmation serveur après chaque Trailing : GET /trades/{tradeID} et vérification du TSL
+# - Modification du Stop Loss via trades.TradeCRCDO (API officielle)
+# - Création du Trailing Stop via orders.OrderCreate avec TRAILING_STOP_LOSS
+# - Confirmation serveur après chaque BE : GET /trades/{tradeID} via trades.TradeDetails
+# - Confirmation serveur après chaque Trailing : GET /trades/{tradeID} via trades.TradeDetails
 # - Trace complète de chaque étape
 # ============================================================
 
@@ -2358,50 +2358,71 @@ def get_atr_m15_v88(pair: str) -> float:
         return 0.0
 
 # ============================================================
-# V88.1 - MODIFICATION SL VIA set_dependent_orders + CONFIRMATION SERVEUR
+# V88.1 - CONFIRMATION DU TRADE
+# ============================================================
+def get_trade_details_v88(trade_id: str) -> dict:
+    """
+    Récupère les détails d'un trade via trades.TradeDetails.
+    """
+    try:
+        api = v88_client()
+        r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
+        resp = api.request(r)
+        return resp.get("trade", {})
+    except Exception as e:
+        logger.error(f"[TRADE] Erreur récupération trade {trade_id}: {e}")
+        return {}
+
+def has_trailing_stop_v88(trade: dict) -> bool:
+    """Vérifie si un trade a un trailing stop actif."""
+    trailing_stop = trade.get("trailingStopLossOrder", {})
+    return bool(trailing_stop and trailing_stop.get("id"))
+
+def get_stop_loss_v88(trade: dict) -> float:
+    """Récupère le prix du stop loss d'un trade."""
+    sl_order = trade.get("stopLossOrder", {})
+    return float(sl_order.get("price", 0)) if sl_order else 0.0
+
+# ============================================================
+# V88.1 - MODIFICATION SL VIA TradeCRCDO + CONFIRMATION SERVEUR
 # ============================================================
 def modify_trade_sl_v881(trade_id: str, pair: str, new_sl: float) -> bool:
     """
-    V88.1 : Modification du Stop Loss via set_dependent_orders (API officielle).
-    + Confirmation serveur GET /trades/{tradeID}
+    V88.1 : Modification du Stop Loss via TradeCRCDO (API officielle).
+    + Confirmation serveur GET /trades/{tradeID} via trades.TradeDetails
     """
     try:
         api = v88_client()
         
-        logger.info(f"[BE] Modification SL via set_dependent_orders pour trade {trade_id} -> {new_sl:.5f}")
+        logger.info(f"[BE] Modification SL via TradeCRCDO pour trade {trade_id} -> {new_sl:.5f}")
         
-        # 1. Modification du SL
-        r = trades.Trade.set_dependent_orders(
-            accountID=OANDA_ACCOUNT_ID,
-            tradeSpecifier=trade_id,
-            stopLoss={
+        # 1. Modification du SL via TradeCRCDO
+        data = {
+            "stopLoss": {
                 "price": round_price_v88(pair, new_sl),
                 "timeInForce": "GTC"
             }
-        )
+        }
+        r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
         resp = api.request(r)
         
         # Trace
-        tracer.log_step(trade_id, "BE_MODIFY_SL_VIA_SET_DEPENDENT_ORDERS", {
+        tracer.log_step(trade_id, "BE_MODIFY_SL_VIA_TRADE_CRCDO", {
             "pair": pair,
             "new_sl": new_sl
         }, resp)
         
         # Vérifier le rejet
-        if resp.get("stopLossOrderRejectTransaction"):
-            reject = resp.get("stopLossOrderRejectTransaction")
+        if resp.get("orderRejectTransaction"):
+            reject = resp.get("orderRejectTransaction")
             logger.error(f"[BE] Rejeté pour trade {trade_id}: {reject}")
-            return False
-        
-        if not resp.get("stopLossOrderTransaction"):
-            logger.warning(f"[BE] Réponse inattendue: {resp}")
             return False
         
         logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
         
         # 2. CONFIRMATION SERVEUR : GET /trades/{tradeID}
         logger.info(f"[CONFIRM] Vérification du SL pour trade {trade_id}")
-        time.sleep(1)  # Petit délai pour laisser OANDA appliquer
+        time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
         
         trade_details = get_trade_details_v88(trade_id)
@@ -2409,7 +2430,6 @@ def modify_trade_sl_v881(trade_id: str, pair: str, new_sl: float) -> bool:
             logger.warning(f"[CONFIRM] Impossible de récupérer le trade {trade_id}")
             return False
         
-        # Vérifier le SL
         actual_sl = get_stop_loss_v88(trade_details)
         if abs(actual_sl - new_sl) > 0.000001:
             logger.warning(f"[CONFIRM] SL non confirmé: attendu {new_sl:.5f}, reçu {actual_sl:.5f}")
@@ -2425,50 +2445,47 @@ def modify_trade_sl_v881(trade_id: str, pair: str, new_sl: float) -> bool:
         return False
 
 # ============================================================
-# V88.1 - CRÉATION DU TRAILING STOP VIA set_dependent_orders + CONFIRMATION SERVEUR
+# V88.1 - CRÉATION DU TRAILING STOP VIA orders.OrderCreate + CONFIRMATION SERVEUR
 # ============================================================
 def create_oanda_trailing_stop_v881(trade_id: str, pair: str, distance: float) -> bool:
     """
-    V88.1 : Crée un Trailing Stop Loss via set_dependent_orders (API officielle).
-    + Confirmation serveur GET /trades/{tradeID}
+    V88.1 : Crée un Trailing Stop Loss via orders.OrderCreate (API officielle).
+    + Confirmation serveur GET /trades/{tradeID} via trades.TradeDetails
     """
     try:
         api = v88_client()
         
-        logger.info(f"[TSL] Création trailing via set_dependent_orders pour trade {trade_id} -> distance={distance:.5f}")
+        logger.info(f"[TSL] Création trailing via OrderCreate pour trade {trade_id} -> distance={distance:.5f}")
         
         # 1. Création du trailing stop
-        r = trades.Trade.set_dependent_orders(
-            accountID=OANDA_ACCOUNT_ID,
-            tradeSpecifier=trade_id,
-            trailingStopLoss={
+        order_data = {
+            "order": {
+                "type": "TRAILING_STOP_LOSS",
+                "tradeID": trade_id,
                 "distance": str(distance),
                 "timeInForce": "GTC"
             }
-        )
+        }
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         resp = api.request(r)
         
         # Trace
-        tracer.log_step(trade_id, "TSL_CREATE_VIA_SET_DEPENDENT_ORDERS", {
+        tracer.log_step(trade_id, "TSL_CREATE_VIA_ORDER_CREATE", {
             "pair": pair,
             "distance": distance
         }, resp)
         
         # Vérifier le rejet
-        if resp.get("trailingStopLossOrderRejectTransaction"):
-            reject = resp.get("trailingStopLossOrderRejectTransaction")
+        if resp.get("orderRejectTransaction"):
+            reject = resp.get("orderRejectTransaction")
             logger.error(f"[TSL] Rejeté pour trade {trade_id}: {reject}")
-            return False
-        
-        if not resp.get("trailingStopLossOrderTransaction"):
-            logger.warning(f"[TSL] Réponse inattendue: {resp}")
             return False
         
         logger.info(f"[TSL] SUCCESS: Trailing stop créé pour trade {trade_id}, distance={distance:.5f}")
         
         # 2. CONFIRMATION SERVEUR : GET /trades/{tradeID}
         logger.info(f"[CONFIRM] Vérification du trailing stop pour trade {trade_id}")
-        time.sleep(1)  # Petit délai pour laisser OANDA appliquer
+        time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
         
         trade_details = get_trade_details_v88(trade_id)
@@ -2476,7 +2493,6 @@ def create_oanda_trailing_stop_v881(trade_id: str, pair: str, distance: float) -
             logger.warning(f"[CONFIRM] Impossible de récupérer le trade {trade_id}")
             return False
         
-        # Vérifier le trailing stop
         if not has_trailing_stop_v88(trade_details):
             logger.warning(f"[CONFIRM] Trailing stop non présent sur le trade {trade_id}")
             tracer.log_step(trade_id, "TSL_CONFIRM_FAIL", {"trade": trade_details}, None)
@@ -2492,32 +2508,11 @@ def create_oanda_trailing_stop_v881(trade_id: str, pair: str, distance: float) -
         return False
 
 # ============================================================
-# V88.1 - CONFIRMATION DU TRADE
-# ============================================================
-def get_trade_details_v88(trade_id: str) -> dict:
-    try:
-        api = v88_client()
-        r = trades.Trade.get(accountID=OANDA_ACCOUNT_ID, tradeSpecifier=trade_id)
-        resp = api.request(r)
-        return resp.get("trade", {})
-    except Exception as e:
-        logger.error(f"[TRADE] Erreur récupération trade {trade_id}: {e}")
-        return {}
-
-def has_trailing_stop_v88(trade: dict) -> bool:
-    trailing_stop = trade.get("trailingStopLossOrder", {})
-    return bool(trailing_stop and trailing_stop.get("id"))
-
-def get_stop_loss_v88(trade: dict) -> float:
-    sl_order = trade.get("stopLossOrder", {})
-    return float(sl_order.get("price", 0)) if sl_order else 0.0
-
-# ============================================================
 # V88.1 - CHECK BREAKEVEN AVEC CONFIRMATION SERVEUR
 # ============================================================
 def check_breakeven_simple_v881():
     """
-    V88.1 : Break Even avec set_dependent_orders + confirmation serveur.
+    V88.1 : Break Even avec TradeCRCDO + confirmation serveur.
     """
     try:
         open_trades = get_open_trades_v88()
@@ -2914,7 +2909,8 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V88.1 (API Officielle + Confirmation Serveur)")
     logger.info("📋 Trace des trades activée dans trade_trace.json")
-    logger.info("✅ Utilisation de set_dependent_orders (API officielle) pour SL et TSL")
+    logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
+    logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info("✅ Confirmation serveur après chaque BE et après chaque Trailing")
     
     if DEMO_MODE:
@@ -2934,7 +2930,7 @@ if __name__ == "__main__":
             current_open_count = open_trade_count_v88()
             logger.info(f"[SCAN] Trades ouverts: {current_open_count}/{MAX_TRADES_TOTAL}")
             
-            # V88.1 : Break Even avec API officielle + confirmation serveur
+            # V88.1 : Break Even avec TradeCRCDO + confirmation serveur
             check_breakeven_simple_v881()
 
             if current_open_count >= MAX_TRADES_TOTAL:
