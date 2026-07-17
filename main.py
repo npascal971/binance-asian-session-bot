@@ -7,6 +7,8 @@
 # - Confirmation serveur après chaque BE : GET /trades/{tradeID} via trades.TradeDetails
 # - Confirmation serveur après chaque Trailing : GET /trades/{tradeID} via trades.TradeDetails
 # - Trace complète de chaque étape
+# - Diagnostic de démarrage
+# - Logs améliorés pour le Break Even et le Trailing
 # ============================================================
 
 import os
@@ -53,6 +55,8 @@ MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "DEFAULT": 8
 }
 
+# Seuil de Break Even (V88.1)
+BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "1.2"))
 TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.3"))
 TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "5.0"))
 
@@ -164,7 +168,7 @@ last_reset_time = datetime.utcnow()
 # =============================
 load_dotenv()
 
-PAIR_LIST = ["EUR_USD", "USD_CAD", "AUD_CAD"]
+PAIR_LIST = ["EUR_USD", "GBP_USD", "USD_CAD", "AUD_USD", "AUD_CAD"]
 
 GRANULARITY_D1 = "D"
 GRANULARITY_H4 = "H4"
@@ -654,7 +658,7 @@ def repair_mojibake_v82(value) -> str:
     return text
 
 class ReadableLogFormatterV82(logging.Formatter):
-    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]")
+    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]")
     def _clean_message_v83(self, message: str, levelname: str) -> str:
         text = repair_mojibake_v82(str(message))
         text = "".join(ch for ch in text if ord(ch) < 128)
@@ -664,6 +668,8 @@ class ReadableLogFormatterV82(logging.Formatter):
             return text
         if levelname in ("ERROR", "CRITICAL"):
             tag = "[ERROR]"
+        elif "DIAG" in upper:
+            tag = "[DIAG]"
         elif "CONFIRM" in upper:
             tag = "[CONFIRM]"
         elif "TRACE" in upper:
@@ -2358,6 +2364,45 @@ def get_atr_m15_v88(pair: str) -> float:
         return 0.0
 
 # ============================================================
+# V88.1 - DIAGNOSTIC DE DÉMARRAGE
+# ============================================================
+def diagnostic_startup_v881():
+    """
+    Vérifie les composants critiques au démarrage.
+    """
+    logger.info("=" * 60)
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V88.1")
+    logger.info("=" * 60)
+    
+    # 1. Seuil Break Even
+    logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
+    logger.info(f"[DIAG] TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = {TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}")
+    logger.info(f"[DIAG] TRAILING_STOP_MIN_DISTANCE_PIPS = {TRAILING_STOP_MIN_DISTANCE_PIPS}")
+    
+    # 2. Test de l'API TradeCRCDO (vérification que l'endpoint existe)
+    try:
+        from oandapyV20.endpoints import trades
+        logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
+    except Exception as e:
+        logger.error(f"[DIAG] ❌ trades.TradeCRCDO indisponible: {e}")
+    
+    # 3. Test de orders.OrderCreate
+    try:
+        from oandapyV20.endpoints import orders
+        logger.info("[DIAG] ✅ orders.OrderCreate disponible")
+    except Exception as e:
+        logger.error(f"[DIAG] ❌ orders.OrderCreate indisponible: {e}")
+    
+    # 4. Test de trades.TradeDetails (pour les confirmations)
+    try:
+        from oandapyV20.endpoints import trades
+        logger.info("[DIAG] ✅ trades.TradeDetails disponible")
+    except Exception as e:
+        logger.error(f"[DIAG] ❌ trades.TradeDetails indisponible: {e}")
+    
+    logger.info("=" * 60)
+
+# ============================================================
 # V88.1 - CONFIRMATION DU TRADE
 # ============================================================
 def get_trade_details_v88(trade_id: str) -> dict:
@@ -2508,15 +2553,15 @@ def create_oanda_trailing_stop_v881(trade_id: str, pair: str, distance: float) -
         return False
 
 # ============================================================
-# V88.1 - CHECK BREAKEVEN AVEC CONFIRMATION SERVEUR
+# V88.1 - CHECK BREAKEVEN AVEC CONFIRMATION SERVEUR ET LOGS AMÉLIORÉS
 # ============================================================
 def check_breakeven_simple_v881():
     """
-    V88.1 : Break Even avec TradeCRCDO + confirmation serveur.
+    V88.1 : Break Even avec TradeCRCDO + logs améliorés + confirmation serveur.
     """
     try:
         open_trades = get_open_trades_v88()
-        logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts")
+        logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil: {BREAKEVEN_TRIGGER_R}R)")
         
         for t in open_trades:
             trade_id = str(t.get("id"))
@@ -2549,8 +2594,12 @@ def check_breakeven_simple_v881():
             r = profit / risk
             logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} | Entry={entry:.5f} | SL={current_sl:.5f} | Price={current_price:.5f}")
             
-            if r >= 1.2:
-                logger.info(f"[BE] Condition R>=1.2 atteinte pour {trade_id} (R={r:.2f})")
+            # Log spécifique si R est proche du seuil
+            if r >= BREAKEVEN_TRIGGER_R * 0.8:
+                logger.info(f"[BE] ⚠️ Trade {trade_id} proche du seuil: R={r:.2f} (seuil: {BREAKEVEN_TRIGGER_R})")
+            
+            if r >= BREAKEVEN_TRIGGER_R:
+                logger.info(f"[BE] 🎯 Condition R>={BREAKEVEN_TRIGGER_R} atteinte pour {trade_id} (R={r:.2f})")
                 
                 pip = PIP_SIZE_V88.get(pair, get_pip_value_for_pair(pair))
                 spread_data = get_price_spread_v88(pair)
@@ -2567,9 +2616,9 @@ def check_breakeven_simple_v881():
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
                     
-                    # Modification du SL avec confirmation serveur
                     if modify_trade_sl_v881(trade_id, pair, be_sl):
-                        # Création du trailing stop
+                        logger.info(f"[BE] ✅ SL modifié avec succès pour {trade_id}")
+                        
                         atr = get_atr_m15_v88(pair)
                         spread = spread_data.get("spread", 0)
                         pip_value = get_pip_value_for_pair(pair)
@@ -2579,13 +2628,17 @@ def check_breakeven_simple_v881():
                         logger.info(f"[TSL] Distance calculée: ATR={atr:.5f}, spread={spread:.5f}, pip={pip_value:.5f} -> distance={distance:.5f}")
                         
                         if distance > 0:
-                            # Création du trailing avec confirmation serveur
-                            if not create_oanda_trailing_stop_v881(trade_id, pair, distance):
-                                logger.warning(f"[TSL] Échec création trailing pour {pair} trade {trade_id}")
+                            logger.info(f"[TSL] 🚀 Création du trailing stop pour trade {trade_id}")
+                            if create_oanda_trailing_stop_v881(trade_id, pair, distance):
+                                logger.info(f"[TSL] ✅ Trailing stop créé avec succès pour {trade_id}")
+                            else:
+                                logger.error(f"[TSL] ❌ ÉCHEC création trailing pour {trade_id}")
                         else:
                             logger.warning(f"[TSL] Distance invalide ({distance}) pour {pair}")
                     else:
-                        logger.warning(f"[BE] Échec modification SL pour {pair} trade {trade_id}")
+                        logger.error(f"[BE] ❌ ÉCHEC modification SL pour {trade_id}")
+                else:
+                    logger.debug(f"[BE] SL déjà meilleur que le BE calculé")
     except Exception as e:
         logger.error(f"Erreur check_breakeven_simple_v881: {e}")
         logger.error(traceback.format_exc())
@@ -2912,6 +2965,10 @@ if __name__ == "__main__":
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info("✅ Confirmation serveur après chaque BE et après chaque Trailing")
+    logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R")
+    
+    # Diagnostic de démarrage
+    diagnostic_startup_v881()
     
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ - Aucun trade réel ne sera envoyé")
