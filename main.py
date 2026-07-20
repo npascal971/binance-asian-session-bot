@@ -1,12 +1,10 @@
 # ============================================================
-# main(89.4).py - Version V89.4 "Anti-essoufflement"
+# main(89.5).py - Version V89.5 "Anti-essoufflement assoupli"
 # 
-# Modifications V89.4 :
-# - Filtre de cassure M15 (clôture franche au-delà du sommet/creux)
-# - Filtre ADX (confirme l'accélération de la tendance)
-# - Filtre de momentum (vitesse du mouvement)
-# - Filtre de volume (confirme l'intérêt du marché)
-# - Bonus de scoring pour les signaux avec bon momentum
+# Modifications V89.5 :
+# - Seuils ADX/Momentum/Volume assouplis
+# - Rejets transformés en pénalités de score
+# - Conservation des signaux ICT de haute qualité
 # ============================================================
 
 import os
@@ -29,7 +27,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V89.4
+# CONFIGURATION V89.5
 # =========================
 load_dotenv()
 
@@ -53,15 +51,15 @@ MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "DEFAULT": 8
 }
 
-# Seuil de Break Even (V89.4 : 0.8R)
+# Seuil de Break Even (V89.5 : 0.8R)
 BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))
 TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.6"))
 TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "5.0"))
 
-# V89.4 - Seuils pour les filtres anti-essoufflement
-ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "25.0"))
-MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.3"))
-VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.7"))
+# V89.5 - Seuils assouplis pour les filtres anti-essoufflement
+ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "20.0"))      # 25 → 20
+MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))  # 0.3 → 0.15
+VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))     # 0.7 → 0.5
 
 # =========================
 # TRACE JOURNAL
@@ -275,8 +273,8 @@ SCORING_CONFIG = {
         "TBS_DETECTED": 3,
         "ERL_BONUS": 1,
         "IB_BONUS": 2,
-        "MOMENTUM_OK": 3,      # V89.4
-        "BREAKOUT_OK": 2       # V89.4
+        "MOMENTUM_OK": 3,
+        "BREAKOUT_OK": 2
     },
     "PENALTY": {
         "IB_PENALTY": 2,
@@ -998,8 +996,8 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
         ("Imbalance", "Imbalance"), ("Stochastic", "Stochastic"),
         ("HTF_Alignment", "HTF Alignment"), ("Risk_RR_Distance", "Risk/RR/Distance"),
         ("Secondary", "Secondary"),
-        ("Momentum", "Momentum V89.4"),  # Nouveau
-        ("Breakout", "Breakout V89.4"),  # Nouveau
+        ("Momentum", "Momentum V89.5"),
+        ("Breakout", "Breakout V89.5"),
     ]
     logger.debug("===== SCORE DETAIL =====")
     for key, label in labels:
@@ -1303,7 +1301,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# V89.4 - FILTRES ANTI-ESSOUFFLEMENT
+# V89.5 - FILTRES ANTI-ESSOUFFLEMENT ASSOUPLIS
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
@@ -1316,14 +1314,12 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
         low = df['low'].values
         close = df['close'].values
         
-        # Calcul des True Range
         tr = np.zeros(len(df))
         for i in range(1, len(df)):
             tr[i] = max(high[i] - low[i], 
                        abs(high[i] - close[i-1]),
                        abs(low[i] - close[i-1]))
         
-        # Calcul des +DM et -DM
         plus_dm = np.zeros(len(df))
         minus_dm = np.zeros(len(df))
         for i in range(1, len(df)):
@@ -1334,12 +1330,10 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
             if down_move > up_move and down_move > 0:
                 minus_dm[i] = down_move
         
-        # Smoothing avec Wilder
         atr = talib.ATR(high, low, close, timeperiod=period)
         plus_di = 100 * talib.SMA(plus_dm, period) / atr
         minus_di = 100 * talib.SMA(minus_dm, period) / atr
         
-        # ADX
         dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
         adx = talib.SMA(dx, period)
         
@@ -1358,27 +1352,21 @@ def detect_breakout_candle(df: pd.DataFrame, lookback: int = 5) -> dict:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # Sommet/creux des dernières bougies
     recent_high = df['high'].iloc[-lookback-1:-1].max()
     recent_low = df['low'].iloc[-lookback-1:-1].min()
     
-    # Récupérer le body et les mèches
     body = abs(last['close'] - last['open'])
     total_range = last['high'] - last['low']
     body_ratio = body / total_range if total_range > 0 else 0
     
-    # Clôture franche = body ratio > 0.5 et prix > 50% du range
     is_strong_close = body_ratio > 0.45
     
-    # Cassure haussière : clôture > sommet précédent ET bougie verte
     if last['close'] > recent_high and last['close'] > last['open'] and is_strong_close:
         return {"type": "BUY", "level": recent_high, "confirmed": True}
     
-    # Cassure baissière : clôture < creux précédent ET bougie rouge
     if last['close'] < recent_low and last['close'] < last['open'] and is_strong_close:
         return {"type": "SELL", "level": recent_low, "confirmed": True}
     
-    # Cassure non confirmée (clôture pas franche)
     if last['close'] > recent_high:
         return {"type": "BUY", "level": recent_high, "confirmed": False}
     if last['close'] < recent_low:
@@ -1405,7 +1393,7 @@ def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
     Calcule le momentum du volume pour confirmer l'accélération.
     """
     if len(df) < period + 1 or 'volume' not in df.columns:
-        return 1.0  # Valeur neutre si pas de volume
+        return 1.0
     try:
         avg_volume = df['volume'].iloc[-period:].mean()
         prev_avg_volume = df['volume'].iloc[-period*2:-period].mean() if len(df) >= period*2 else avg_volume
@@ -1423,87 +1411,109 @@ def filter_momentum_exhaustion(
     entry_type: str,
 ) -> tuple:
     """
-    Filtre anti-essoufflement V89.4.
-    Vérifie :
-    1. Cassure M15 confirmée
-    2. ADX > 25 (tendance active)
-    3. Momentum positif dans la direction du trade
-    4. Accélération de la tendance vérifiée
-    5. Volume en augmentation
-    
-    Retourne (passed: bool, message: str)
+    V89.5 : Filtre assoupli – retourne (passed, message, penalties, total_penalty)
     """
     direction = direction.upper()
-    
-    # === 1. FILTRE CASSURE M15 ===
+    penalties = {"adx": 0, "momentum": 0, "breakout": 0, "volume": 0}
+    messages = []
+    passed = True
+
+    # === 1. CASSURE M15 ===
     breakout = detect_breakout_candle(df_m15, lookback=5)
-    
-    # La cassure doit être confirmée (clôture franche)
     if not breakout.get("confirmed", False):
         if breakout.get("type") == direction:
-            return False, f"Cassure {direction} M15 non confirmée (bougie trop faible)"
-        return False, f"Pas de cassure M15 dans la direction {direction}"
-    
-    if breakout.get("type") != direction:
-        return False, f"Cassure M15 dans la direction opposée ({breakout.get('type')})"
-    
-    # Vérifier que le prix d'entrée est cohérent avec la cassure
-    breakout_level = breakout.get("level", 0)
-    pip_value = get_pip_value_for_pair(pair)
-    if direction == "BUY":
-        if entry_level > breakout_level + pip_value * 2:
-            return False, f"Entrée trop éloignée du point de cassure ({entry_level:.5f} > {breakout_level:.5f})"
+            messages.append("Cassure non confirmée (bougie faible) → -1")
+            penalties["breakout"] = -1
+        else:
+            messages.append("Pas de cassure dans la direction → -2")
+            penalties["breakout"] = -2
+    elif breakout.get("type") != direction:
+        messages.append(f"Cassure opposée ({breakout.get('type')}) → -3")
+        penalties["breakout"] = -3
     else:
-        if entry_level < breakout_level - pip_value * 2:
-            return False, f"Entrée trop éloignée du point de cassure ({entry_level:.5f} < {breakout_level:.5f})"
-    
-    # === 2. FILTRE ADX ===
+        messages.append("Cassure confirmée → +2")
+        penalties["breakout"] = 2
+
+    if breakout.get("level"):
+        pip_value = get_pip_value_for_pair(pair)
+        breakout_level = breakout["level"]
+        if direction == "BUY" and entry_level > breakout_level + pip_value * 3:
+            messages.append("Entrée trop loin de la cassure → -1")
+            penalties["breakout"] -= 1
+        elif direction == "SELL" and entry_level < breakout_level - pip_value * 3:
+            messages.append("Entrée trop loin de la cassure → -1")
+            penalties["breakout"] -= 1
+
+    # === 2. ADX ===
     adx = calculate_adx(df_h1, period=14)
-    if adx < ADX_MIN_THRESHOLD:
-        return False, f"Tendance faible (ADX={adx:.1f} < {ADX_MIN_THRESHOLD})"
-    
-    # === 3. FILTRE MOMENTUM ===
+    if adx < 15:
+        messages.append(f"ADX très faible ({adx:.1f}) → -3 (bloquant)")
+        penalties["adx"] = -3
+        passed = False
+    elif adx < ADX_MIN_THRESHOLD:
+        messages.append(f"ADX modéré ({adx:.1f}) → -1")
+        penalties["adx"] = -1
+    else:
+        messages.append(f"ADX OK ({adx:.1f}) → +1")
+        penalties["adx"] = 1
+
+    # === 3. MOMENTUM ===
     momentum = calculate_momentum(df_m15, period=5)
-    
     if direction == "BUY":
-        if momentum < 0:
-            return False, f"Momentum baissier ROC={momentum:.2f}% vs BUY"
-        if momentum < MOMENTUM_MIN_PERCENT:
-            # Momentum faible, mais on accepte pour certains types d'entrée
-            if entry_type not in ["BISI", "FVG_RETEST_PERFECT"]:
-                return False, f"Momentum faible ROC={momentum:.2f}% pour {entry_type}"
-            logger.debug(f"ℹ️ Momentum faible ROC={momentum:.2f}% mais entrée {entry_type} acceptée")
-    else:  # SELL
-        if momentum > 0:
-            return False, f"Momentum haussier ROC={momentum:.2f}% vs SELL"
-        if momentum > -MOMENTUM_MIN_PERCENT:
-            if entry_type not in ["BISI", "FVG_RETEST_PERFECT"]:
-                return False, f"Momentum faible ROC={momentum:.2f}% pour {entry_type}"
-            logger.debug(f"ℹ️ Momentum faible ROC={momentum:.2f}% mais entrée {entry_type} acceptée")
-    
-    # === 4. FILTRE DE VITESSE (accélération/décélération) ===
-    # Vérifier la différence entre ROC court terme et long terme
+        if momentum < -0.5:
+            messages.append(f"Momentum baissier fort ({momentum:.2f}%) → -3 (bloquant)")
+            penalties["momentum"] = -3
+            passed = False
+        elif momentum < 0:
+            messages.append(f"Momentum baissier léger ({momentum:.2f}%) → -1")
+            penalties["momentum"] = -1
+        elif momentum < MOMENTUM_MIN_PERCENT:
+            messages.append(f"Momentum faible ({momentum:.2f}%) → 0")
+            penalties["momentum"] = 0
+        else:
+            messages.append(f"Momentum haussier ({momentum:.2f}%) → +2")
+            penalties["momentum"] = 2
+    else:
+        if momentum > 0.5:
+            messages.append(f"Momentum haussier fort ({momentum:.2f}%) → -3 (bloquant)")
+            penalties["momentum"] = -3
+            passed = False
+        elif momentum > 0:
+            messages.append(f"Momentum haussier léger ({momentum:.2f}%) → -1")
+            penalties["momentum"] = -1
+        elif momentum > -MOMENTUM_MIN_PERCENT:
+            messages.append(f"Momentum faible ({momentum:.2f}%) → 0")
+            penalties["momentum"] = 0
+        else:
+            messages.append(f"Momentum baissier ({momentum:.2f}%) → +2")
+            penalties["momentum"] = 2
+
+    # === 4. ACCÉLÉRATION ===
     roc_fast = calculate_momentum(df_m15, period=3)
     roc_slow = calculate_momentum(df_m15, period=10)
-    
     if direction == "BUY":
-        # Le ROC court doit être >= ROC long (accélération haussière)
         if roc_fast < roc_slow * 0.8:
-            return False, f"Décélération haussière (ROC3={roc_fast:.2f}% < ROC10={roc_slow:.2f}%)"
+            messages.append("Décélération haussière → -1")
+            penalties["momentum"] -= 1
     else:
-        # Le ROC court doit être <= ROC long (accélération baissière)
         if roc_fast > roc_slow * 0.8:
-            return False, f"Décélération baissière (ROC3={roc_fast:.2f}% > ROC10={roc_slow:.2f}%)"
-    
-    # === 5. FILTRE VOLUME ===
+            messages.append("Décélération baissière → -1")
+            penalties["momentum"] -= 1
+
+    # === 5. VOLUME ===
     vol_momentum = calculate_volume_momentum(df_m15, period=3)
-    if vol_momentum > 0 and vol_momentum < VOLUME_MOMENTUM_MIN:
-        return False, f"Volume en baisse (ratio={vol_momentum:.2f}) - mouvement essoufflé"
-    if vol_momentum > 1.5:
-        logger.debug(f"✅ Volume en forte hausse (ratio={vol_momentum:.2f})")
-    
-    # === TOUS LES FILTRES SONT PASSÉS ===
-    return True, f"✅ Tous les filtres OK | ADX={adx:.1f} | ROC={momentum:.2f}% | Cassure confirmée"
+    if vol_momentum < VOLUME_MOMENTUM_MIN and vol_momentum > 0:
+        messages.append(f"Volume en baisse ({vol_momentum:.2f}) → -1")
+        penalties["volume"] = -1
+    elif vol_momentum > 1.2:
+        messages.append(f"Volume en hausse ({vol_momentum:.2f}) → +1")
+        penalties["volume"] = 1
+    else:
+        messages.append("Volume neutre → 0")
+
+    total_penalty = sum(penalties.values())
+    message = " | ".join(messages)
+    return passed, message, penalties, total_penalty
 
 # =============================
 # FONCTION GET_CANDLES_WITH_RETRY
@@ -1664,13 +1674,13 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         confluence_tags.append("BOS")
     if score_details.get("Session", "").startswith("+"):
         confluence_tags.append("SESSION")
-    if score_details.get("Momentum", "").startswith("+"):  # V89.4
+    if score_details.get("Momentum", "").startswith("+"):
         confluence_tags.append("MOMENTUM")
-    if score_details.get("Breakout", "").startswith("+"):  # V89.4
+    if score_details.get("Breakout", "").startswith("+"):
         confluence_tags.append("BREAKOUT")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V89.4</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V89.5</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -1798,9 +1808,9 @@ def estimate_win_rate(score: int, confluences: dict) -> str:
         base += 3
     if confluences.get("bos_confirmed"):
         base += 2
-    if confluences.get("momentum_ok"):  # V89.4
+    if confluences.get("momentum_ok"):
         base += 5
-    if confluences.get("breakout_ok"):  # V89.4
+    if confluences.get("breakout_ok"):
         base += 3
     return f"~{min(base, 92)}%"
 
@@ -1816,7 +1826,7 @@ def get_signal_quality_label(score: int) -> str:
     return "B"
 
 # =============================
-# SYSTÈME DE SCORING V89.4
+# SYSTÈME DE SCORING V89.5
 # =============================
 def calculate_signal_confidence(
     pair: str,
@@ -1835,8 +1845,8 @@ def calculate_signal_confidence(
         "ICT": 0, "EMA": 0, "Structure_H1": 0, "Liquidity": 0,
         "Order_Block": 0, "Imbalance": 0, "Stochastic": 0,
         "HTF_Alignment": 0, "Risk_RR_Distance": 0, "Secondary": 0,
-        "Momentum": 0,  # V89.4
-        "Breakout": 0,  # V89.4
+        "Momentum": 0,
+        "Breakout": 0,
     }
     details: dict = {}
     min_required = MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
@@ -1856,8 +1866,8 @@ def calculate_signal_confidence(
         pair=pair, entry_type=entry_type, fvg_data=fvg_data,
     )
     
-    # === V89.4 : FILTRE ANTI-ESSOUFFLEMENT ===
-    momentum_passed, momentum_msg = filter_momentum_exhaustion(
+    # === V89.5 : FILTRE ANTI-ESSOUFFLEMENT ASSOUPLI ===
+    momentum_passed, momentum_msg, momentum_penalties, penalty_total = filter_momentum_exhaustion(
         pair=pair,
         direction=direction,
         df_m15=df_m15,
@@ -1867,30 +1877,24 @@ def calculate_signal_confidence(
         entry_type=entry_type
     )
     
+    # On applique les pénalités au score
+    score_components["Momentum"] += penalty_total
+    details["Momentum"] = f"{penalty_total:+d} ({momentum_msg})"
+    
+    # Si les filtres bloquants sont activés (cas extrême), on ajoute une pénalité supplémentaire
     if not momentum_passed:
-        details["VETO"] = f"❌ FILTRE ANTI-ESSOUFFLEMENT: {momentum_msg}"
-        return {
-            "passed": False,
-            "total_score": -50,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "momentum_filter": {"passed": False, "message": momentum_msg}
-        }
+        score_components["Momentum"] -= 5
+        details["Momentum"] += " | PASSAGE FORCÉ (ADX<15 ou momentum opposé fort)"
     
-    # Bonus si le filtre momentum est passé
-    score_components["Momentum"] += 3
-    details["Momentum"] = f"+3 ({momentum_msg})"
+    # On conserve l'information pour les logs
+    momentum_filter_info = {"passed": momentum_passed, "message": momentum_msg, "penalties": momentum_penalties}
     
-    # Bonus si cassure confirmée
+    # Bonus si cassure confirmée (déjà partiellement dans la pénalité, on ajoute un petit bonus)
     breakout = detect_breakout_candle(df_m15, lookback=5)
     if breakout.get("confirmed") and breakout.get("type") == direction:
         score_components["Breakout"] += 2
         details["Breakout"] = "+2 (Cassure M15 confirmée)"
     else:
-        # Si pas de cassure mais que le momentum est bon, on accorde un petit bonus
         score_components["Breakout"] += 1
         details["Breakout"] = "+1 (Momentum ok sans cassure franche)"
     
@@ -2078,8 +2082,8 @@ def calculate_signal_confidence(
         "session_active": details.get("Session", "").startswith("+"),
         "macd_confirmed": macd_confirmed,
         "bos_confirmed": "BOS" in str(details),
-        "momentum_ok": score_components.get("Momentum", 0) >= 3,  # V89.4
-        "breakout_ok": score_components.get("Breakout", 0) >= 2,  # V89.4
+        "momentum_ok": score_components.get("Momentum", 0) >= 3,
+        "breakout_ok": score_components.get("Breakout", 0) >= 2,
     }
     
     win_rate = estimate_win_rate(score, confluences)
@@ -2090,11 +2094,11 @@ def calculate_signal_confidence(
         "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value,
         "passed": passed, "min_required": min_required, "final_confidence": final_confidence,
         "win_rate": win_rate, "quality_label": quality_label, "confluences": confluences,
-        "momentum_filter": {"passed": True, "message": momentum_msg},  # V89.4
+        "momentum_filter": momentum_filter_info,
     }
 
 # ============================================================
-# V89.4 - DÉTECTION BIAS-FIRST
+# V89.5 - DÉTECTION BIAS-FIRST
 # ============================================================
 def detect_setups_aligned_with_bias(
     df_m15: pd.DataFrame,
@@ -2183,13 +2187,13 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # ============================================================
-# V89.4 - FONCTION PRINCIPALE AVEC STATS
+# V89.5 - FONCTION PRINCIPALE AVEC STATS
 # ============================================================
-def advanced_main_v894():
+def advanced_main_v895():
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info("✅ FILTRES ANTI-ESSOUFFLEMENT ACTIVÉS (ADX + Momentum + Cassure)")
+        logger.info("✅ FILTRES ANTI-ESSOUFFLEMENT ASSOUPLIS V89.5")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -2208,7 +2212,6 @@ def advanced_main_v894():
             bias = bias_analysis.get("bias", "NEUTRAL")
             min_score = MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
             
-            # Log des indicateurs de momentum pour debug
             if DEBUG_MODE:
                 adx = calculate_adx(df_h1)
                 momentum = calculate_momentum(df_m15)
@@ -2243,12 +2246,11 @@ def advanced_main_v894():
                 )
                 score = confidence_result.get("total_score", 0)
                 
-                # Vérification spécifique du filtre momentum
-                momentum_filter = confidence_result.get("momentum_filter", {})
-                if not momentum_filter.get("passed", True):
-                    rejected_reasons[f"momentum_{momentum_filter.get('message', 'unknown')[:30]}"] += 1
-                    stats.record_signal(pair, False, f"momentum_reject", entry_level, 0, 0, score, direction)
-                    continue
+                # V89.5 : on ne rejette plus à cause du momentum, on utilise juste la pénalité
+                # On logue l'info pour le suivi
+                mf = confidence_result.get("momentum_filter", {})
+                if DEBUG_MODE and mf.get("penalties"):
+                    logger.debug(f"Pénalités {pair} {direction}: {mf.get('penalties')} total={sum(mf.get('penalties', {}).values())}")
                 
                 if score >= min_score:
                     scored_entries.append({"entry": entry, "confidence": confidence_result})
@@ -2291,9 +2293,8 @@ def advanced_main_v894():
                 score = confidence_result.get("total_score", 0)
                 quality = confidence_result.get("quality_label", "B")
                 
-                # Afficher les détails du filtre momentum
                 mf = confidence_result.get("momentum_filter", {})
-                logger.info(f"📊 TRADE {pair} {direction} {entry_type} @{entry_level:.5f} | Score: {score} | Qualité: {quality} | Momentum: {mf.get('message', 'OK')}")
+                logger.info(f"📊 TRADE {pair} {direction} {entry_type} @{entry_level:.5f} | Score: {score} | Qualité: {quality} | Pénalités: {mf.get('penalties', {})}")
                 
                 if DEMO_MODE:
                     logger.info(f"🔬 DEMO: {pair} {direction} @ {entry_level:.5f} (SL: {stop_loss}, TP: {take_profit})")
@@ -2672,7 +2673,7 @@ def diagnostic_startup_v893():
     Vérifie les composants critiques au démarrage.
     """
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V89.4")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V89.5")
     logger.info("=" * 60)
     
     # 1. Seuil Break Even
@@ -2680,7 +2681,7 @@ def diagnostic_startup_v893():
     logger.info(f"[DIAG] TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = {TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}")
     logger.info(f"[DIAG] TRAILING_STOP_MIN_DISTANCE_PIPS = {TRAILING_STOP_MIN_DISTANCE_PIPS}")
     
-    # 2. V89.4 - Filtres anti-essoufflement
+    # 2. V89.5 - Filtres anti-essoufflement assouplis
     logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {ADX_MIN_THRESHOLD}")
     logger.info(f"[DIAG] MOMENTUM_MIN_PERCENT = {MOMENTUM_MIN_PERCENT}")
     logger.info(f"[DIAG] VOLUME_MOMENTUM_MIN = {VOLUME_MOMENTUM_MIN}")
@@ -3037,7 +3038,7 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
     V89.3 : ouverture d'un Market Order avec SL et TP uniquement.
     Le trailing sera créé plus tard, après le Break Even.
     """
-    logger.info(f"[ORDER] V89.4 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] V89.5 EXECUTION START {pair} {direction} type={entry_type} score={score}")
     logger.info(f"[ORDER] EXEC INPUT | pair={pair} direction={direction} entry={round_price_v88(pair, entry_price)} "
                 f"SL={round_price_v88(pair, stop_loss)} TP={round_price_v88(pair, take_profit)}")
     logger.info(f"[ORDER] PAS DE TRAILING À L'OUVERTURE (création après BE)")
@@ -3083,7 +3084,7 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
     logger.info(
-        f"[ORDER] SIGNAL V89.4 {pair} {direction} | "
+        f"[ORDER] SIGNAL V89.5 {pair} {direction} | "
         f"entry≈{round_price_v88(pair, entry_price)} SL={round_price_v88(pair, stop_loss)} "
         f"TP={round_price_v88(pair, take_profit)} RR={rr:.2f} score={score} "
         f"units={units} type={entry_type}"
@@ -3314,10 +3315,10 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V89.4 - BOUCLE PRINCIPALE (DOUBLE BOUCLE)
+# V89.5 - BOUCLE PRINCIPALE (DOUBLE BOUCLE)
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V89.4 (Anti-essoufflement)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V89.5 (Anti-essoufflement assoupli)")
     logger.info("📋 Trace des trades activée dans trade_trace.json")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
@@ -3330,12 +3331,13 @@ if __name__ == "__main__":
     logger.info("✅ Pas de trailing à l'ouverture – création UNIQUEMENT après BE")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("")
-    logger.info("🛡️ FILTRES ANTI-ESSOUFFLEMENT V89.4 :")
-    logger.info(f"   - Cassure M15 confirmée (clôture franche > 45% du body)")
-    logger.info(f"   - ADX > {ADX_MIN_THRESHOLD} (tendance active)")
-    logger.info(f"   - Momentum > {MOMENTUM_MIN_PERCENT}% dans la direction du trade")
-    logger.info("   - Accélération de la tendance vérifiée (ROC3 vs ROC10)")
-    logger.info(f"   - Volume en augmentation (ratio > {VOLUME_MOMENTUM_MIN})")
+    logger.info("🛡️ FILTRES ANTI-ESSOUFFLEMENT ASSOUPLIS V89.5 :")
+    logger.info(f"   - Cassure M15 confirmée (clôture franche > 45% du body) → bonus/malus")
+    logger.info(f"   - ADX > {ADX_MIN_THRESHOLD} (tendance active) → bonus, <15 bloquant avec -3")
+    logger.info(f"   - Momentum > {MOMENTUM_MIN_PERCENT}% → bonus, sinon malus selon intensité")
+    logger.info("   - Accélération de la tendance vérifiée (ROC3 vs ROC10) → ajustement")
+    logger.info(f"   - Volume en augmentation (ratio > {VOLUME_MOMENTUM_MIN}) → bonus")
+    logger.info("   - Les rejets stricts sont transformés en pénalités de score")
     logger.info("")
     
     # Diagnostic de démarrage
@@ -3364,7 +3366,7 @@ if __name__ == "__main__":
             
             # === BOUCLE LENTE : Nouveaux signaux ===
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux (intervalle de {SIGNAL_SCAN_INTERVAL}s) - V89.4")
+                logger.info(f"⏰ Scan des signaux (intervalle de {SIGNAL_SCAN_INTERVAL}s) - V89.5")
                 last_signal_scan = now
                 
                 # Vérification des conditions de marché
@@ -3374,7 +3376,7 @@ if __name__ == "__main__":
                 elif current_open_count >= MAX_TRADES_TOTAL:
                     logger.info(f"Limite trades ouverts atteinte ({current_open_count}/{MAX_TRADES_TOTAL})")
                 else:
-                    advanced_main_v894()
+                    advanced_main_v895()
             
             # Attente avant le prochain cycle
             time.sleep(30)  # 30 secondes entre chaque cycle rapide
