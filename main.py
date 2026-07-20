@@ -1,14 +1,12 @@
 # ============================================================
-# main(75).py - Version V88.1 "Audit + API Officielle + Confirmation Serveur"
+# main(89).py - Version V89 "Exécution robuste + Trailing borné + BE 0.8R"
 # 
-# Modifications V88.1 :
-# - Modification du Stop Loss via trades.TradeCRCDO (API officielle)
-# - Création du Trailing Stop via orders.OrderCreate avec TRAILING_STOP_LOSS
-# - Confirmation serveur après chaque BE : GET /trades/{tradeID} via trades.TradeDetails
-# - Confirmation serveur après chaque Trailing : GET /trades/{tradeID} via trades.TradeDetails
-# - Trace complète de chaque étape
-# - Diagnostic de démarrage
-# - Logs améliorés pour le Break Even et le Trailing
+# Modifications V89 :
+# - Récupération fiable du tradeID via extract_trade_id + fallback GET /openTrades
+# - Nouveau calcul du trailing : max(ATR*1.6, spread*2) plafonné à ATR*3
+# - Break Even abaissé à 0.8R (BREAKEVEN_TRIGGER_R = 0.8)
+# - Confirmation serveur renforcée après chaque modification du SL
+# - Logs enrichis pour le trailing et le BE
 # ============================================================
 
 import os
@@ -31,7 +29,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V88.1
+# CONFIGURATION V89
 # =========================
 load_dotenv()
 
@@ -55,9 +53,9 @@ MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "DEFAULT": 8
 }
 
-# Seuil de Break Even (V88.1)
-BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "1.2"))
-TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.3"))
+# Seuil de Break Even (V89 : abaissé à 0.8R)
+BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))
+TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.6"))
 TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "5.0"))
 
 # =========================
@@ -1814,7 +1812,7 @@ def calculate_signal_confidence(
     }
 
 # ============================================================
-# V88.1 - DÉTECTION BIAS-FIRST
+# V89 - DÉTECTION BIAS-FIRST
 # ============================================================
 def detect_setups_aligned_with_bias(
     df_m15: pd.DataFrame,
@@ -1903,9 +1901,9 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # ============================================================
-# V88.1 - FONCTION PRINCIPALE AVEC STATS
+# V89 - FONCTION PRINCIPALE AVEC STATS
 # ============================================================
-def advanced_main_v881():
+def advanced_main_v89():
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
@@ -1999,7 +1997,7 @@ def advanced_main_v881():
                     stats.record_signal(pair, True, "demo_mode", entry_level, stop_loss, take_profit, score, direction)
                     nb_envoyes += 1
                     continue
-                trade_id = execute_oanda_trade_v881(
+                trade_id = execute_oanda_trade_v89(
                     pair=pair,
                     direction=direction,
                     entry_price=entry_level,
@@ -2032,7 +2030,7 @@ def advanced_main_v881():
     stats.log_summary()
 
 # ============================================================
-# V88.1 - OANDA EXECUTION + API OFFICIELLE
+# V89 - OANDA EXECUTION + API OFFICIELLE
 # ============================================================
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
@@ -2364,14 +2362,14 @@ def get_atr_m15_v88(pair: str) -> float:
         return 0.0
 
 # ============================================================
-# V88.1 - DIAGNOSTIC DE DÉMARRAGE
+# V89 - DIAGNOSTIC DE DÉMARRAGE
 # ============================================================
-def diagnostic_startup_v881():
+def diagnostic_startup_v89():
     """
     Vérifie les composants critiques au démarrage.
     """
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V88.1")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V89")
     logger.info("=" * 60)
     
     # 1. Seuil Break Even
@@ -2379,7 +2377,7 @@ def diagnostic_startup_v881():
     logger.info(f"[DIAG] TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = {TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}")
     logger.info(f"[DIAG] TRAILING_STOP_MIN_DISTANCE_PIPS = {TRAILING_STOP_MIN_DISTANCE_PIPS}")
     
-    # 2. Test de l'API TradeCRCDO (vérification que l'endpoint existe)
+    # 2. Test de l'API TradeCRCDO
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -2393,7 +2391,7 @@ def diagnostic_startup_v881():
     except Exception as e:
         logger.error(f"[DIAG] ❌ orders.OrderCreate indisponible: {e}")
     
-    # 4. Test de trades.TradeDetails (pour les confirmations)
+    # 4. Test de trades.TradeDetails
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeDetails disponible")
@@ -2403,7 +2401,7 @@ def diagnostic_startup_v881():
     logger.info("=" * 60)
 
 # ============================================================
-# V88.1 - CONFIRMATION DU TRADE
+# V89 - CONFIRMATION DU TRADE
 # ============================================================
 def get_trade_details_v88(trade_id: str) -> dict:
     """
@@ -2429,19 +2427,18 @@ def get_stop_loss_v88(trade: dict) -> float:
     return float(sl_order.get("price", 0)) if sl_order else 0.0
 
 # ============================================================
-# V88.1 - MODIFICATION SL VIA TradeCRCDO + CONFIRMATION SERVEUR
+# V89 - MODIFICATION SL VIA TradeCRCDO + CONFIRMATION SERVEUR
 # ============================================================
-def modify_trade_sl_v881(trade_id: str, pair: str, new_sl: float) -> bool:
+def modify_trade_sl_v89(trade_id: str, pair: str, new_sl: float) -> bool:
     """
-    V88.1 : Modification du Stop Loss via TradeCRCDO (API officielle).
-    + Confirmation serveur GET /trades/{tradeID} via trades.TradeDetails
+    V89 : Modification du Stop Loss via TradeCRCDO.
+    + Confirmation serveur GET /trades/{tradeID}
     """
     try:
         api = v88_client()
         
         logger.info(f"[BE] Modification SL via TradeCRCDO pour trade {trade_id} -> {new_sl:.5f}")
         
-        # 1. Modification du SL via TradeCRCDO
         data = {
             "stopLoss": {
                 "price": round_price_v88(pair, new_sl),
@@ -2451,13 +2448,11 @@ def modify_trade_sl_v881(trade_id: str, pair: str, new_sl: float) -> bool:
         r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
         resp = api.request(r)
         
-        # Trace
         tracer.log_step(trade_id, "BE_MODIFY_SL_VIA_TRADE_CRCDO", {
             "pair": pair,
             "new_sl": new_sl
         }, resp)
         
-        # Vérifier le rejet
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
             logger.error(f"[BE] Rejeté pour trade {trade_id}: {reject}")
@@ -2465,7 +2460,7 @@ def modify_trade_sl_v881(trade_id: str, pair: str, new_sl: float) -> bool:
         
         logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
         
-        # 2. CONFIRMATION SERVEUR : GET /trades/{tradeID}
+        # Confirmation serveur
         logger.info(f"[CONFIRM] Vérification du SL pour trade {trade_id}")
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
@@ -2490,19 +2485,18 @@ def modify_trade_sl_v881(trade_id: str, pair: str, new_sl: float) -> bool:
         return False
 
 # ============================================================
-# V88.1 - CRÉATION DU TRAILING STOP VIA orders.OrderCreate + CONFIRMATION SERVEUR
+# V89 - CRÉATION DU TRAILING STOP VIA orders.OrderCreate + CONFIRMATION
 # ============================================================
-def create_oanda_trailing_stop_v881(trade_id: str, pair: str, distance: float) -> bool:
+def create_oanda_trailing_stop_v89(trade_id: str, pair: str, distance: float) -> bool:
     """
-    V88.1 : Crée un Trailing Stop Loss via orders.OrderCreate (API officielle).
-    + Confirmation serveur GET /trades/{tradeID} via trades.TradeDetails
+    V89 : Crée un Trailing Stop Loss via orders.OrderCreate.
+    + Confirmation serveur.
     """
     try:
         api = v88_client()
         
         logger.info(f"[TSL] Création trailing via OrderCreate pour trade {trade_id} -> distance={distance:.5f}")
         
-        # 1. Création du trailing stop
         order_data = {
             "order": {
                 "type": "TRAILING_STOP_LOSS",
@@ -2514,13 +2508,11 @@ def create_oanda_trailing_stop_v881(trade_id: str, pair: str, distance: float) -
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         resp = api.request(r)
         
-        # Trace
         tracer.log_step(trade_id, "TSL_CREATE_VIA_ORDER_CREATE", {
             "pair": pair,
             "distance": distance
         }, resp)
         
-        # Vérifier le rejet
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
             logger.error(f"[TSL] Rejeté pour trade {trade_id}: {reject}")
@@ -2528,7 +2520,7 @@ def create_oanda_trailing_stop_v881(trade_id: str, pair: str, distance: float) -
         
         logger.info(f"[TSL] SUCCESS: Trailing stop créé pour trade {trade_id}, distance={distance:.5f}")
         
-        # 2. CONFIRMATION SERVEUR : GET /trades/{tradeID}
+        # Confirmation serveur
         logger.info(f"[CONFIRM] Vérification du trailing stop pour trade {trade_id}")
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
@@ -2553,11 +2545,73 @@ def create_oanda_trailing_stop_v881(trade_id: str, pair: str, distance: float) -
         return False
 
 # ============================================================
-# V88.1 - CHECK BREAKEVEN AVEC CONFIRMATION SERVEUR ET LOGS AMÉLIORÉS
+# V89 - EXTRACT TRADE ID ROBUSTE
 # ============================================================
-def check_breakeven_simple_v881():
+def extract_trade_id_v89(response: dict) -> str | None:
     """
-    V88.1 : Break Even avec TradeCRCDO + logs améliorés + confirmation serveur.
+    Extrait le tradeID de la réponse OANDA de manière robuste.
+    Gère orderFillTransaction, orderCreateTransaction, etc.
+    """
+    if not response:
+        return None
+    
+    # Cas 1 : orderFillTransaction -> tradeOpened
+    oft = response.get("orderFillTransaction")
+    if oft:
+        if "tradeOpened" in oft and oft["tradeOpened"]:
+            trade_id = oft["tradeOpened"].get("tradeID")
+            if trade_id:
+                return str(trade_id)
+        if "tradeReduced" in oft and oft["tradeReduced"]:
+            trade_id = oft["tradeReduced"].get("tradeID")
+            if trade_id:
+                return str(trade_id)
+        if "tradesOpened" in oft and oft["tradesOpened"]:
+            opened = oft["tradesOpened"]
+            if opened and opened[0].get("tradeID"):
+                return str(opened[0]["tradeID"])
+    
+    # Cas 2 : orderCreateTransaction -> peut contenir un tradeID dans relatedTransactionIDs ?
+    oct = response.get("orderCreateTransaction")
+    if oct and "relatedTransactionIDs" in oct:
+        # Parfois le tradeID est dans les transactions liées
+        related = oct.get("relatedTransactionIDs", [])
+        if related:
+            # Souvent le dernier est l'ID du trade
+            return str(related[-1])
+    
+    # Cas 3 : directement "tradeID" dans la racine ?
+    if response.get("tradeID"):
+        return str(response["tradeID"])
+    
+    return None
+
+# ============================================================
+# V89 - RECHERCHE DU TRADEID VIA OPEN TRADES (fallback)
+# ============================================================
+def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str, tolerance: float = 0.0005) -> str | None:
+    """
+    Cherche dans les trades ouverts un trade correspondant à la paire, direction et prix d'entrée approximatif.
+    """
+    open_trades = get_open_trades_v88(log_raw=True)
+    for t in open_trades:
+        if t.get("instrument") != pair:
+            continue
+        t_dir = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
+        if t_dir != direction:
+            continue
+        t_entry = float(t.get("price", 0))
+        if abs(t_entry - entry_price) <= tolerance:
+            return str(t.get("id"))
+    return None
+
+# ============================================================
+# V89 - CHECK BREAKEVEN (0.8R) AVEC NOUVELLE LOGIQUE DE TRAILING
+# ============================================================
+def check_breakeven_simple_v89():
+    """
+    V89 : Break Even à 0.8R avec modification SL via TradeCRCDO,
+    puis création d'un trailing avec distance bornée.
     """
     try:
         open_trades = get_open_trades_v88()
@@ -2594,10 +2648,6 @@ def check_breakeven_simple_v881():
             r = profit / risk
             logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} | Entry={entry:.5f} | SL={current_sl:.5f} | Price={current_price:.5f}")
             
-            # Log spécifique si R est proche du seuil
-            if r >= BREAKEVEN_TRIGGER_R * 0.8:
-                logger.info(f"[BE] ⚠️ Trade {trade_id} proche du seuil: R={r:.2f} (seuil: {BREAKEVEN_TRIGGER_R})")
-            
             if r >= BREAKEVEN_TRIGGER_R:
                 logger.info(f"[BE] 🎯 Condition R>={BREAKEVEN_TRIGGER_R} atteinte pour {trade_id} (R={r:.2f})")
                 
@@ -2616,20 +2666,24 @@ def check_breakeven_simple_v881():
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
                     
-                    if modify_trade_sl_v881(trade_id, pair, be_sl):
+                    if modify_trade_sl_v89(trade_id, pair, be_sl):
                         logger.info(f"[BE] ✅ SL modifié avec succès pour {trade_id}")
                         
+                        # Nouveau calcul du trailing : borné
                         atr = get_atr_m15_v88(pair)
                         spread = spread_data.get("spread", 0)
                         pip_value = get_pip_value_for_pair(pair)
-                        distance = max(atr * TRAILING_STOP_DISTANCE_ATR_MULTIPLIER, spread * 8, pip_value * TRAILING_STOP_MIN_DISTANCE_PIPS)
+                        # distance = max(ATR * 1.6, spread * 2) mais plafonné à ATR * 3
+                        distance = max(atr * 1.6, spread * 2)
+                        distance = min(distance, atr * 3)
+                        distance = max(distance, pip_value * TRAILING_STOP_MIN_DISTANCE_PIPS)
                         distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
                         
                         logger.info(f"[TSL] Distance calculée: ATR={atr:.5f}, spread={spread:.5f}, pip={pip_value:.5f} -> distance={distance:.5f}")
                         
                         if distance > 0:
                             logger.info(f"[TSL] 🚀 Création du trailing stop pour trade {trade_id}")
-                            if create_oanda_trailing_stop_v881(trade_id, pair, distance):
+                            if create_oanda_trailing_stop_v89(trade_id, pair, distance):
                                 logger.info(f"[TSL] ✅ Trailing stop créé avec succès pour {trade_id}")
                             else:
                                 logger.error(f"[TSL] ❌ ÉCHEC création trailing pour {trade_id}")
@@ -2640,19 +2694,19 @@ def check_breakeven_simple_v881():
                 else:
                     logger.debug(f"[BE] SL déjà meilleur que le BE calculé")
     except Exception as e:
-        logger.error(f"Erreur check_breakeven_simple_v881: {e}")
+        logger.error(f"Erreur check_breakeven_simple_v89: {e}")
         logger.error(traceback.format_exc())
 
 # ============================================================
-# V88.1 - EXECUTION AVEC TRAILING NATIF OANDA
+# V89 - EXECUTION AVEC TRAILING NATIF OANDA (distance bornée)
 # ============================================================
-def execute_oanda_trade_v881(pair: str, direction: str, entry_price: float, stop_loss: float,
+def execute_oanda_trade_v89(pair: str, direction: str, entry_price: float, stop_loss: float,
                             take_profit: float, score: int, entry_type: str) -> str | None:
     """
-    V88.1 : ouverture d'un Market Order AVEC trailingStopLossOnFill natif OANDA.
-    + Confirmation serveur du trailing.
+    V89 : ouverture d'un Market Order avec trailingStopLossOnFill,
+    distance bornée.
     """
-    logger.info(f"[ORDER] V88.1 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] V89 EXECUTION START {pair} {direction} type={entry_type} score={score}")
     logger.info(f"[ORDER] EXEC INPUT | pair={pair} direction={direction} entry={round_price_v88(pair, entry_price)} "
                 f"SL={round_price_v88(pair, stop_loss)} TP={round_price_v88(pair, take_profit)}")
 
@@ -2686,10 +2740,13 @@ def execute_oanda_trade_v881(pair: str, direction: str, entry_price: float, stop
     spread = spread_data.get("spread", 0)
     pip = get_pip_value_for_pair(pair)
     
-    trailing_distance = max(atr * TRAILING_STOP_DISTANCE_ATR_MULTIPLIER, spread * 8, pip * TRAILING_STOP_MIN_DISTANCE_PIPS)
-    trailing_distance = round(trailing_distance, PRICE_DECIMALS_V88.get(pair, 5))
+    # Nouveau calcul : borné
+    distance = max(atr * 1.6, spread * 2)
+    distance = min(distance, atr * 3)
+    distance = max(distance, pip * TRAILING_STOP_MIN_DISTANCE_PIPS)
+    distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
     
-    logger.info(f"[TSL] Distance de trailing calculée: ATR={atr:.5f}, spread={spread:.5f}, pip={pip:.5f} -> distance={trailing_distance:.5f}")
+    logger.info(f"[TSL] Distance de trailing calculée: ATR={atr:.5f}, spread={spread:.5f}, pip={pip:.5f} -> distance={distance:.5f}")
 
     signed_units = units if direction == "BUY" else -units
     
@@ -2702,7 +2759,7 @@ def execute_oanda_trade_v881(pair: str, direction: str, entry_price: float, stop
             "stopLossOnFill": {"price": round_price_v88(pair, stop_loss), "timeInForce": "GTC"},
             "takeProfitOnFill": {"price": round_price_v88(pair, take_profit), "timeInForce": "GTC"},
             "trailingStopLossOnFill": {
-                "distance": str(trailing_distance),
+                "distance": str(distance),
                 "timeInForce": "GTC"
             }
         }
@@ -2711,10 +2768,10 @@ def execute_oanda_trade_v881(pair: str, direction: str, entry_price: float, stop
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
     logger.info(
-        f"[ORDER] SIGNAL V88.1 {pair} {direction} | "
+        f"[ORDER] SIGNAL V89 {pair} {direction} | "
         f"entry≈{round_price_v88(pair, entry_price)} SL={round_price_v88(pair, stop_loss)} "
         f"TP={round_price_v88(pair, take_profit)} RR={rr:.2f} score={score} "
-        f"units={units} type={entry_type} trailing_distance={trailing_distance:.5f}"
+        f"units={units} type={entry_type} trailing_distance={distance:.5f}"
     )
     logger.info(f"[ORDER] Payload: {json.dumps(order_data)}")
 
@@ -2733,7 +2790,7 @@ def execute_oanda_trade_v881(pair: str, direction: str, entry_price: float, stop
             "entry": entry_price,
             "sl": stop_loss,
             "tp": take_profit,
-            "trailing_distance": trailing_distance,
+            "trailing_distance": distance,
             "units": units
         }, resp)
         
@@ -2743,24 +2800,25 @@ def execute_oanda_trade_v881(pair: str, direction: str, entry_price: float, stop
             tracer.log_step("new", "ORDER_REJECTED", {"reason": reject.get("rejectReason", "unknown")}, resp)
             return None
 
-        trade_id = None
-        fill = resp.get("orderFillTransaction", {}) or {}
-        trade_opened = fill.get("tradeOpened") or {}
-        if trade_opened.get("tradeID"):
-            trade_id = str(trade_opened["tradeID"])
+        # Extraction robuste du tradeID
+        trade_id = extract_trade_id_v89(resp)
+        
+        # Si non trouvé, on attend 2s et on cherche dans les trades ouverts
         if not trade_id:
-            trades_opened = fill.get("tradesOpened") or []
-            if trades_opened and trades_opened[0].get("tradeID"):
-                trade_id = str(trades_opened[0]["tradeID"])
-        if not trade_id:
-            logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
-            tracer.log_step("new", "ORDER_NO_TRADE_ID", {"response": str(resp)[:500]}, resp)
-            return None
+            logger.warning(f"[ORDER] tradeID non trouvé dans la réponse, recherche dans les trades ouverts...")
+            time.sleep(2)
+            trade_id = find_trade_by_instrument_v89(pair, entry_price, direction)
+            if trade_id:
+                logger.info(f"[ORDER] tradeID retrouvé via openTrades: {trade_id}")
+            else:
+                logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair} - impossible de récupérer le tradeID")
+                tracer.log_step("new", "ORDER_NO_TRADE_ID", {"response": str(resp)[:500]}, resp)
+                return None
 
         logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
         tracer.log_step(trade_id, "ORDER_CONFIRMED", {"pair": pair, "direction": direction}, resp)
         
-        # CONFIRMATION SERVEUR : vérifier que le trailing est actif
+        # Confirmation du trailing
         logger.info(f"[CONFIRM] Vérification du trailing stop pour trade {trade_id}")
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
@@ -2782,7 +2840,7 @@ def execute_oanda_trade_v881(pair: str, direction: str, entry_price: float, stop
         return None
 
 # ============================================================
-# V88.1 - STRICT FILTERS
+# V89 - STRICT FILTERS
 # ============================================================
 STRICT_ALLOWED_ENTRY_TYPES = {
     "FVG_RETEST_PERFECT", "FVG_RETEST", "BISI", "BREAKER",
@@ -2957,18 +3015,20 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V88.1 - BOUCLE PRINCIPALE
+# V89 - BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V88.1 (API Officielle + Confirmation Serveur)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V89 (Exécution robuste + Trailing borné + BE 0.8R)")
     logger.info("📋 Trace des trades activée dans trade_trace.json")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info("✅ Confirmation serveur après chaque BE et après chaque Trailing")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R")
+    logger.info("✅ Calcul du trailing : max(ATR*1.6, spread*2) plafonné à ATR*3")
+    logger.info("✅ Récupération robuste du tradeID avec fallback sur openTrades")
     
     # Diagnostic de démarrage
-    diagnostic_startup_v881()
+    diagnostic_startup_v89()
     
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ - Aucun trade réel ne sera envoyé")
@@ -2987,15 +3047,15 @@ if __name__ == "__main__":
             current_open_count = open_trade_count_v88()
             logger.info(f"[SCAN] Trades ouverts: {current_open_count}/{MAX_TRADES_TOTAL}")
             
-            # V88.1 : Break Even avec TradeCRCDO + confirmation serveur
-            check_breakeven_simple_v881()
+            # V89 : Break Even avec TradeCRCDO + confirmation serveur (seuil 0.8R)
+            check_breakeven_simple_v89()
 
             if current_open_count >= MAX_TRADES_TOTAL:
                 logger.info(f"Limite trades ouverts atteinte ({current_open_count}/{MAX_TRADES_TOTAL})")
                 time.sleep(300)
                 continue
 
-            advanced_main_v881()
+            advanced_main_v89()
 
             logger.info("⏳ Attente 15 minutes...")
             time.sleep(900)
