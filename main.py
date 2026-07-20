@@ -165,7 +165,7 @@ last_reset_time = datetime.utcnow()
 # =============================
 load_dotenv()
 
-PAIR_LIST = ["EUR_USD", "GBP_USD", "USD_CAD", "AUD_USD", "AUD_CAD"]
+PAIR_LIST = ["GBP_USD", "USD_CAD", "AUD_USD"]
 
 GRANULARITY_D1 = "D"
 GRANULARITY_H4 = "H4"
