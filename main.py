@@ -1,12 +1,12 @@
 # ============================================================
-# main(91).py - Version V91 "Entry Quality Score"
+# main(92).py - Version V92 "Seuils assouplis"
 # 
-# Modifications V91 :
-# - Scores minimum ajustés par paire
-# - Break Even à 0.6R
-# - Entry Quality Score (EQS) indépendant
-# - Scoring consolidé
-# - Logs enrichis pour analyse
+# Modifications V92 :
+# - EQS : 70 → 60
+# - ATR minimum réduit de 20-30%
+# - Pullback minimum réduit (5→3 pips)
+# - Scores minimum légèrement baissés
+# - Break Even conservé à 0.6R
 # ============================================================
 
 import os
@@ -29,7 +29,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V91
+# CONFIGURATION V92
 # =========================
 load_dotenv()
 
@@ -42,55 +42,55 @@ DECISION_JOURNAL = os.getenv("DECISION_JOURNAL", "decision_journal.json")
 # Fichier de trace des trades
 TRACE_JOURNAL = os.getenv("TRACE_JOURNAL", "trade_trace.json")
 
-# V91 - Scores minimum ajustés par paire
+# V92 - Scores minimum ajustés (légèrement baissés)
 MIN_CONFIDENCE_SCORE_BY_PAIR = {
-    "EUR_USD": 13,      # Augmenté (marché bruité)
-    "GBP_USD": 11,      # Augmenté
-    "USD_CAD": 10,      # Augmenté
-    "AUD_USD": 10,      # Augmenté
-    "AUD_CAD": 10,      # Augmenté
-    "XAU_USD": 10,      # Baissé (signaux de meilleure qualité)
-    "DEFAULT": 10
+    "EUR_USD": 11,      # 13 → 11
+    "GBP_USD": 10,      # 11 → 10
+    "USD_CAD": 9,       # 10 → 9
+    "AUD_USD": 9,       # 10 → 9
+    "AUD_CAD": 9,       # 10 → 9
+    "XAU_USD": 10,      # Conservé
+    "DEFAULT": 9        # 10 → 9
 }
 
-# V91 - Seuil de Break Even à 0.6R
+# Seuil de Break Even (V92 : 0.6R conservé)
 BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.6"))
 TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.6"))
 TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "5.0"))
 
-# V91 - Seuils pour les filtres
+# V92 - Seuils pour les filtres (conservés)
 ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "20.0"))
 MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
 VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 
-# V91 - Seuils de volatilité minimum (en pips)
+# V92 - Seuils de volatilité minimum (réduits de 20-30%)
 MIN_ATR_PIPS_BY_PAIR = {
-    "EUR_USD": 15.0,
-    "GBP_USD": 18.0,
-    "USD_CAD": 15.0,
-    "AUD_USD": 15.0,
-    "AUD_CAD": 15.0,
-    "XAU_USD": 80.0,
-    "USD_JPY": 20.0,
-    "GBP_JPY": 25.0,
-    "DEFAULT": 15.0
+    "EUR_USD": 12.0,    # 15 → 12
+    "GBP_USD": 14.0,    # 18 → 14
+    "USD_CAD": 12.0,    # 15 → 12
+    "AUD_USD": 12.0,    # 15 → 12
+    "AUD_CAD": 12.0,    # 15 → 12
+    "XAU_USD": 60.0,    # 80 → 60
+    "USD_JPY": 15.0,    # 20 → 15
+    "GBP_JPY": 20.0,    # 25 → 20
+    "DEFAULT": 12.0     # 15 → 12
 }
 
-# V91 - Pullback minimum (en pips)
+# V92 - Pullback minimum (réduit)
 PULLBACK_MIN_PIPS_BY_PAIR = {
-    "EUR_USD": 5.0,
-    "GBP_USD": 6.0,
-    "USD_CAD": 5.0,
-    "AUD_USD": 5.0,
-    "AUD_CAD": 5.0,
-    "XAU_USD": 30.0,
-    "USD_JPY": 8.0,
-    "GBP_JPY": 10.0,
-    "DEFAULT": 5.0
+    "EUR_USD": 3.0,     # 5 → 3
+    "GBP_USD": 4.0,     # 6 → 4
+    "USD_CAD": 3.0,     # 5 → 3
+    "AUD_USD": 3.0,     # 5 → 3
+    "AUD_CAD": 3.0,     # 5 → 3
+    "XAU_USD": 20.0,    # 30 → 20
+    "USD_JPY": 5.0,     # 8 → 5
+    "GBP_JPY": 7.0,     # 10 → 7
+    "DEFAULT": 3.0      # 5 → 3
 }
 
-# V91 - Seuil EQS minimum (sur 100)
-EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "70.0"))
+# V92 - Seuil EQS minimum (abaissé)
+EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "60.0"))  # 70 → 60
 
 # =========================
 # TRACE JOURNAL
@@ -279,9 +279,8 @@ MAX_PIPS_ACCEPTED = {
     "DEFAULT": 10.0
 }
 
-# V91 - Scoring consolidé (moins de bonus, plus de poids sur les critères essentiels)
 SCORING_CONFIG = {
-    "MIN_CONFIDENCE_SCORE": 10,
+    "MIN_CONFIDENCE_SCORE": 9,
     "SIGNAL_WEIGHTS": {
         "BISI": 5,
         "NESTED_FVG": 4,
@@ -305,7 +304,6 @@ SCORING_CONFIG = {
         "TBS_DETECTED": 2,
         "ERL_BONUS": 1,
         "IB_BONUS": 1,
-        # V91 - Bonus consolidés
         "STRUCTURE_OK": 2,
         "PULLBACK_OK": 2,
         "CLOSE_CONFIRMED": 1
@@ -318,7 +316,7 @@ SCORING_CONFIG = {
 }
 
 # =============================
-# STATISTIQUES ENRICHIES V91
+# STATISTIQUES ENRICHIES
 # =============================
 class TradingStats:
     def __init__(self):
@@ -332,7 +330,6 @@ class TradingStats:
             "total_profit": 0.0,
             "total_loss": 0.0,
             "trades": [],
-            # V91 - Métriques enrichies
             "entry_metrics": {
                 "atr_values": [],
                 "adx_values": [],
@@ -394,7 +391,6 @@ class TradingStats:
         if len(stats["trades"]) > 200:
             stats["trades"] = stats["trades"][-200:]
         
-        # V91 - Enrichissement des métriques
         if entry_metrics:
             metrics = stats["entry_metrics"]
             if entry_metrics.get("atr"):
@@ -452,7 +448,6 @@ class TradingStats:
             )
         logger.info("=" * 80)
         
-        # V91 - Log des métriques enrichies
         logger.info("📈 MÉTRIQUES D'ENTRÉE (moyennes par paire)")
         logger.info("-" * 80)
         for pair, stats in self.stats.items():
@@ -1074,8 +1069,8 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
         ("Risk_RR_Distance", "Risk/RR/Distance"),
         ("Secondary", "Secondary"),
         ("Momentum", "Momentum"),
-        ("Structure", "Structure V91"),
-        ("Pullback", "Pullback V91"),
+        ("Structure", "Structure V92"),
+        ("Pullback", "Pullback V92"),
     ]
     logger.debug("===== SCORE DETAIL =====")
     for key, label in labels:
@@ -1379,7 +1374,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# V91 - FILTRES DE QUALITÉ D'ENTRÉE
+# V92 - FILTRES DE QUALITÉ D'ENTRÉE (seuils assouplis)
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
@@ -1464,7 +1459,7 @@ def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
         return 1.0
 
 # ============================================================
-# V91 - ENTRY QUALITY SCORE (EQS)
+# V92 - ENTRY QUALITY SCORE (EQS) avec critères assouplis
 # ============================================================
 
 def calculate_entry_quality_score(
@@ -1476,72 +1471,69 @@ def calculate_entry_quality_score(
     atr: float
 ) -> dict:
     """
-    V91 - Entry Quality Score (EQS) sur 100 points.
-    Évalue la qualité du prix d'entrée indépendamment du setup.
+    V92 - Entry Quality Score (EQS) sur 100 points.
+    Critères légèrement assouplis.
     """
     direction = direction.upper()
     pip_value = get_pip_value_for_pair(pair)
     scores = {}
     total = 0
     
-    # 1. Distance à la zone d'entrée (max 20 points)
-    # Plus l'entrée est proche de la zone, meilleur est le score
+    # 1. Distance à la zone d'entrée (max 20 points) - Assoupli
     entry_zone = abs(entry_level - current_price)
     entry_zone_pips = price_to_pips(entry_zone, pair)
-    if entry_zone_pips <= 2:
+    if entry_zone_pips <= 3:
         scores["distance_zone"] = 20
-    elif entry_zone_pips <= 5:
+    elif entry_zone_pips <= 7:
         scores["distance_zone"] = 15
-    elif entry_zone_pips <= 10:
+    elif entry_zone_pips <= 12:
         scores["distance_zone"] = 10
-    elif entry_zone_pips <= 15:
+    elif entry_zone_pips <= 18:
         scores["distance_zone"] = 5
     else:
         scores["distance_zone"] = 0
     
-    # 2. Proximité de l'EMA20 (max 20 points)
+    # 2. Proximité de l'EMA20 (max 20 points) - Assoupli
     try:
         ema20 = df_m15['close'].ewm(span=20, adjust=False).mean().iloc[-1]
         ema_distance = abs(current_price - ema20)
         ema_distance_pips = price_to_pips(ema_distance, pair)
-        if ema_distance_pips <= 3:
+        if ema_distance_pips <= 4:
             scores["ema_proximity"] = 20
-        elif ema_distance_pips <= 6:
+        elif ema_distance_pips <= 8:
             scores["ema_proximity"] = 15
-        elif ema_distance_pips <= 10:
+        elif ema_distance_pips <= 13:
             scores["ema_proximity"] = 10
-        elif ema_distance_pips <= 15:
+        elif ema_distance_pips <= 20:
             scores["ema_proximity"] = 5
         else:
             scores["ema_proximity"] = 0
     except Exception:
         scores["ema_proximity"] = 10
     
-    # 3. Positionnement par rapport au range récent (max 20 points)
+    # 3. Positionnement par rapport au range récent (max 20 points) - Assoupli
     try:
         recent_high = df_m15['high'].iloc[-10:].max()
         recent_low = df_m15['low'].iloc[-10:].min()
         range_size = recent_high - recent_low
         if range_size > 0:
             if direction == "BUY":
-                # Pour BUY, on veut être proche du bas du range
                 position = (current_price - recent_low) / range_size
-                if position < 0.3:
+                if position < 0.4:
                     scores["range_position"] = 20
-                elif position < 0.5:
+                elif position < 0.6:
                     scores["range_position"] = 15
-                elif position < 0.7:
+                elif position < 0.8:
                     scores["range_position"] = 10
                 else:
                     scores["range_position"] = 5
             else:
-                # Pour SELL, on veut être proche du haut du range
                 position = (recent_high - current_price) / range_size
-                if position < 0.3:
+                if position < 0.4:
                     scores["range_position"] = 20
-                elif position < 0.5:
+                elif position < 0.6:
                     scores["range_position"] = 15
-                elif position < 0.7:
+                elif position < 0.8:
                     scores["range_position"] = 10
                 else:
                     scores["range_position"] = 5
@@ -1550,20 +1542,18 @@ def calculate_entry_quality_score(
     except Exception:
         scores["range_position"] = 10
     
-    # 4. Retracement idéal (max 20 points)
-    # Vérifier si le prix a retracé par rapport à un extremum récent
+    # 4. Retracement (max 20 points) - Assoupli
     pullback_passed, _ = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if pullback_passed:
         scores["pullback_quality"] = 20
     else:
-        # Vérifier si on est en train de retracer
         if len(df_m15) > 5:
             if direction == "BUY":
                 recent_low = df_m15['low'].iloc[-5:].min()
                 pullback_depth = current_price - recent_low
                 if pullback_depth > 0:
                     pullback_pips = price_to_pips(pullback_depth, pair)
-                    if pullback_pips >= 3:
+                    if pullback_pips >= 2:
                         scores["pullback_quality"] = 15
                     else:
                         scores["pullback_quality"] = 10
@@ -1574,7 +1564,7 @@ def calculate_entry_quality_score(
                 pullback_depth = recent_high - current_price
                 if pullback_depth > 0:
                     pullback_pips = price_to_pips(pullback_depth, pair)
-                    if pullback_pips >= 3:
+                    if pullback_pips >= 2:
                         scores["pullback_quality"] = 15
                     else:
                         scores["pullback_quality"] = 10
@@ -1583,33 +1573,32 @@ def calculate_entry_quality_score(
         else:
             scores["pullback_quality"] = 10
     
-    # 5. StochRSI non extrême (max 20 points)
+    # 5. StochRSI non extrême (max 20 points) - Assoupli
     try:
         k, _ = calculate_stoch_rsi(df_m15['close'])
         if direction == "BUY":
-            if 20 <= k <= 70:
+            if 15 <= k <= 75:
                 scores["stoch_position"] = 20
-            elif k < 20:
-                scores["stoch_position"] = 15  # Survente, bon pour BUY
-            elif k < 80:
+            elif k < 15:
+                scores["stoch_position"] = 15
+            elif k < 85:
                 scores["stoch_position"] = 10
             else:
-                scores["stoch_position"] = 0   # Surachat, mauvais pour BUY
+                scores["stoch_position"] = 5
         else:
-            if 30 <= k <= 80:
+            if 25 <= k <= 85:
                 scores["stoch_position"] = 20
-            elif k > 80:
-                scores["stoch_position"] = 15  # Surachat, bon pour SELL
-            elif k > 20:
+            elif k > 85:
+                scores["stoch_position"] = 15
+            elif k > 15:
                 scores["stoch_position"] = 10
             else:
-                scores["stoch_position"] = 0   # Survente, mauvais pour SELL
+                scores["stoch_position"] = 5
     except Exception:
         scores["stoch_position"] = 10
     
     total = sum(scores.values())
     
-    # Détail pour les logs
     details = {
         "distance_zone": scores["distance_zone"],
         "ema_proximity": scores["ema_proximity"],
@@ -1623,7 +1612,7 @@ def calculate_entry_quality_score(
     return details
 
 # ============================================================
-# V91 - FILTRES DE STRUCTURE ET PULLBACK (conservés de V90)
+# V92 - FILTRES DE STRUCTURE ET PULLBACK (seuils assouplis)
 # ============================================================
 
 def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple:
@@ -1644,6 +1633,8 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
         hl = last_lows[-1]['price'] > last_lows[-2]['price']
         if hh and hl:
             return True, "Structure haussière (HH/HL)"
+        elif hh or hl:
+            return True, "Structure partiellement haussière"
         else:
             return False, f"Structure non haussière (HH={hh}, HL={hl})"
     
@@ -1652,6 +1643,8 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
         ll = last_lows[-1]['price'] < last_lows[-2]['price']
         if lh and ll:
             return True, "Structure baissière (LH/LL)"
+        elif lh or ll:
+            return True, "Structure partiellement baissière"
         else:
             return False, f"Structure non baissière (LH={lh}, LL={ll})"
     
@@ -1663,10 +1656,10 @@ def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, curren
     min_pullback_pips = PULLBACK_MIN_PIPS_BY_PAIR.get(pair, PULLBACK_MIN_PIPS_BY_PAIR["DEFAULT"])
     min_pullback_price = min_pullback_pips * pip_value
     
-    if len(df) < 10:
+    if len(df) < 8:
         return False, "Données insuffisantes pour pullback"
     
-    recent = df.iloc[-10:]
+    recent = df.iloc[-8:]
     
     if direction == "BUY":
         recent_high = recent['high'].max()
@@ -1974,7 +1967,6 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     except Exception:
         rr_display = "N/A"
     
-    # V91 - Affichage EQS
     eqs_info = f" | <b>EQS:</b> {eqs_score}/100" if eqs_score else ""
     
     if confidence_score:
@@ -1993,14 +1985,14 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         confluence_tags.append("BOS")
     if score_details.get("Session", "").startswith("+"):
         confluence_tags.append("SESSION")
-    if score_details.get("Structure_V91", "").startswith("+"):
+    if score_details.get("Structure_V92", "").startswith("+"):
         confluence_tags.append("STRUCTURE")
-    if score_details.get("Pullback_V91", "").startswith("+"):
+    if score_details.get("Pullback_V92", "").startswith("+"):
         confluence_tags.append("PULLBACK")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
     
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V91</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V92</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -2108,12 +2100,12 @@ def get_rsi_divergence_bonus(df_h1, df_m15, direction: str) -> tuple:
     return 0, "0 (Pas de divergence RSI)"
 
 def estimate_win_rate(score: int, eqs: int, confluences: dict) -> str:
-    if score >= 14 and eqs >= 80:
-        base = 82
-    elif score >= 12 and eqs >= 70:
-        base = 72
-    elif score >= 10 and eqs >= 60:
-        base = 62
+    if score >= 14 and eqs >= 75:
+        base = 80
+    elif score >= 12 and eqs >= 65:
+        base = 70
+    elif score >= 10 and eqs >= 55:
+        base = 60
     else:
         base = 50
     
@@ -2132,21 +2124,21 @@ def estimate_win_rate(score: int, eqs: int, confluences: dict) -> str:
     if confluences.get("pullback_ok"):
         base += 2
     
-    return f"~{min(base, 94)}%"
+    return f"~{min(base, 92)}%"
 
 def get_signal_quality_label(score: int, eqs: int) -> str:
-    if score >= 16 and eqs >= 80:
+    if score >= 15 and eqs >= 75:
         return "SNIPER"
-    elif score >= 14 and eqs >= 70:
+    elif score >= 13 and eqs >= 65:
         return "A+"
-    elif score >= 12 and eqs >= 60:
+    elif score >= 11 and eqs >= 55:
         return "A"
-    elif score >= 10:
+    elif score >= 9:
         return "B+"
     return "B"
 
 # =============================
-# SYSTÈME DE SCORING V91 (consolidé)
+# SYSTÈME DE SCORING V92 (consolidé avec seuils assouplis)
 # =============================
 def calculate_signal_confidence(
     pair: str,
@@ -2161,7 +2153,6 @@ def calculate_signal_confidence(
     tbs_setup_type: str = "",
     df_d1: pd.DataFrame = None,
 ) -> dict:
-    # V91 - Score components consolidés
     score_components = {
         "ICT": 0,
         "Structure_H1": 0,
@@ -2190,7 +2181,7 @@ def calculate_signal_confidence(
         pair=pair, entry_type=entry_type, fvg_data=fvg_data,
     )
     
-    # === V91 : ENTRY QUALITY SCORE (EQS) ===
+    # === V92 : ENTRY QUALITY SCORE (EQS) ===
     eqs_result = calculate_entry_quality_score(
         pair=pair,
         direction=direction,
@@ -2219,7 +2210,7 @@ def calculate_signal_confidence(
     
     details["EQS"] = f"{eqs_score}/100"
     
-    # === FILTRES BLOQUANTS (conservés de V90) ===
+    # === FILTRES BLOQUANTS ===
     
     # 1. Volatilité minimum
     vol_passed, vol_msg = filter_min_volatility(df_m15, pair)
@@ -2238,7 +2229,7 @@ def calculate_signal_confidence(
         }
     details["Volatility"] = vol_msg
     
-    # 2. Structure de marché
+    # 2. Structure de marché (assouplie)
     struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
     if not struct_passed:
         details["VETO"] = f"❌ STRUCTURE: {struct_msg}"
@@ -2253,8 +2244,13 @@ def calculate_signal_confidence(
             "eqs_score": eqs_score,
             "eqs_details": eqs_result
         }
-    score_components["Structure"] += 2
-    details["Structure_V91"] = f"+2 ({struct_msg})"
+    # Si structure partielle, bonus réduit
+    if "partiellement" in struct_msg:
+        score_components["Structure"] += 1
+        details["Structure_V92"] = f"+1 ({struct_msg})"
+    else:
+        score_components["Structure"] += 2
+        details["Structure_V92"] = f"+2 ({struct_msg})"
     
     # 3. Pullback
     pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
@@ -2272,7 +2268,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result
         }
     score_components["Pullback"] += 2
-    details["Pullback_V91"] = f"+2 ({pullback_msg})"
+    details["Pullback_V92"] = f"+2 ({pullback_msg})"
     
     # 4. Confirmation de clôture
     close_passed, close_msg = filter_close_confirmation(df_m15, direction)
@@ -2419,9 +2415,6 @@ def calculate_signal_confidence(
     
     # Score final
     score = compute_final_score(score_components)
-    
-    # V91 - Le score minimum est maintenant plus élevé, donc on ajuste
-    # Les composants de structure et pullback sont déjà inclus
     passed = score >= min_required
     
     final_confidence = "HIGH" if score >= min_required + 3 else "MEDIUM" if passed else "LOW"
@@ -2432,7 +2425,7 @@ def calculate_signal_confidence(
         "session_active": details.get("Session", "").startswith("+"),
         "macd_confirmed": details.get("MACD_H1", "").startswith("+"),
         "bos_confirmed": "BOS" in str(details),
-        "structure_ok": score_components.get("Structure", 0) >= 2,
+        "structure_ok": score_components.get("Structure", 0) >= 1,
         "pullback_ok": score_components.get("Pullback", 0) >= 2,
     }
     
@@ -2549,14 +2542,13 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # ============================================================
-# V91 - FONCTION PRINCIPALE
+# V92 - FONCTION PRINCIPALE
 # ============================================================
-def advanced_main_v91():
+def advanced_main_v92():
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info("✅ ENTRY QUALITY SCORE (EQS) V91 ACTIVÉ")
-        logger.info(f"✅ Seuil EQS: {EQS_MIN_THRESHOLD}/100")
+        logger.info("✅ ENTRY QUALITY SCORE (EQS) V92 ACTIVÉ - Seuil: 60/100")
         logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
@@ -2668,7 +2660,6 @@ def advanced_main_v91():
                 
                 logger.info(f"📊 TRADE {pair} {direction} {entry_type} @{entry_level:.5f} | Score: {score} | EQS: {eqs}/100 | Qualité: {quality}")
                 
-                # Enrichissement des métriques
                 entry_metrics = {
                     "atr": confidence_result.get("atr_value", 0),
                     "adx": calculate_adx(df_h1),
@@ -2722,7 +2713,7 @@ def advanced_main_v91():
     stats.log_summary()
 
 # ============================================================
-# V89.3 - OANDA EXECUTION + API OFFICIELLE
+# V89.3 - OANDA EXECUTION + API OFFICIELLE (conservée)
 # ============================================================
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
@@ -3054,42 +3045,34 @@ def get_atr_m15_v88(pair: str) -> float:
         return 0.0
 
 # ============================================================
-# V91 - DIAGNOSTIC DE DÉMARRAGE
+# V92 - DIAGNOSTIC DE DÉMARRAGE
 # ============================================================
-def diagnostic_startup_v91():
+def diagnostic_startup_v92():
     """
     Vérifie les composants critiques au démarrage.
     """
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V91")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V92")
     logger.info("=" * 60)
     
-    # 1. Seuil Break Even
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
-    logger.info(f"[DIAG] TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = {TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}")
-    logger.info(f"[DIAG] TRAILING_STOP_MIN_DISTANCE_PIPS = {TRAILING_STOP_MIN_DISTANCE_PIPS}")
-    
-    # 2. V91 - Scores et EQS
-    logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {EQS_MIN_THRESHOLD}")
+    logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
     
-    # 3. Test de l'API TradeCRCDO
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
     except Exception as e:
         logger.error(f"[DIAG] ❌ trades.TradeCRCDO indisponible: {e}")
     
-    # 4. Test de orders.OrderCreate
     try:
         from oandapyV20.endpoints import orders
         logger.info("[DIAG] ✅ orders.OrderCreate disponible")
     except Exception as e:
         logger.error(f"[DIAG] ❌ orders.OrderCreate indisponible: {e}")
     
-    # 5. Test de trades.TradeDetails
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeDetails disponible")
@@ -3102,9 +3085,6 @@ def diagnostic_startup_v91():
 # V89.3 - CONFIRMATION DU TRADE
 # ============================================================
 def get_trade_details_v88(trade_id: str) -> dict:
-    """
-    Récupère les détails d'un trade via trades.TradeDetails.
-    """
     try:
         api = v88_client()
         r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
@@ -3115,12 +3095,10 @@ def get_trade_details_v88(trade_id: str) -> dict:
         return {}
 
 def has_trailing_stop_v88(trade: dict) -> bool:
-    """Vérifie si un trade a un trailing stop actif."""
     trailing_stop = trade.get("trailingStopLossOrder", {})
     return bool(trailing_stop and trailing_stop.get("id"))
 
 def get_stop_loss_v88(trade: dict) -> float:
-    """Récupère le prix du stop loss d'un trade."""
     sl_order = trade.get("stopLossOrder", {})
     return float(sl_order.get("price", 0)) if sl_order else 0.0
 
@@ -3128,10 +3106,6 @@ def get_stop_loss_v88(trade: dict) -> float:
 # V89.3 - MODIFICATION SL VIA TradeCRCDO + CONFIRMATION SERVEUR
 # ============================================================
 def modify_trade_sl_v893(trade_id: str, pair: str, new_sl: float) -> bool:
-    """
-    V89.3 : Modification du Stop Loss via TradeCRCDO.
-    + Confirmation serveur GET /trades/{tradeID}
-    """
     try:
         api = v88_client()
         
@@ -3158,7 +3132,6 @@ def modify_trade_sl_v893(trade_id: str, pair: str, new_sl: float) -> bool:
         
         logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
         
-        # Confirmation serveur
         logger.info(f"[CONFIRM] Vérification du SL pour trade {trade_id}")
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
@@ -3186,10 +3159,6 @@ def modify_trade_sl_v893(trade_id: str, pair: str, new_sl: float) -> bool:
 # V89.3 - CRÉATION DU TRAILING STOP VIA orders.OrderCreate + CONFIRMATION
 # ============================================================
 def create_oanda_trailing_stop_v893(trade_id: str, pair: str, distance: float) -> bool:
-    """
-    V89.3 : Crée un Trailing Stop Loss via orders.OrderCreate.
-    + Confirmation serveur.
-    """
     try:
         api = v88_client()
         
@@ -3218,7 +3187,6 @@ def create_oanda_trailing_stop_v893(trade_id: str, pair: str, distance: float) -
         
         logger.info(f"[TSL] SUCCESS: Trailing stop créé pour trade {trade_id}, distance={distance:.5f}")
         
-        # Confirmation serveur
         logger.info(f"[CONFIRM] Vérification du trailing stop pour trade {trade_id}")
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
@@ -3246,9 +3214,6 @@ def create_oanda_trailing_stop_v893(trade_id: str, pair: str, distance: float) -
 # V89.3 - EXTRACT TRADE ID ROBUSTE
 # ============================================================
 def extract_trade_id_v89(response: dict) -> str | None:
-    """
-    Extrait le tradeID de la réponse OANDA de manière robuste.
-    """
     if not response:
         return None
     
@@ -3282,9 +3247,6 @@ def extract_trade_id_v89(response: dict) -> str | None:
 # V89.3 - RECHERCHE DU TRADEID VIA OPEN TRADES
 # ============================================================
 def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) -> str | None:
-    """
-    Cherche dans les trades ouverts un trade correspondant.
-    """
     pip_value = get_pip_value_for_pair(pair)
     atr = get_atr_m15_v88(pair)
     tolerance = max(5.0 * pip_value, 0.5 * atr, 0.0001)
@@ -3304,12 +3266,11 @@ def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) 
     return None
 
 # ============================================================
-# V91 - CHECK BREAKEVEN (0.6R)
+# V92 - CHECK BREAKEVEN (0.6R)
 # ============================================================
-def check_breakeven_v91():
+def check_breakeven_v92():
     """
-    V91 : Break Even à 0.6R avec modification SL via TradeCRCDO,
-    puis création d'un trailing.
+    V92 : Break Even à 0.6R.
     """
     try:
         open_trades = get_open_trades_v88()
@@ -3361,7 +3322,7 @@ def check_breakeven_v91():
             r = profit / risk
             logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f}")
             
-            if r >= BREAKEVEN_TRIGGER_R:  # V91 - 0.6R
+            if r >= BREAKEVEN_TRIGGER_R:
                 logger.info(f"[BE] 🎯 Condition R>={BREAKEVEN_TRIGGER_R} atteinte pour {trade_id}")
                 
                 if direction == "BUY":
@@ -3402,7 +3363,7 @@ def check_breakeven_v91():
                     else:
                         logger.error(f"[BE] ❌ ÉCHEC modification SL")
     except Exception as e:
-        logger.error(f"Erreur check_breakeven_v91: {e}")
+        logger.error(f"Erreur check_breakeven_v92: {e}")
         logger.error(traceback.format_exc())
 
 # ============================================================
@@ -3410,10 +3371,7 @@ def check_breakeven_v91():
 # ============================================================
 def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop_loss: float,
                              take_profit: float, score: int, entry_type: str) -> str | None:
-    """
-    V89.3 : ouverture d'un Market Order avec SL et TP uniquement.
-    """
-    logger.info(f"[ORDER] V91 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] V92 EXECUTION START {pair} {direction} type={entry_type} score={score}")
 
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
@@ -3455,7 +3413,7 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
 
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V91 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    logger.info(f"[ORDER] SIGNAL V92 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
 
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
@@ -3611,7 +3569,6 @@ def strict_keep_best_per_direction(scored_entries: list) -> list:
             priority += 2
         if entry_type == "WICK_REJECTION":
             priority += 1
-        # V91 - Priorité au score ET à l'EQS
         key_score = (score, eqs, priority)
         if direction not in best or key_score > best[direction]["key_score"]:
             item["key_score"] = key_score
@@ -3683,28 +3640,27 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V91 - BOUCLE PRINCIPALE (DOUBLE BOUCLE)
+# V92 - BOUCLE PRINCIPALE (DOUBLE BOUCLE)
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V91 (Entry Quality Score)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V92 (Seuils assouplis)")
     logger.info("📋 Trace des trades activée dans trade_trace.json")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R)")
-    logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100")
+    logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100 (60)")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("")
-    logger.info("🛡️ FILTRES V91 :")
-    logger.info("   - Volatilité minimum ATR")
-    logger.info("   - Structure de marché (HH/HL ou LH/LL)")
-    logger.info("   - Pullback obligatoire")
+    logger.info("🛡️ FILTRES V92 (SEUILS ASSOUPLIS) :")
+    logger.info("   - Volatilité minimum ATR (réduit de 20-30%)")
+    logger.info("   - Structure de marché (partielle acceptée)")
+    logger.info("   - Pullback obligatoire (réduit à 3 pips pour majeures)")
     logger.info("   - Confirmation par clôture M15")
-    logger.info("   - Entry Quality Score (EQS) sur 5 critères")
-    logger.info("   - Scoring consolidé (moins de bonus)")
-    logger.info("   - Break Even à 0.6R")
+    logger.info("   - Entry Quality Score (EQS) à 60/100")
+    logger.info("   - Scores minimum légèrement baissés")
     logger.info("")
     
-    diagnostic_startup_v91()
+    diagnostic_startup_v92()
     
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
@@ -3722,10 +3678,10 @@ if __name__ == "__main__":
             current_open_count = open_trade_count_v88()
             logger.info(f"[SCAN] Trades ouverts: {current_open_count}/{MAX_TRADES_TOTAL}")
             
-            check_breakeven_v91()  # V91 - 0.6R
+            check_breakeven_v92()
             
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V91")
+                logger.info(f"⏰ Scan des signaux V92")
                 last_signal_scan = now
                 
                 now_dt = datetime.utcnow()
@@ -3734,7 +3690,7 @@ if __name__ == "__main__":
                 elif current_open_count >= MAX_TRADES_TOTAL:
                     logger.info(f"Limite trades atteinte")
                 else:
-                    advanced_main_v91()
+                    advanced_main_v92()
             
             time.sleep(30)
 
