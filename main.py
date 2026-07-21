@@ -65,15 +65,15 @@ VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 
 # V92 - Seuils de volatilité minimum (réduits de 20-30%)
 MIN_ATR_PIPS_BY_PAIR = {
-    "EUR_USD": 12.0,    # 15 → 12
-    "GBP_USD": 14.0,    # 18 → 14
+    "EUR_USD": 10.0,    # 15 → 12
+    "GBP_USD": 12.0,    # 18 → 14
     "USD_CAD": 12.0,    # 15 → 12
-    "AUD_USD": 12.0,    # 15 → 12
+    "AUD_USD": 10.0,    # 15 → 12
     "AUD_CAD": 12.0,    # 15 → 12
     "XAU_USD": 60.0,    # 80 → 60
     "USD_JPY": 15.0,    # 20 → 15
     "GBP_JPY": 20.0,    # 25 → 20
-    "DEFAULT": 12.0     # 15 → 12
+    "DEFAULT": 10.0     # 15 → 12
 }
 
 # V92 - Pullback minimum (réduit)
