@@ -1,10 +1,11 @@
 # ============================================================
-# main(89.5).py - Version V89.5 "Anti-essoufflement assoupli"
+# main(90).py - Version V90 "Qualité d'entrée"
 # 
-# Modifications V89.5 :
-# - Seuils ADX/Momentum/Volume assouplis
-# - Rejets transformés en pénalités de score
-# - Conservation des signaux ICT de haute qualité
+# Modifications V90 :
+# - Filtre de structure de marché (HH/HL ou LH/LL)
+# - Entrée uniquement après un pullback (pas sur impulsion)
+# - Confirmation par clôture de bougie M15
+# - Filtre de volatilité (ATR) pour ignorer les marchés plats
 # ============================================================
 
 import os
@@ -27,7 +28,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V89.5
+# CONFIGURATION V90
 # =========================
 load_dotenv()
 
@@ -51,15 +52,41 @@ MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "DEFAULT": 8
 }
 
-# Seuil de Break Even (V89.5 : 0.8R)
+# Seuil de Break Even (V90 : 0.8R)
 BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))
 TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.6"))
 TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "5.0"))
 
-# V89.5 - Seuils assouplis pour les filtres anti-essoufflement
-ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "20.0"))      # 25 → 20
-MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))  # 0.3 → 0.15
-VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))     # 0.7 → 0.5
+# V90 - Seuils pour les filtres de qualité d'entrée
+ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "20.0"))
+MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
+VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
+
+# V90 - Seuils de volatilité minimum (en pips) pour autoriser un trade
+MIN_ATR_PIPS_BY_PAIR = {
+    "EUR_USD": 15.0,
+    "GBP_USD": 18.0,
+    "USD_CAD": 15.0,
+    "AUD_USD": 15.0,
+    "AUD_CAD": 15.0,
+    "XAU_USD": 80.0,
+    "USD_JPY": 20.0,
+    "GBP_JPY": 25.0,
+    "DEFAULT": 15.0
+}
+
+# V90 - Pullback minimum (en pips) pour confirmer un retracement
+PULLBACK_MIN_PIPS_BY_PAIR = {
+    "EUR_USD": 5.0,
+    "GBP_USD": 6.0,
+    "USD_CAD": 5.0,
+    "AUD_USD": 5.0,
+    "AUD_CAD": 5.0,
+    "XAU_USD": 30.0,
+    "USD_JPY": 8.0,
+    "GBP_JPY": 10.0,
+    "DEFAULT": 5.0
+}
 
 # =========================
 # TRACE JOURNAL
@@ -274,7 +301,10 @@ SCORING_CONFIG = {
         "ERL_BONUS": 1,
         "IB_BONUS": 2,
         "MOMENTUM_OK": 3,
-        "BREAKOUT_OK": 2
+        "BREAKOUT_OK": 2,
+        "STRUCTURE_OK": 2,      # V90
+        "PULLBACK_OK": 2,       # V90
+        "CLOSE_CONFIRMED": 1    # V90
     },
     "PENALTY": {
         "IB_PENALTY": 2,
@@ -996,8 +1026,10 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
         ("Imbalance", "Imbalance"), ("Stochastic", "Stochastic"),
         ("HTF_Alignment", "HTF Alignment"), ("Risk_RR_Distance", "Risk/RR/Distance"),
         ("Secondary", "Secondary"),
-        ("Momentum", "Momentum V89.5"),
-        ("Breakout", "Breakout V89.5"),
+        ("Momentum", "Momentum V90"),
+        ("Breakout", "Breakout V90"),
+        ("Structure", "Structure V90"),
+        ("Pullback", "Pullback V90"),
     ]
     logger.debug("===== SCORE DETAIL =====")
     for key, label in labels:
@@ -1301,13 +1333,12 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# V89.5 - FILTRES ANTI-ESSOUFFLEMENT ASSOUPLIS
+# V90 - FILTRES DE QUALITÉ D'ENTRÉE
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
     """
     Calcule l'ADX (Average Directional Index).
-    ADX > 25 = tendance forte, ADX > 40 = tendance très forte.
     """
     try:
         high = df['high'].values
@@ -1344,13 +1375,11 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
 def detect_breakout_candle(df: pd.DataFrame, lookback: int = 5) -> dict:
     """
     Détecte si la dernière bougie M15 casse franchement un sommet/creux.
-    Retourne {'type': 'BUY'/'SELL', 'level': prix, 'confirmed': bool}
     """
     if len(df) < lookback + 2:
         return {"type": None, "level": None, "confirmed": False}
     
     last = df.iloc[-1]
-    prev = df.iloc[-2]
     
     recent_high = df['high'].iloc[-lookback-1:-1].max()
     recent_low = df['low'].iloc[-lookback-1:-1].min()
@@ -1376,8 +1405,7 @@ def detect_breakout_candle(df: pd.DataFrame, lookback: int = 5) -> dict:
 
 def calculate_momentum(df: pd.DataFrame, period: int = 5) -> float:
     """
-    Calcule le momentum (vitesse du mouvement) basé sur le ROC (Rate of Change).
-    Retourne le ROC en pourcentage.
+    Calcule le momentum (ROC) en pourcentage.
     """
     if len(df) < period + 1:
         return 0.0
@@ -1390,7 +1418,7 @@ def calculate_momentum(df: pd.DataFrame, period: int = 5) -> float:
 
 def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
     """
-    Calcule le momentum du volume pour confirmer l'accélération.
+    Calcule le momentum du volume.
     """
     if len(df) < period + 1 or 'volume' not in df.columns:
         return 1.0
@@ -1400,6 +1428,136 @@ def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
         return (avg_volume / prev_avg_volume) if prev_avg_volume > 0 else 1.0
     except Exception:
         return 1.0
+
+# ============================================================
+# V90 - NOUVEAUX FILTRES DE QUALITÉ D'ENTRÉE
+# ============================================================
+
+def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple:
+    """
+    V90 : Filtre de structure de marché.
+    Pour BUY : vérifie HH/HL (Higher High, Higher Low)
+    Pour SELL : vérifie LH/LL (Lower High, Lower Low)
+    """
+    if len(df) < lookback * 2 + 2:
+        return False, "Données insuffisantes"
+    
+    direction = direction.upper()
+    
+    # Détection des swing points
+    swing_highs, swing_lows = detect_swing_points(df, lookback=3)
+    
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return False, "Pas assez de swing points"
+    
+    # Récupérer les 2 derniers swings de chaque type
+    last_highs = sorted(swing_highs, key=lambda x: x['index'])[-2:]
+    last_lows = sorted(swing_lows, key=lambda x: x['index'])[-2:]
+    
+    if direction == "BUY":
+        # Vérifier Higher High + Higher Low
+        hh = last_highs[-1]['price'] > last_highs[-2]['price']
+        hl = last_lows[-1]['price'] > last_lows[-2]['price']
+        if hh and hl:
+            return True, "Structure haussière (HH/HL)"
+        else:
+            return False, f"Structure non haussière (HH={hh}, HL={hl})"
+    
+    elif direction == "SELL":
+        # Vérifier Lower High + Lower Low
+        lh = last_highs[-1]['price'] < last_highs[-2]['price']
+        ll = last_lows[-1]['price'] < last_lows[-2]['price']
+        if lh and ll:
+            return True, "Structure baissière (LH/LL)"
+        else:
+            return False, f"Structure non baissière (LH={lh}, LL={ll})"
+    
+    return False, f"Direction {direction} invalide"
+
+def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, current_price: float, pair: str) -> tuple:
+    """
+    V90 : Vérifie qu'il y a eu un pullback avant l'entrée.
+    Pour BUY : le prix doit être revenu sous un sommet récent
+    Pour SELL : le prix doit être remonté au-dessus d'un creux récent
+    """
+    direction = direction.upper()
+    pip_value = get_pip_value_for_pair(pair)
+    min_pullback_pips = PULLBACK_MIN_PIPS_BY_PAIR.get(pair, PULLBACK_MIN_PIPS_BY_PAIR["DEFAULT"])
+    min_pullback_price = min_pullback_pips * pip_value
+    
+    if len(df) < 10:
+        return False, "Données insuffisantes pour pullback"
+    
+    # Récupérer les 10 dernières bougies
+    recent = df.iloc[-10:]
+    
+    if direction == "BUY":
+        # Trouver le plus haut des 10 dernières bougies
+        recent_high = recent['high'].max()
+        # Le pullback doit avoir ramené le prix sous ce haut
+        # Et le prix actuel doit être proche de ce haut (retest)
+        pullback_depth = recent_high - current_price
+        if pullback_depth >= min_pullback_price:
+            return True, f"Pullback OK ({price_to_pips(pullback_depth, pair):.1f} pips)"
+        else:
+            return False, f"Pullback insuffisant ({price_to_pips(pullback_depth, pair):.1f} < {min_pullback_pips} pips)"
+    
+    elif direction == "SELL":
+        # Trouver le plus bas des 10 dernières bougies
+        recent_low = recent['low'].min()
+        # Le pullback doit avoir ramené le prix au-dessus de ce bas
+        pullback_depth = current_price - recent_low
+        if pullback_depth >= min_pullback_price:
+            return True, f"Pullback OK ({price_to_pips(pullback_depth, pair):.1f} pips)"
+        else:
+            return False, f"Pullback insuffisant ({price_to_pips(pullback_depth, pair):.1f} < {min_pullback_pips} pips)"
+    
+    return False, f"Direction {direction} invalide"
+
+def filter_min_volatility(df: pd.DataFrame, pair: str) -> tuple:
+    """
+    V90 : Filtre de volatilité minimum.
+    Rejette les marchés trop plats (comme EUR/USD en range).
+    """
+    if len(df) < ATR_PERIOD:
+        return False, "Données insuffisantes pour ATR"
+    
+    atr = calculate_atr(df, period=ATR_PERIOD)
+    atr_pips = price_to_pips(atr, pair)
+    
+    min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
+    
+    if atr_pips < min_atr_pips:
+        return False, f"Volatilité insuffisante (ATR={atr_pips:.1f} pips < {min_atr_pips} pips)"
+    
+    return True, f"Volatilité OK (ATR={atr_pips:.1f} pips)"
+
+def filter_close_confirmation(df: pd.DataFrame, direction: str) -> tuple:
+    """
+    V90 : Vérifie que la dernière bougie M15 est complète (close confirmée).
+    """
+    if len(df) < 2:
+        return False, "Données insuffisantes"
+    
+    last = df.iloc[-1]
+    
+    # Vérifier si c'est une bougie complète (close > open pour BUY, close < open pour SELL)
+    if direction == "BUY":
+        if last['close'] > last['open']:
+            return True, "Bougie M15 confirmée (close > open)"
+        else:
+            return False, "Bougie M15 non confirmée pour BUY (close < open)"
+    elif direction == "SELL":
+        if last['close'] < last['open']:
+            return True, "Bougie M15 confirmée (close < open)"
+        else:
+            return False, "Bougie M15 non confirmée pour SELL (close > open)"
+    
+    return False, f"Direction {direction} invalide"
+
+# ============================================================
+# V89.5 - FILTRE ANTI-ESSOUFFLEMENT (conservé)
+# ============================================================
 
 def filter_momentum_exhaustion(
     pair: str,
@@ -1411,7 +1569,8 @@ def filter_momentum_exhaustion(
     entry_type: str,
 ) -> tuple:
     """
-    V89.5 : Filtre assoupli – retourne (passed, message, penalties, total_penalty)
+    V89.5 : Filtre anti-essoufflement conservé.
+    Retourne (passed, message, penalties, total_penalty)
     """
     direction = direction.upper()
     penalties = {"adx": 0, "momentum": 0, "breakout": 0, "volume": 0}
@@ -1678,9 +1837,15 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         confluence_tags.append("MOMENTUM")
     if score_details.get("Breakout", "").startswith("+"):
         confluence_tags.append("BREAKOUT")
+    if score_details.get("Structure_V90", "").startswith("+"):
+        confluence_tags.append("STRUCTURE")
+    if score_details.get("Pullback_V90", "").startswith("+"):
+        confluence_tags.append("PULLBACK")
+    if score_details.get("Close_Confirm", "").startswith("+"):
+        confluence_tags.append("CLOSE CONFIRM")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V89.5</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V90</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -1788,14 +1953,16 @@ def get_rsi_divergence_bonus(df_h1, df_m15, direction: str) -> tuple:
     return 0, "0 (Pas de divergence RSI)"
 
 def estimate_win_rate(score: int, confluences: dict) -> str:
-    if score >= 16:
-        base = 78
+    if score >= 18:
+        base = 80
+    elif score >= 16:
+        base = 75
     elif score >= 14:
-        base = 72
+        base = 68
     elif score >= 12:
-        base = 65
+        base = 60
     elif score >= 10:
-        base = 58
+        base = 55
     else:
         base = 48
     if confluences.get("d1_aligned"):
@@ -1812,12 +1979,16 @@ def estimate_win_rate(score: int, confluences: dict) -> str:
         base += 5
     if confluences.get("breakout_ok"):
         base += 3
-    return f"~{min(base, 92)}%"
+    if confluences.get("structure_ok"):  # V90
+        base += 3
+    if confluences.get("pullback_ok"):   # V90
+        base += 2
+    return f"~{min(base, 94)}%"
 
 def get_signal_quality_label(score: int) -> str:
-    if score >= 18:
+    if score >= 19:
         return "SNIPER"
-    elif score >= 16:
+    elif score >= 17:
         return "A+"
     elif score >= 14:
         return "A"
@@ -1826,7 +1997,7 @@ def get_signal_quality_label(score: int) -> str:
     return "B"
 
 # =============================
-# SYSTÈME DE SCORING V89.5
+# SYSTÈME DE SCORING V90
 # =============================
 def calculate_signal_confidence(
     pair: str,
@@ -1847,6 +2018,9 @@ def calculate_signal_confidence(
         "HTF_Alignment": 0, "Risk_RR_Distance": 0, "Secondary": 0,
         "Momentum": 0,
         "Breakout": 0,
+        "Structure": 0,      # V90
+        "Pullback": 0,       # V90
+        "Close_Confirm": 0,  # V90
     }
     details: dict = {}
     min_required = MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
@@ -1866,6 +2040,63 @@ def calculate_signal_confidence(
         pair=pair, entry_type=entry_type, fvg_data=fvg_data,
     )
     
+    # === V90 : NOUVEAUX FILTRES DE QUALITÉ D'ENTRÉE ===
+    
+    # 1. Filtre de volatilité minimum
+    vol_passed, vol_msg = filter_min_volatility(df_m15, pair)
+    if not vol_passed:
+        details["VETO"] = f"❌ VOLATILITÉ: {vol_msg}"
+        return {
+            "passed": False,
+            "total_score": -50,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+        }
+    details["Volatility"] = vol_msg
+    
+    # 2. Filtre de structure de marché
+    struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
+    if not struct_passed:
+        details["VETO"] = f"❌ STRUCTURE: {struct_msg}"
+        return {
+            "passed": False,
+            "total_score": -50,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+        }
+    score_components["Structure"] += 2
+    details["Structure_V90"] = f"+2 ({struct_msg})"
+    
+    # 3. Filtre pullback
+    pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
+    if not pullback_passed:
+        details["VETO"] = f"❌ PULLBACK: {pullback_msg}"
+        return {
+            "passed": False,
+            "total_score": -50,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+        }
+    score_components["Pullback"] += 2
+    details["Pullback_V90"] = f"+2 ({pullback_msg})"
+    
+    # 4. Filtre confirmation de clôture
+    close_passed, close_msg = filter_close_confirmation(df_m15, direction)
+    if close_passed:
+        score_components["Close_Confirm"] += 1
+        details["Close_Confirm"] = f"+1 ({close_msg})"
+    else:
+        details["Close_Confirm"] = close_msg
+    
     # === V89.5 : FILTRE ANTI-ESSOUFFLEMENT ASSOUPLI ===
     momentum_passed, momentum_msg, momentum_penalties, penalty_total = filter_momentum_exhaustion(
         pair=pair,
@@ -1877,19 +2108,15 @@ def calculate_signal_confidence(
         entry_type=entry_type
     )
     
-    # On applique les pénalités au score
     score_components["Momentum"] += penalty_total
     details["Momentum"] = f"{penalty_total:+d} ({momentum_msg})"
     
-    # Si les filtres bloquants sont activés (cas extrême), on ajoute une pénalité supplémentaire
     if not momentum_passed:
         score_components["Momentum"] -= 5
-        details["Momentum"] += " | PASSAGE FORCÉ (ADX<15 ou momentum opposé fort)"
+        details["Momentum"] += " | PASSAGE FORCÉ"
     
-    # On conserve l'information pour les logs
     momentum_filter_info = {"passed": momentum_passed, "message": momentum_msg, "penalties": momentum_penalties}
     
-    # Bonus si cassure confirmée (déjà partiellement dans la pénalité, on ajoute un petit bonus)
     breakout = detect_breakout_candle(df_m15, lookback=5)
     if breakout.get("confirmed") and breakout.get("type") == direction:
         score_components["Breakout"] += 2
@@ -2084,6 +2311,8 @@ def calculate_signal_confidence(
         "bos_confirmed": "BOS" in str(details),
         "momentum_ok": score_components.get("Momentum", 0) >= 3,
         "breakout_ok": score_components.get("Breakout", 0) >= 2,
+        "structure_ok": score_components.get("Structure", 0) >= 2,      # V90
+        "pullback_ok": score_components.get("Pullback", 0) >= 2,       # V90
     }
     
     win_rate = estimate_win_rate(score, confluences)
@@ -2098,7 +2327,7 @@ def calculate_signal_confidence(
     }
 
 # ============================================================
-# V89.5 - DÉTECTION BIAS-FIRST
+# V89.4 - DÉTECTION BIAS-FIRST (conservée)
 # ============================================================
 def detect_setups_aligned_with_bias(
     df_m15: pd.DataFrame,
@@ -2187,13 +2416,13 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # ============================================================
-# V89.5 - FONCTION PRINCIPALE AVEC STATS
+# V90 - FONCTION PRINCIPALE
 # ============================================================
-def advanced_main_v895():
+def advanced_main_v90():
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info("✅ FILTRES ANTI-ESSOUFFLEMENT ASSOUPLIS V89.5")
+        logger.info("✅ FILTRES DE QUALITÉ D'ENTRÉE V90 ACTIVÉS")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -2216,7 +2445,9 @@ def advanced_main_v895():
                 adx = calculate_adx(df_h1)
                 momentum = calculate_momentum(df_m15)
                 breakout = detect_breakout_candle(df_m15)
-                logger.debug(f"📊 {pair} | ADX={adx:.1f} | MOM={momentum:.2f}% | Cassure={breakout.get('type', 'NONE')}")
+                atr = calculate_atr(df_m15)
+                atr_pips = price_to_pips(atr, pair)
+                logger.debug(f"📊 {pair} | ADX={adx:.1f} | MOM={momentum:.2f}% | ATR={atr_pips:.1f}pips | Cassure={breakout.get('type', 'NONE')}")
             
             if bias == "NEUTRAL":
                 buy_setups = detect_setups_aligned_with_bias(df_m15, df_h1, "BUY", pair, df_h4)
@@ -2246,11 +2477,10 @@ def advanced_main_v895():
                 )
                 score = confidence_result.get("total_score", 0)
                 
-                # V89.5 : on ne rejette plus à cause du momentum, on utilise juste la pénalité
-                # On logue l'info pour le suivi
-                mf = confidence_result.get("momentum_filter", {})
-                if DEBUG_MODE and mf.get("penalties"):
-                    logger.debug(f"Pénalités {pair} {direction}: {mf.get('penalties')} total={sum(mf.get('penalties', {}).values())}")
+                if DEBUG_MODE:
+                    mf = confidence_result.get("momentum_filter", {})
+                    if mf.get("penalties"):
+                        logger.debug(f"Pénalités {pair} {direction}: {mf.get('penalties')} total={sum(mf.get('penalties', {}).values())}")
                 
                 if score >= min_score:
                     scored_entries.append({"entry": entry, "confidence": confidence_result})
@@ -2334,7 +2564,7 @@ def advanced_main_v895():
     stats.log_summary()
 
 # ============================================================
-# V89.3 - OANDA EXECUTION + API OFFICIELLE
+# V89.3 - OANDA EXECUTION + API OFFICIELLE (conservée)
 # ============================================================
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
@@ -2673,7 +2903,7 @@ def diagnostic_startup_v893():
     Vérifie les composants critiques au démarrage.
     """
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V89.5")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V90")
     logger.info("=" * 60)
     
     # 1. Seuil Break Even
@@ -2681,7 +2911,9 @@ def diagnostic_startup_v893():
     logger.info(f"[DIAG] TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = {TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}")
     logger.info(f"[DIAG] TRAILING_STOP_MIN_DISTANCE_PIPS = {TRAILING_STOP_MIN_DISTANCE_PIPS}")
     
-    # 2. V89.5 - Filtres anti-essoufflement assouplis
+    # 2. V90 - Filtres de qualité d'entrée
+    logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
+    logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {ADX_MIN_THRESHOLD}")
     logger.info(f"[DIAG] MOMENTUM_MIN_PERCENT = {MOMENTUM_MIN_PERCENT}")
     logger.info(f"[DIAG] VOLUME_MOMENTUM_MIN = {VOLUME_MOMENTUM_MIN}")
@@ -2859,12 +3091,10 @@ def create_oanda_trailing_stop_v893(trade_id: str, pair: str, distance: float) -
 def extract_trade_id_v89(response: dict) -> str | None:
     """
     Extrait le tradeID de la réponse OANDA de manière robuste.
-    Gère orderFillTransaction, orderCreateTransaction, etc.
     """
     if not response:
         return None
     
-    # Cas 1 : orderFillTransaction -> tradeOpened
     oft = response.get("orderFillTransaction")
     if oft:
         if "tradeOpened" in oft and oft["tradeOpened"]:
@@ -2880,32 +3110,29 @@ def extract_trade_id_v89(response: dict) -> str | None:
             if opened and opened[0].get("tradeID"):
                 return str(opened[0]["tradeID"])
     
-    # Cas 2 : orderCreateTransaction -> peut contenir un tradeID dans relatedTransactionIDs ?
     oct = response.get("orderCreateTransaction")
     if oct and "relatedTransactionIDs" in oct:
         related = oct.get("relatedTransactionIDs", [])
         if related:
             return str(related[-1])
     
-    # Cas 3 : directement "tradeID" dans la racine ?
     if response.get("tradeID"):
         return str(response["tradeID"])
     
     return None
 
 # ============================================================
-# V89.3 - RECHERCHE DU TRADEID VIA OPEN TRADES (fallback avec tolérance dynamique)
+# V89.3 - RECHERCHE DU TRADEID VIA OPEN TRADES
 # ============================================================
 def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) -> str | None:
     """
-    Cherche dans les trades ouverts un trade correspondant à la paire, direction et prix d'entrée.
-    Tolérance dynamique : max(5 * pip_value, 0.5 * ATR).
+    Cherche dans les trades ouverts un trade correspondant.
     """
     pip_value = get_pip_value_for_pair(pair)
     atr = get_atr_m15_v88(pair)
     tolerance = max(5.0 * pip_value, 0.5 * atr, 0.0001)
     tolerance = round(tolerance, 6)
-    logger.debug(f"[FALLBACK] Tolérance pour {pair}: {tolerance:.6f} (pip={pip_value:.6f}, ATR={atr:.6f})")
+    logger.debug(f"[FALLBACK] Tolérance pour {pair}: {tolerance:.6f}")
     
     open_trades = get_open_trades_v88(log_raw=True)
     for t in open_trades:
@@ -2920,13 +3147,11 @@ def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) 
     return None
 
 # ============================================================
-# V89.3 - CHECK BREAKEVEN (0.8R) AVEC VÉRIFICATION DE TRAILING ET SL DÉJÀ AU BE
+# V89.3 - CHECK BREAKEVEN
 # ============================================================
 def check_breakeven_simple_v893():
     """
-    V89.3 : Break Even à 0.8R avec modification SL via TradeCRCDO,
-    puis création d'un trailing (UNIQUE) avec distance bornée.
-    Vérifie que le trailing n'existe pas déjà et que le SL n'est pas déjà au BE.
+    V89.3 : Break Even à 0.8R.
     """
     try:
         open_trades = get_open_trades_v88()
@@ -2944,7 +3169,6 @@ def check_breakeven_simple_v893():
                 logger.debug(f"[BE] Trade {trade_id} sans SL, ignoré")
                 continue
             
-            # Vérification : est-ce que le SL est déjà au BE ?
             pip = PIP_SIZE_V88.get(pair, get_pip_value_for_pair(pair))
             spread_data = get_price_spread_v88(pair)
             spread = spread_data.get("spread", 0)
@@ -2977,17 +3201,15 @@ def check_breakeven_simple_v893():
                 continue
             
             r = profit / risk
-            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} | Entry={entry:.5f} | SL={current_sl:.5f} | Price={current_price:.5f}")
+            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f}")
             
             if r >= BREAKEVEN_TRIGGER_R:
-                logger.info(f"[BE] 🎯 Condition R>={BREAKEVEN_TRIGGER_R} atteinte pour {trade_id} (R={r:.2f})")
+                logger.info(f"[BE] 🎯 Condition R>={BREAKEVEN_TRIGGER_R} atteinte pour {trade_id}")
                 
                 if direction == "BUY":
                     be_sl = entry + offset
                 else:
                     be_sl = entry - offset
-                
-                logger.info(f"[BE] Nouveau SL calculé: {be_sl:.5f} (offset={offset:.5f})")
                 
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
@@ -3000,7 +3222,7 @@ def check_breakeven_simple_v893():
                         trade_details = get_trade_details_v88(trade_id)
                         
                         if has_trailing_stop_v88(trade_details):
-                            logger.info(f"[TSL] Trade {trade_id} a déjà un trailing, on saute la création")
+                            logger.info(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
                             continue
                         
                         atr = get_atr_m15_v88(pair)
@@ -3011,20 +3233,16 @@ def check_breakeven_simple_v893():
                         distance = max(distance, pip_value * TRAILING_STOP_MIN_DISTANCE_PIPS)
                         distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
                         
-                        logger.info(f"[TSL] Distance calculée: ATR={atr:.5f}, spread={spread:.5f}, pip={pip_value:.5f} -> distance={distance:.5f}")
-                        
                         if distance > 0:
-                            logger.info(f"[TSL] 🚀 Création du trailing stop pour trade {trade_id}")
+                            logger.info(f"[TSL] Création du trailing stop pour trade {trade_id}")
                             if create_oanda_trailing_stop_v893(trade_id, pair, distance):
-                                logger.info(f"[TSL] ✅ Trailing stop créé avec succès pour {trade_id}")
+                                logger.info(f"[TSL] ✅ Trailing stop créé")
                             else:
-                                logger.error(f"[TSL] ❌ ÉCHEC création trailing pour {trade_id}")
+                                logger.error(f"[TSL] ❌ ÉCHEC création trailing")
                         else:
-                            logger.warning(f"[TSL] Distance invalide ({distance}) pour {pair}")
+                            logger.warning(f"[TSL] Distance invalide ({distance})")
                     else:
-                        logger.error(f"[BE] ❌ ÉCHEC modification SL pour {trade_id}")
-                else:
-                    logger.debug(f"[BE] SL déjà meilleur que le BE calculé")
+                        logger.error(f"[BE] ❌ ÉCHEC modification SL")
     except Exception as e:
         logger.error(f"Erreur check_breakeven_simple_v893: {e}")
         logger.error(traceback.format_exc())
@@ -3036,15 +3254,11 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
                              take_profit: float, score: int, entry_type: str) -> str | None:
     """
     V89.3 : ouverture d'un Market Order avec SL et TP uniquement.
-    Le trailing sera créé plus tard, après le Break Even.
     """
-    logger.info(f"[ORDER] V89.5 EXECUTION START {pair} {direction} type={entry_type} score={score}")
-    logger.info(f"[ORDER] EXEC INPUT | pair={pair} direction={direction} entry={round_price_v88(pair, entry_price)} "
-                f"SL={round_price_v88(pair, stop_loss)} TP={round_price_v88(pair, take_profit)}")
-    logger.info(f"[ORDER] PAS DE TRAILING À L'OUVERTURE (création après BE)")
+    logger.info(f"[ORDER] V90 EXECUTION START {pair} {direction} type={entry_type} score={score}")
 
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
-        logger.info(f"{pair}: trade déjà ouvert, aucun nouvel ordre.")
+        logger.info(f"{pair}: trade déjà ouvert")
         return None
 
     if open_trade_count_v88() >= MAX_TRADES_TOTAL:
@@ -3083,13 +3297,7 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
 
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(
-        f"[ORDER] SIGNAL V89.5 {pair} {direction} | "
-        f"entry≈{round_price_v88(pair, entry_price)} SL={round_price_v88(pair, stop_loss)} "
-        f"TP={round_price_v88(pair, take_profit)} RR={rr:.2f} score={score} "
-        f"units={units} type={entry_type}"
-    )
-    logger.info(f"[ORDER] Payload: {json.dumps(order_data)}")
+    logger.info(f"[ORDER] SIGNAL V90 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
 
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
@@ -3118,20 +3326,20 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
         trade_id = extract_trade_id_v89(resp)
         
         if not trade_id:
-            logger.warning(f"[ORDER] tradeID non trouvé dans la réponse, recherche dans les trades ouverts...")
+            logger.warning(f"[ORDER] tradeID non trouvé, recherche...")
             time.sleep(2)
             trade_id = find_trade_by_instrument_v89(pair, entry_price, direction)
             if trade_id:
-                logger.info(f"[ORDER] tradeID retrouvé via openTrades: {trade_id}")
+                logger.info(f"[ORDER] tradeID retrouvé: {trade_id}")
             else:
-                logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair} - impossible de récupérer le tradeID")
+                logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
                 tracer.log_step("new", "ORDER_NO_TRADE_ID", {"response": str(resp)[:500]}, resp)
                 return None
 
         logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
         tracer.log_step(trade_id, "ORDER_CONFIRMED", {"pair": pair, "direction": direction}, resp)
         
-        logger.info(f"[CONFIRM] Trade ouvert sans trailing (sera créé après BE)")
+        logger.info(f"[CONFIRM] Trade ouvert sans trailing")
         return str(trade_id)
 
     except Exception as exc:
@@ -3179,15 +3387,15 @@ def strict_stoch_veto(direction: str, df_h1: pd.DataFrame, df_m15: pd.DataFrame)
         k_m15 = float(k_m15)
         if direction == "BUY":
             if k_h1 >= 80:
-                return True, f"StochRSI H1 surachat {k_h1:.1f} (malus)"
+                return True, f"StochRSI H1 surachat {k_h1:.1f}"
             if k_m15 >= 85:
-                return True, f"StochRSI M15 surachat {k_m15:.1f} (malus)"
+                return True, f"StochRSI M15 surachat {k_m15:.1f}"
             return True, f"StochRSI OK H1={k_h1:.1f} M15={k_m15:.1f}"
         else:
             if k_h1 <= 20:
-                return True, f"StochRSI H1 survendu {k_h1:.1f} (malus)"
+                return True, f"StochRSI H1 survendu {k_h1:.1f}"
             if k_m15 <= 15:
-                return True, f"StochRSI M15 survendu {k_m15:.1f} (malus)"
+                return True, f"StochRSI M15 survendu {k_m15:.1f}"
             return True, f"StochRSI OK H1={k_h1:.1f} M15={k_m15:.1f}"
     except Exception:
         return True, "StochRSI indisponible"
@@ -3195,7 +3403,7 @@ def strict_stoch_veto(direction: str, df_h1: pd.DataFrame, df_m15: pd.DataFrame)
 def strict_trend_veto(direction: str, current_price: float, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> tuple:
     try:
         ema50_h1 = df_h1["close"].ewm(span=50, adjust=False).mean().iloc[-1]
-        return True, f"EMA50 H1 scorée sans veto (prix={current_price:.5f}, EMA50={ema50_h1:.5f})"
+        return True, f"EMA50 H1 scorée sans veto"
     except Exception:
         return True, "EMA50 H1 indisponible"
 
@@ -3223,8 +3431,8 @@ def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tupl
     if is_in_zone:
         return True, f"dans zone distance={distance:.5f}"
     if distance <= max_price_distance:
-        return True, f"distance acceptable={distance:.5f} <= {max_price_distance:.5f} ({max_pips:.1f} pips)"
-    return False, f"vraiment trop loin distance={distance:.5f} > {max_price_distance:.5f} ({max_pips:.1f} pips)"
+        return True, f"distance acceptable={distance:.5f}"
+    return False, f"trop loin distance={distance:.5f}"
 
 def strict_keep_best_per_direction(scored_entries: list) -> list:
     best = {}
@@ -3315,71 +3523,57 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V89.5 - BOUCLE PRINCIPALE (DOUBLE BOUCLE)
+# V90 - BOUCLE PRINCIPALE (DOUBLE BOUCLE)
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V89.5 (Anti-essoufflement assoupli)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V90 (Qualité d'entrée)")
     logger.info("📋 Trace des trades activée dans trade_trace.json")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
-    logger.info("✅ Confirmation serveur après chaque BE et après chaque Trailing")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R")
-    logger.info("✅ Calcul du trailing : max(ATR*1.6, spread*2) plafonné à ATR*3")
-    logger.info("✅ Récupération robuste du tradeID avec fallback sur openTrades (tolérance dynamique)")
-    logger.info("✅ Vérification de l'existence du trailing avant création")
-    logger.info("✅ Vérification que le SL n'est pas déjà au BE avant modification")
-    logger.info("✅ Pas de trailing à l'ouverture – création UNIQUEMENT après BE")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("")
-    logger.info("🛡️ FILTRES ANTI-ESSOUFFLEMENT ASSOUPLIS V89.5 :")
-    logger.info(f"   - Cassure M15 confirmée (clôture franche > 45% du body) → bonus/malus")
-    logger.info(f"   - ADX > {ADX_MIN_THRESHOLD} (tendance active) → bonus, <15 bloquant avec -3")
-    logger.info(f"   - Momentum > {MOMENTUM_MIN_PERCENT}% → bonus, sinon malus selon intensité")
-    logger.info("   - Accélération de la tendance vérifiée (ROC3 vs ROC10) → ajustement")
-    logger.info(f"   - Volume en augmentation (ratio > {VOLUME_MOMENTUM_MIN}) → bonus")
-    logger.info("   - Les rejets stricts sont transformés en pénalités de score")
+    logger.info("🛡️ FILTRES DE QUALITÉ D'ENTRÉE V90 :")
+    logger.info("   - Volatilité minimum ATR (évite les marchés plats)")
+    logger.info("   - Structure de marché (HH/HL pour BUY, LH/LL pour SELL)")
+    logger.info("   - Pullback obligatoire après un extremum récent")
+    logger.info("   - Confirmation par clôture de bougie M15")
+    logger.info("   - Conservé : ADX, Momentum, Volume, Breakout (en pénalités)")
     logger.info("")
     
-    # Diagnostic de démarrage
     diagnostic_startup_v893()
     
     if DEMO_MODE:
-        logger.info("🔬 MODE DEMO ACTIVÉ - Aucun trade réel ne sera envoyé")
+        logger.info("🔬 MODE DEMO ACTIVÉ")
     if DEBUG_MODE:
-        logger.info("🔍 MODE DEBUG ACTIVÉ - Logs détaillés")
+        logger.info("🔍 MODE DEBUG ACTIVÉ")
     
-    # Variables de timing
     last_signal_scan = time.time()
-    SIGNAL_SCAN_INTERVAL = 900  # 15 minutes
+    SIGNAL_SCAN_INTERVAL = 900
     
     while True:
         try:
             now = time.time()
             
-            # === BOUCLE RAPIDE : Surveillance des trades ouverts ===
             clear_scan_cache_v88()
             current_open_count = open_trade_count_v88()
             logger.info(f"[SCAN] Trades ouverts: {current_open_count}/{MAX_TRADES_TOTAL}")
             
-            # BE + Trailing (check rapide)
             check_breakeven_simple_v893()
             
-            # === BOUCLE LENTE : Nouveaux signaux ===
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux (intervalle de {SIGNAL_SCAN_INTERVAL}s) - V89.5")
+                logger.info(f"⏰ Scan des signaux V90")
                 last_signal_scan = now
                 
-                # Vérification des conditions de marché
                 now_dt = datetime.utcnow()
                 if not is_market_open_utc_v88(now_dt):
-                    logger.info("Marché fermé. Scan des signaux reporté.")
+                    logger.info("Marché fermé.")
                 elif current_open_count >= MAX_TRADES_TOTAL:
-                    logger.info(f"Limite trades ouverts atteinte ({current_open_count}/{MAX_TRADES_TOTAL})")
+                    logger.info(f"Limite trades atteinte")
                 else:
-                    advanced_main_v895()
+                    advanced_main_v90()
             
-            # Attente avant le prochain cycle
-            time.sleep(30)  # 30 secondes entre chaque cycle rapide
+            time.sleep(30)
 
         except KeyboardInterrupt:
             logger.info("🛑 Arrêt demandé")
