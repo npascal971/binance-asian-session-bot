@@ -67,7 +67,7 @@ VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 MIN_ATR_PIPS_BY_PAIR = {
     "EUR_USD": 10.0,    # 15 → 12
     "GBP_USD": 12.0,    # 18 → 14
-    "USD_CAD": 12.0,    # 15 → 12
+    "USD_CAD": 10.0,    # 15 → 12
     "AUD_USD": 10.0,    # 15 → 12
     "AUD_CAD": 12.0,    # 15 → 12
     "XAU_USD": 60.0,    # 80 → 60
@@ -78,15 +78,15 @@ MIN_ATR_PIPS_BY_PAIR = {
 
 # V92 - Pullback minimum (réduit)
 PULLBACK_MIN_PIPS_BY_PAIR = {
-    "EUR_USD": 3.0,     # 5 → 3
-    "GBP_USD": 4.0,     # 6 → 4
+    "EUR_USD": 2.0,     # 5 → 3
+    "GBP_USD": 3.0,     # 6 → 4
     "USD_CAD": 3.0,     # 5 → 3
-    "AUD_USD": 3.0,     # 5 → 3
+    "AUD_USD": 2.0,     # 5 → 3
     "AUD_CAD": 3.0,     # 5 → 3
     "XAU_USD": 20.0,    # 30 → 20
     "USD_JPY": 5.0,     # 8 → 5
     "GBP_JPY": 7.0,     # 10 → 7
-    "DEFAULT": 3.0      # 5 → 3
+    "DEFAULT": 2.0      # 5 → 3
 }
 
 # V92 - Seuil EQS minimum (abaissé)
