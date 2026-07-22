@@ -36,6 +36,15 @@ DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 DECISION_JOURNAL = os.getenv("DECISION_JOURNAL", "decision_journal.json")
 TRACE_JOURNAL = os.getenv("TRACE_JOURNAL", "trade_trace.json")
 
+# === V94 - CRÉATION DES FICHIERS JSON SI INEXISTANTS ===
+if not os.path.exists(DECISION_JOURNAL):
+    with open(DECISION_JOURNAL, "w") as f:
+        json.dump({"stats": {}, "last_update": None}, f)
+
+if not os.path.exists(TRACE_JOURNAL):
+    with open(TRACE_JOURNAL, "w") as f:
+        json.dump({"traces": [], "last_update": None}, f)
+
 # V94 - Scores minimum (conservés de V93)
 MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "EUR_USD": 10,
