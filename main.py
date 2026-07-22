@@ -243,7 +243,7 @@ PAIR_SETTINGS = {
         "required_confluence": "STRICT"
     },
     "DEFAULT": {
-        "atr_multiplier_sl": 1.5,
+        "atr_multiplier_sl": 1.2,
         "atr_multiplier_tp": 3.0,
         "max_volatility_ratio": 0.02,
         "risk_multiplier": 1.0
