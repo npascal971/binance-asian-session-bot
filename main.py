@@ -1,11 +1,10 @@
 # ============================================================
-# main(93).py - Version V93 "Diagnostic détaillé"
+# main(94).py - Version V94 "Audit ATR"
 # 
-# Modifications V93 :
-# - Seuils ATR ajustés (EUR=10, AUD=10, GBP=12)
-# - Pullback réduit (EUR=2, AUD=2, GBP=3)
-# - Scores minimum ajustés (EUR=10, GBP=9, AUD=8, XAU=9)
-# - Logs détaillés pour chaque rejet (valeur réelle vs seuil)
+# Modifications V94 :
+# - Audit détaillé du calcul ATR (valeur brute, conversion, pips)
+# - Logs de diagnostic ATR pour chaque paire
+# - Seuils ATR provisoirement conservés (en attente de validation)
 # ============================================================
 
 import os
@@ -28,7 +27,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V93
+# CONFIGURATION V94
 # =========================
 load_dotenv()
 
@@ -37,14 +36,14 @@ DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 DECISION_JOURNAL = os.getenv("DECISION_JOURNAL", "decision_journal.json")
 TRACE_JOURNAL = os.getenv("TRACE_JOURNAL", "trade_trace.json")
 
-# V93 - Scores minimum ajustés
+# V94 - Scores minimum (conservés de V93)
 MIN_CONFIDENCE_SCORE_BY_PAIR = {
-    "EUR_USD": 10,      # 11 → 10
-    "GBP_USD": 9,       # 10 → 9
-    "USD_CAD": 8,       # 9 → 8
-    "AUD_USD": 8,       # 9 → 8
-    "AUD_CAD": 8,       # 9 → 8
-    "XAU_USD": 9,       # 10 → 9
+    "EUR_USD": 10,
+    "GBP_USD": 9,
+    "USD_CAD": 8,
+    "AUD_USD": 8,
+    "AUD_CAD": 8,
+    "XAU_USD": 9,
     "DEFAULT": 8
 }
 
@@ -56,7 +55,7 @@ ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "20.0"))
 MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
 VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 
-# V93 - Seuils de volatilité minimum (ajustés)
+# V94 - Seuils ATR provisoirement conservés (en attente de l'audit)
 MIN_ATR_PIPS_BY_PAIR = {
     "EUR_USD": 10.0,
     "GBP_USD": 12.0,
@@ -69,20 +68,18 @@ MIN_ATR_PIPS_BY_PAIR = {
     "DEFAULT": 10.0
 }
 
-# V93 - Pullback minimum (réduit)
 PULLBACK_MIN_PIPS_BY_PAIR = {
-    "EUR_USD": 2.0,     # 3 → 2
-    "GBP_USD": 3.0,     # 4 → 3
-    "USD_CAD": 3.0,     # conservé
-    "AUD_USD": 2.0,     # 3 → 2
-    "AUD_CAD": 3.0,     # conservé
-    "XAU_USD": 15.0,    # 20 → 15
-    "USD_JPY": 4.0,     # 5 → 4
-    "GBP_JPY": 6.0,     # 7 → 6
-    "DEFAULT": 2.0      # 3 → 2
+    "EUR_USD": 2.0,
+    "GBP_USD": 3.0,
+    "USD_CAD": 3.0,
+    "AUD_USD": 2.0,
+    "AUD_CAD": 3.0,
+    "XAU_USD": 15.0,
+    "USD_JPY": 4.0,
+    "GBP_JPY": 6.0,
+    "DEFAULT": 2.0
 }
 
-# V93 - Seuil EQS minimum (conservé à 60)
 EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "60.0"))
 
 # =========================
@@ -1062,8 +1059,8 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
         ("Risk_RR_Distance", "Risk/RR/Distance"),
         ("Secondary", "Secondary"),
         ("Momentum", "Momentum"),
-        ("Structure", "Structure V93"),
-        ("Pullback", "Pullback V93"),
+        ("Structure", "Structure V94"),
+        ("Pullback", "Pullback V94"),
     ]
     logger.debug("===== SCORE DETAIL =====")
     for key, label in labels:
@@ -1367,7 +1364,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# V93 - FILTRES DE QUALITÉ D'ENTRÉE (avec logs détaillés)
+# V94 - FILTRES AVEC AUDIT ATR
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
@@ -1452,7 +1449,7 @@ def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
         return 1.0
 
 # ============================================================
-# V93 - ENTRY QUALITY SCORE (EQS) avec logs
+# V94 - ENTRY QUALITY SCORE AVEC AUDIT ATR
 # ============================================================
 
 def calculate_entry_quality_score(
@@ -1463,10 +1460,6 @@ def calculate_entry_quality_score(
     current_price: float,
     atr: float
 ) -> dict:
-    """
-    V93 - Entry Quality Score (EQS) sur 100 points.
-    Log détaillé pour chaque sous‑critère.
-    """
     direction = direction.upper()
     pip_value = get_pip_value_for_pair(pair)
     scores = {}
@@ -1645,7 +1638,7 @@ def calculate_entry_quality_score(
     return details
 
 # ============================================================
-# V93 - FILTRES DE STRUCTURE ET PULLBACK (avec logs détaillés)
+# V94 - FILTRES STRUCTURE / PULLBACK AVEC AUDIT ATR
 # ============================================================
 
 def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple:
@@ -1715,18 +1708,27 @@ def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, curren
     return False, f"Direction {direction} invalide"
 
 def filter_min_volatility(df: pd.DataFrame, pair: str) -> tuple:
+    """
+    V94 : Audit ATR détaillé.
+    Affiche la valeur brute, la conversion en pips, et la comparaison.
+    """
     if len(df) < ATR_PERIOD:
         return False, "Données insuffisantes pour ATR"
     
-    atr = calculate_atr(df, period=ATR_PERIOD)
-    atr_pips = price_to_pips(atr, pair)
+    # Calcul de l'ATR en prix
+    atr_price = calculate_atr(df, period=ATR_PERIOD)
+    # Conversion en pips
+    atr_pips = price_to_pips(atr_price, pair)
     
     min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
     
-    if atr_pips < min_atr_pips:
-        return False, f"ATR = {atr_pips:.1f} pips < seuil {min_atr_pips} pips"
+    # Log d'audit détaillé
+    logger.info(f"[ATR_AUDIT] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
     
-    return True, f"ATR = {atr_pips:.1f} pips >= seuil {min_atr_pips} pips"
+    if atr_pips < min_atr_pips:
+        return False, f"ATR = {atr_pips:.1f} pips < seuil {min_atr_pips} pips (brut: {atr_price:.6f})"
+    
+    return True, f"ATR = {atr_pips:.1f} pips >= seuil {min_atr_pips} pips (brut: {atr_price:.6f})"
 
 def filter_close_confirmation(df: pd.DataFrame, direction: str) -> tuple:
     if len(df) < 2:
@@ -2020,14 +2022,14 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         confluence_tags.append("BOS")
     if score_details.get("Session", "").startswith("+"):
         confluence_tags.append("SESSION")
-    if score_details.get("Structure_V93", "").startswith("+"):
+    if score_details.get("Structure_V94", "").startswith("+"):
         confluence_tags.append("STRUCTURE")
-    if score_details.get("Pullback_V93", "").startswith("+"):
+    if score_details.get("Pullback_V94", "").startswith("+"):
         confluence_tags.append("PULLBACK")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
     
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V93</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V94</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -2173,7 +2175,7 @@ def get_signal_quality_label(score: int, eqs: int) -> str:
     return "B"
 
 # =============================
-# SYSTÈME DE SCORING V93 (avec logs détaillés)
+# SYSTÈME DE SCORING V94
 # =============================
 def calculate_signal_confidence(
     pair: str,
@@ -2199,7 +2201,7 @@ def calculate_signal_confidence(
         "Pullback": 0,
     }
     details: dict = {}
-    rejection_logs = []  # pour tracer les rejets
+    rejection_logs = []
     min_required = MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
     direction = (direction or "").upper()
     entry_level = entry.get("entry_level")
@@ -2217,7 +2219,7 @@ def calculate_signal_confidence(
         pair=pair, entry_type=entry_type, fvg_data=fvg_data,
     )
     
-    # === V93 : ENTRY QUALITY SCORE (EQS) ===
+    # === V94 : ENTRY QUALITY SCORE (EQS) ===
     eqs_result = calculate_entry_quality_score(
         pair=pair,
         direction=direction,
@@ -2251,7 +2253,7 @@ def calculate_signal_confidence(
     
     # === FILTRES BLOQUANTS ===
     
-    # 1. Volatilité minimum
+    # 1. Volatilité minimum (avec audit ATR)
     vol_passed, vol_msg = filter_min_volatility(df_m15, pair)
     if not vol_passed:
         rejection_logs.append(vol_msg)
@@ -2287,13 +2289,12 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "rejection_logs": rejection_logs
         }
-    # Si structure partielle, bonus réduit
     if "partiellement" in struct_msg:
         score_components["Structure"] += 1
-        details["Structure_V93"] = f"+1 ({struct_msg})"
+        details["Structure_V94"] = f"+1 ({struct_msg})"
     else:
         score_components["Structure"] += 2
-        details["Structure_V93"] = f"+2 ({struct_msg})"
+        details["Structure_V94"] = f"+2 ({struct_msg})"
     
     # 3. Pullback
     pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
@@ -2313,7 +2314,7 @@ def calculate_signal_confidence(
             "rejection_logs": rejection_logs
         }
     score_components["Pullback"] += 2
-    details["Pullback_V93"] = f"+2 ({pullback_msg})"
+    details["Pullback_V94"] = f"+2 ({pullback_msg})"
     
     # 4. Confirmation de clôture
     close_passed, close_msg = filter_close_confirmation(df_m15, direction)
@@ -2484,7 +2485,6 @@ def calculate_signal_confidence(
     
     log_score_detail(score_components, score, "PASSED" if passed else "REJECTED")
     
-    # Log détaillé des rejets
     if rejection_logs and not passed:
         logger.info(f"[REJECT] {pair} {direction}: " + " | ".join(rejection_logs))
     
@@ -2597,15 +2597,15 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # ============================================================
-# V93 - FONCTION PRINCIPALE
+# V94 - FONCTION PRINCIPALE AVEC DIAGNOSTIC ATR
 # ============================================================
-def advanced_main_v93():
+def advanced_main_v94():
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info("✅ ENTRY QUALITY SCORE (EQS) V93 - Seuil: 60/100")
+        logger.info("✅ ENTRY QUALITY SCORE (EQS) V94 - Seuil: 60/100")
         logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R")
-        logger.info("✅ LOGS DÉTAILLÉS des rejets activés")
+        logger.info("✅ AUDIT ATR ACTIVÉ (valeur brute + conversion en pips)")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -2619,6 +2619,13 @@ def advanced_main_v93():
             if any(df.empty for df in [df_h4, df_h1, df_m15]):
                 logger.warning(f"⚠️ Données manquantes pour {pair}, analyse ignorée")
                 continue
+            
+            # === DIAGNOSTIC ATR ===
+            atr_price = calculate_atr(df_m15, period=ATR_PERIOD)
+            atr_pips = price_to_pips(atr_price, pair)
+            min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
+            logger.info(f"[ATR_DIAG] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
+            
             current_price = float(df_m15["close"].iloc[-1])
             bias_analysis = determine_advanced_bias(df_h4)
             bias = bias_analysis.get("bias", "NEUTRAL")
@@ -2627,9 +2634,7 @@ def advanced_main_v93():
             if DEBUG_MODE:
                 adx = calculate_adx(df_h1)
                 momentum = calculate_momentum(df_m15)
-                atr = calculate_atr(df_m15)
-                atr_pips = price_to_pips(atr, pair)
-                logger.debug(f"📊 {pair} | ADX={adx:.1f} | MOM={momentum:.2f}% | ATR={atr_pips:.1f}pips")
+                logger.debug(f"📊 {pair} | ADX={adx:.1f} | MOM={momentum:.2f}% | ATR_pips={atr_pips:.1f}")
             
             if bias == "NEUTRAL":
                 buy_setups = detect_setups_aligned_with_bias(df_m15, df_h1, "BUY", pair, df_h4)
@@ -2643,7 +2648,7 @@ def advanced_main_v93():
             
             scored_entries = []
             rejected_reasons = defaultdict(int)
-            rejected_details = []  # pour stocker les logs détaillés
+            rejected_details = []
             
             for entry in setups:
                 direction = entry.get("direction", "").upper()
@@ -2673,13 +2678,11 @@ def advanced_main_v93():
                 else:
                     reason = confidence_result.get("details", {}).get("VETO", f"score_{score}")
                     rejected_reasons[reason[:30]] += 1
-                    # Stocker les logs détaillés
                     rejection_logs = confidence_result.get("rejection_logs", [])
                     if rejection_logs:
                         rejected_details.append(f"{pair} {direction}: " + " | ".join(rejection_logs))
                     stats.record_signal(pair, False, reason, entry_level, 0, 0, score, direction)
             
-            # Afficher les logs détaillés des rejets (max 5 par paire pour ne pas spammer)
             if rejected_details:
                 logger.info(f"[REJECT_DETAILS] {pair} - {len(rejected_details)} rejets détaillés")
                 for detail in rejected_details[:5]:
@@ -3114,11 +3117,11 @@ def get_atr_m15_v88(pair: str) -> float:
         return 0.0
 
 # ============================================================
-# V93 - DIAGNOSTIC DE DÉMARRAGE
+# V94 - DIAGNOSTIC DE DÉMARRAGE
 # ============================================================
-def diagnostic_startup_v93():
+def diagnostic_startup_v94():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V93")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V94")
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {EQS_MIN_THRESHOLD}")
@@ -3286,7 +3289,7 @@ def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) 
             return str(t.get("id"))
     return None
 
-def check_breakeven_v93():
+def check_breakeven_v94():
     try:
         open_trades = get_open_trades_v88()
         logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil: {BREAKEVEN_TRIGGER_R}R)")
@@ -3362,12 +3365,12 @@ def check_breakeven_v93():
                     else:
                         logger.error(f"[BE] ❌ ÉCHEC modification SL")
     except Exception as e:
-        logger.error(f"Erreur check_breakeven_v93: {e}")
+        logger.error(f"Erreur check_breakeven_v94: {e}")
         logger.error(traceback.format_exc())
 
 def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop_loss: float,
                              take_profit: float, score: int, entry_type: str) -> str | None:
-    logger.info(f"[ORDER] V93 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] V94 EXECUTION START {pair} {direction} type={entry_type} score={score}")
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
         return None
@@ -3401,7 +3404,7 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
     }
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V93 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    logger.info(f"[ORDER] SIGNAL V94 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
         return "SIMULATION"
@@ -3619,10 +3622,10 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V93 - BOUCLE PRINCIPALE
+# V94 - BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V93 (Diagnostic détaillé)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V94 (Audit ATR)")
     logger.info("📋 Trace des trades activée dans trade_trace.json")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
@@ -3630,17 +3633,17 @@ if __name__ == "__main__":
     logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100 (60)")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("")
-    logger.info("🛡️ FILTRES V93 :")
-    logger.info("   - Volatilité minimum ATR (EUR=10, AUD=10, GBP=12)")
+    logger.info("🛡️ FILTRES V94 :")
+    logger.info("   - Volatilité minimum ATR (seuils conservés, audit actif)")
     logger.info("   - Structure de marché (partielle acceptée)")
     logger.info("   - Pullback obligatoire (EUR=2, AUD=2, GBP=3)")
     logger.info("   - Confirmation par clôture M15")
     logger.info("   - Entry Quality Score (EQS) à 60/100")
     logger.info("   - Scores minimum ajustés (EUR=10, GBP=9, AUD=8, XAU=9)")
-    logger.info("   - LOGS DÉTAILLÉS des rejets (ATR, pullback, EQS, score)")
+    logger.info("   - AUDIT ATR : affiche valeur brute, pips, seuil, écart")
     logger.info("")
     
-    diagnostic_startup_v93()
+    diagnostic_startup_v94()
     
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
@@ -3658,10 +3661,10 @@ if __name__ == "__main__":
             current_open_count = open_trade_count_v88()
             logger.info(f"[SCAN] Trades ouverts: {current_open_count}/{MAX_TRADES_TOTAL}")
             
-            check_breakeven_v93()
+            check_breakeven_v94()
             
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V93")
+                logger.info(f"⏰ Scan des signaux V94")
                 last_signal_scan = now
                 
                 now_dt = datetime.utcnow()
@@ -3670,7 +3673,7 @@ if __name__ == "__main__":
                 elif current_open_count >= MAX_TRADES_TOTAL:
                     logger.info(f"Limite trades atteinte")
                 else:
-                    advanced_main_v93()
+                    advanced_main_v94()
             
             time.sleep(30)
 
