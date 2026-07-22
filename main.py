@@ -57,15 +57,15 @@ VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 
 # V94 - Seuils ATR provisoirement conservés (en attente de l'audit)
 MIN_ATR_PIPS_BY_PAIR = {
-    "EUR_USD": 10.0,
-    "GBP_USD": 12.0,
-    "USD_CAD": 12.0,
-    "AUD_USD": 10.0,
-    "AUD_CAD": 12.0,
+    "EUR_USD": 2.5,
+    "GBP_USD": 4.0,
+    "USD_CAD": 3.5,
+    "AUD_USD": 2.5,
+    "AUD_CAD": 3.5,
     "XAU_USD": 60.0,
-    "USD_JPY": 15.0,
-    "GBP_JPY": 20.0,
-    "DEFAULT": 10.0
+    "USD_JPY": 3.0,
+    "GBP_JPY": 3.0,
+    "DEFAULT": 3.0
 }
 
 PULLBACK_MIN_PIPS_BY_PAIR = {
