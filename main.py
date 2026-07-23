@@ -1,11 +1,11 @@
 # ============================================================
-# main(95).py - Version V95 "Logs Décision"
+# main(96).py - Version V96 "Suivi des résultats"
 # 
-# Modifications V95 :
-# - Suppression des fichiers JSON (decision_journal.json, trade_trace.json)
-# - Ajout des logs [DECISION] structurés pour chaque signal
-# - Une ligne par décision, facile à parser dans Railway
-# - Toutes les métriques clés : Score, EQS, ATR, ADX, RSI, RR, ACTION
+# Modifications V96 :
+# - Suivi des trades fermés via l'API Transactions OANDA
+# - Mise à jour des statistiques réelles (Win Rate, PF, espérance)
+# - Logs [CLOSE] pour chaque clôture
+# - Stats par setup et par tranche d'EQS (préparation)
 # ============================================================
 
 import os
@@ -28,16 +28,15 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V95
+# CONFIGURATION V96
 # =========================
 load_dotenv()
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 
-# V95 - Plus de fichiers JSON, tout est dans les logs !
+# V96 - Plus de fichiers JSON, tout est dans les logs !
 
-# V95 - Scores minimum ajustés
 MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "EUR_USD": 10,
     "GBP_USD": 9,
@@ -56,7 +55,6 @@ ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "20.0"))
 MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
 VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 
-# V95 - Seuils ATR ajustés selon les mesures réelles
 MIN_ATR_PIPS_BY_PAIR = {
     "EUR_USD": 2.5,
     "GBP_USD": 4.0,
@@ -82,10 +80,6 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
 }
 
 EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "60.0"))
-
-# =========================
-# TRACE JOURNAL - Supprimé, remplacé par les logs
-# =========================
 
 # =========================
 # LOG HELPERS
@@ -264,7 +258,7 @@ SCORING_CONFIG = {
 }
 
 # =============================
-# STATISTIQUES - Version simplifiée (logs uniquement)
+# STATISTIQUES ENRICHIES AVEC SUIVI DES CLÔTURES
 # =============================
 class TradingStats:
     def __init__(self):
@@ -277,8 +271,39 @@ class TradingStats:
             "breakevens": 0,
             "total_profit": 0.0,
             "total_loss": 0.0,
-            "trades": []
+            "trades": [],
+            "entry_metrics": {
+                "atr_values": [],
+                "adx_values": [],
+                "rsi_values": [],
+                "eqs_values": [],
+                "hours": [],
+                "weekdays": [],
+                "setup_types": []
+            },
+            # V96 - Détails par setup et par tranche d'EQS
+            "by_setup": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0}),
+            "by_eqs_range": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0})
         })
+        # V96 - Pour le suivi des trades fermés
+        self.last_transaction_id = None
+        self._load_last_id()
+    
+    def _load_last_id(self):
+        """Charge le dernier transaction ID depuis un fichier (persistance simple)"""
+        try:
+            if os.path.exists("last_transaction_id.txt"):
+                with open("last_transaction_id.txt", "r") as f:
+                    self.last_transaction_id = f.read().strip()
+        except:
+            pass
+    
+    def _save_last_id(self):
+        try:
+            with open("last_transaction_id.txt", "w") as f:
+                f.write(str(self.last_transaction_id))
+        except:
+            pass
     
     def record_signal(self, pair: str, accepted: bool, reason: str = "", 
                       entry: float = 0, sl: float = 0, tp: float = 0,
@@ -290,6 +315,60 @@ class TradingStats:
             stats["accepted"] += 1
         else:
             stats["rejected"] += 1
+        
+        # On enregistre le trade ouvert pour suivi ultérieur
+        if accepted:
+            trade_record = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "pair": pair,
+                "direction": direction,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "score": score,
+                "eqs": entry_metrics.get("eqs", 0) if entry_metrics else 0,
+                "setup_type": entry_metrics.get("setup_type", "UNKNOWN") if entry_metrics else "UNKNOWN",
+                "result": None
+            }
+            stats["trades"].append(trade_record)
+    
+    def record_close(self, trade_id: str, pair: str, setup_type: str, eqs: int, r: float, profit_loss: float):
+        """Appelé quand un trade est fermé"""
+        stats = self.stats[pair]
+        if r > 0.02:
+            stats["wins"] += 1
+            stats["total_profit"] += profit_loss
+            result = "WIN"
+        elif r < -0.02:
+            stats["losses"] += 1
+            stats["total_loss"] += abs(profit_loss)
+            result = "LOSS"
+        else:
+            stats["breakevens"] += 1
+            result = "BREAKEVEN"
+        
+        # Mise à jour par setup
+        setup_stats = stats["by_setup"][setup_type]
+        setup_stats["wins"] += 1 if result == "WIN" else 0
+        setup_stats["losses"] += 1 if result == "LOSS" else 0
+        setup_stats["total_r"] += r
+        
+        # Mise à jour par tranche d'EQS
+        if eqs < 65:
+            eqs_range = "60-64"
+        elif eqs < 70:
+            eqs_range = "65-69"
+        elif eqs < 80:
+            eqs_range = "70-79"
+        else:
+            eqs_range = "80+"
+        eqs_stats = stats["by_eqs_range"][eqs_range]
+        eqs_stats["wins"] += 1 if result == "WIN" else 0
+        eqs_stats["losses"] += 1 if result == "LOSS" else 0
+        eqs_stats["total_r"] += r
+        
+        # Log de clôture
+        logger.info(f"[CLOSE] {pair} | {setup_type} | {result} | R={r:.2f} | P&L={profit_loss:+.2f} | EQS={eqs}")
     
     def get_summary(self, pair: str) -> dict:
         stats = self.stats.get(pair, {})
@@ -299,9 +378,11 @@ class TradingStats:
         wins = stats.get("wins", 0)
         losses = stats.get("losses", 0)
         breakevens = stats.get("breakevens", 0)
+        total_profit = stats.get("total_profit", 0.0)
+        total_loss = stats.get("total_loss", 0.0)
         win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0
-        profit_factor = stats.get("total_profit", 0) / stats.get("total_loss", 1) if stats.get("total_loss", 0) > 0 else 0
-        expectancy = (stats.get("total_profit", 0) - stats.get("total_loss", 0)) / total if total > 0 else 0
+        profit_factor = total_profit / total_loss if total_loss > 0 else 0
+        expectancy = (total_profit - total_loss) / total if total > 0 else 0
         return {
             "pair": pair,
             "total_signals": total,
@@ -328,11 +409,109 @@ class TradingStats:
                 f"{summary['win_rate']:>9} | {summary['profit_factor']:>6} | {summary['expectancy']:>10}"
             )
         logger.info("=" * 80)
+        
+        # V96 - Détails par setup et EQS
+        logger.info("📈 PERFORMANCE PAR SETUP")
+        logger.info("-" * 80)
+        for pair, stats in self.stats.items():
+            setup_stats = stats.get("by_setup", {})
+            for setup, data in setup_stats.items():
+                total = data["wins"] + data["losses"]
+                if total > 0:
+                    win_rate = data["wins"] / total
+                    avg_r = data["total_r"] / total
+                    logger.info(f"{pair:10} | {setup:20} | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
+        
+        logger.info("=" * 80)
+        logger.info("📈 PERFORMANCE PAR TRANCHE EQS")
+        logger.info("-" * 80)
+        for pair, stats in self.stats.items():
+            eqs_stats = stats.get("by_eqs_range", {})
+            for range_label, data in eqs_stats.items():
+                total = data["wins"] + data["losses"]
+                if total > 0:
+                    win_rate = data["wins"] / total
+                    avg_r = data["total_r"] / total
+                    logger.info(f"{pair:10} | EQS {range_label:6} | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
+        logger.info("=" * 80)
 
 stats = TradingStats()
 
 # =============================
-# FONCTIONS UTILITAIRES
+# SUIVI DES CLÔTURES VIA TRANSACTIONS
+# =============================
+def check_closed_trades():
+    """Interroge l'API Transactions pour détecter les trades fermés et met à jour les stats"""
+    global stats
+    try:
+        api = v88_client()
+        params = {"from": stats.last_transaction_id} if stats.last_transaction_id else {"count": 100}
+        r = transactions.Transactions(accountID=OANDA_ACCOUNT_ID, params=params)
+        resp = api.request(r)
+        transactions_list = resp.get("transactions", [])
+        if not transactions_list:
+            return
+        
+        # Mettre à jour le dernier ID
+        if stats.last_transaction_id is None:
+            # On prend l'ID du premier élément (le plus récent si on a demandé les derniers)
+            # Ou on peut prendre le dernier de la liste pour la prochaine fois
+            stats.last_transaction_id = transactions_list[-1].get("id")
+        else:
+            # On prend le dernier ID de la liste reçue (le plus récent)
+            stats.last_transaction_id = transactions_list[-1].get("id")
+        stats._save_last_id()
+        
+        # Filtrer les transactions pertinentes : ORDER_FILL pour les closes de trades
+        for tx in transactions_list:
+            if tx.get("type") == "ORDER_FILL" and tx.get("orderType") == "MARKET":
+                # Une clôture de trade peut être détectée par une réduction de position
+                # On cherche les trades réduits ou fermés
+                if "tradeReduced" in tx:
+                    trade = tx["tradeReduced"]
+                    trade_id = trade.get("tradeID")
+                    pair = tx.get("instrument")
+                    # On récupère le profit/perte
+                    pl = float(trade.get("realizedPL", 0.0))
+                    # Calcul du R (on a besoin du risque initial)
+                    # On va chercher dans les trades enregistrés le SL initial pour calculer R
+                    # Pour simplifier, on estime R à partir du prix d'entrée et du SL si on les a stockés
+                    # Sinon, on va stocker les détails du trade à l'ouverture
+                    # On utilise un dictionnaire global `open_trade_details` mis à jour lors de l'ouverture
+                    trade_info = open_trade_details.get(trade_id)
+                    if trade_info:
+                        entry = trade_info["entry"]
+                        sl = trade_info["sl"]
+                        direction = trade_info["direction"]
+                        setup_type = trade_info.get("setup_type", "UNKNOWN")
+                        eqs = trade_info.get("eqs", 0)
+                        risk = abs(entry - sl)
+                        if risk > 0:
+                            r = pl / risk  # approximation, car PL est en USD, risk en unités de prix
+                            # Mais le PL est en devise, le risk en prix, on ne peut pas comparer directement.
+                            # On va plutôt utiliser la distance en pips pour le R multiple.
+                            # On va calculer le R en termes de distance de prix (en pips)
+                            entry_price = entry
+                            if direction == "BUY":
+                                price_move = float(trade.get("price", 0)) - entry_price
+                            else:
+                                price_move = entry_price - float(trade.get("price", 0))
+                            # On convertit en pips
+                            pip_val = get_pip_value_for_pair(pair)
+                            price_move_pips = price_move / pip_val
+                            risk_pips = risk / pip_val
+                            r_multiple = price_move_pips / risk_pips if risk_pips > 0 else 0
+                            stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl)
+                            # On supprime du dictionnaire
+                            open_trade_details.pop(trade_id, None)
+    except Exception as e:
+        logger.error(f"Erreur lors du check des trades fermés: {e}")
+
+# Dictionnaire pour stocker les infos des trades ouverts
+open_trade_details = {}
+
+# =============================
+# FONCTIONS UTILITAIRES (reprises de V95)
 # =============================
 def get_dynamic_max_distance(df: pd.DataFrame, pair: str, atr_multiplier: float = 1.5) -> float:
     if df is None or len(df) < 14:
@@ -523,7 +702,7 @@ def get_pair_settings(pair: str) -> dict:
     return PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
 # =============================
-# LOGGING
+# LOGGING (reprise de V95)
 # =============================
 LOG_ASCII_SAFE = os.getenv("LOG_ASCII_SAFE", "true").lower() == "true"
 
@@ -604,7 +783,7 @@ def repair_mojibake_v82(value) -> str:
     return text
 
 class ReadableLogFormatterV82(logging.Formatter):
-    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]")
+    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]", "[CLOSE]")
     def _clean_message_v83(self, message: str, levelname: str) -> str:
         text = repair_mojibake_v82(str(message))
         text = "".join(ch for ch in text if ord(ch) < 128)
@@ -618,6 +797,8 @@ class ReadableLogFormatterV82(logging.Formatter):
             tag = "[DIAG]"
         elif "DECISION" in upper:
             tag = "[DECISION]"
+        elif "CLOSE" in upper:
+            tag = "[CLOSE]"
         elif "CONFIRM" in upper:
             tag = "[CONFIRM]"
         elif "TRACE" in upper:
@@ -672,7 +853,7 @@ for _noisy_logger_v82 in ("urllib3", "requests", "oandapyV20", "oandapy"):
 logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
 
 # =============================
-# GESTION DES SIGNAUX
+# GESTION DES SIGNAUX (repris de V95)
 # =============================
 sent_signals = {}
 recent_signals = {}
@@ -703,7 +884,7 @@ def mark_signal_sent(pair: str, direction: str, entry_level: float, zone_start: 
     logger.info(f"✅ Signal marqué comme envoyé : {key}")
 
 # =============================
-# INDICATEURS TECHNIQUES
+# INDICATEURS TECHNIQUES (repris de V95)
 # =============================
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
@@ -942,8 +1123,8 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
         ("Risk_RR_Distance", "Risk/RR/Distance"),
         ("Secondary", "Secondary"),
         ("Momentum", "Momentum"),
-        ("Structure", "Structure V95"),
-        ("Pullback", "Pullback V95"),
+        ("Structure", "Structure V96"),
+        ("Pullback", "Pullback V96"),
     ]
     logger.debug("===== SCORE DETAIL =====")
     for key, label in labels:
@@ -1247,7 +1428,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# V95 - FILTRES AVEC AUDIT ATR
+# V96 - FILTRES ET LOGS DECISION (repris de V95)
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
@@ -1331,10 +1512,6 @@ def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
     except Exception:
         return 1.0
 
-# ============================================================
-# V95 - ENTRY QUALITY SCORE AVEC AUDIT ATR
-# ============================================================
-
 def calculate_entry_quality_score(
     pair: str,
     direction: str,
@@ -1349,7 +1526,6 @@ def calculate_entry_quality_score(
     total = 0
     logs = []
     
-    # 1. Distance à la zone d'entrée
     entry_zone = abs(entry_level - current_price)
     entry_zone_pips = price_to_pips(entry_zone, pair)
     if entry_zone_pips <= 3:
@@ -1368,7 +1544,6 @@ def calculate_entry_quality_score(
         scores["distance_zone"] = 0
         logs.append(f"distance_zone: {entry_zone_pips:.1f}pips -> 0")
     
-    # 2. Proximité de l'EMA20
     try:
         ema20 = df_m15['close'].ewm(span=20, adjust=False).mean().iloc[-1]
         ema_distance = abs(current_price - ema20)
@@ -1392,7 +1567,6 @@ def calculate_entry_quality_score(
         scores["ema_proximity"] = 10
         logs.append("ema_proximity: error -> 10")
     
-    # 3. Positionnement par rapport au range récent
     try:
         recent_high = df_m15['high'].iloc[-10:].max()
         recent_low = df_m15['low'].iloc[-10:].min()
@@ -1433,7 +1607,6 @@ def calculate_entry_quality_score(
         scores["range_position"] = 10
         logs.append("range_position: error -> 10")
     
-    # 4. Retracement
     pullback_passed, _ = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if pullback_passed:
         scores["pullback_quality"] = 20
@@ -1472,7 +1645,6 @@ def calculate_entry_quality_score(
             scores["pullback_quality"] = 10
             logs.append("pullback_quality: données insuffisantes -> 10")
     
-    # 5. StochRSI
     try:
         k, _ = calculate_stoch_rsi(df_m15['close'])
         if direction == "BUY":
@@ -1519,10 +1691,6 @@ def calculate_entry_quality_score(
     }
     
     return details
-
-# ============================================================
-# V95 - FILTRES STRUCTURE / PULLBACK AVEC AUDIT ATR
-# ============================================================
 
 def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple:
     if len(df) < lookback * 2 + 2:
@@ -1591,21 +1759,14 @@ def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, curren
     return False, f"Direction {direction} invalide"
 
 def filter_min_volatility(df: pd.DataFrame, pair: str) -> tuple:
-    """
-    V95 : Audit ATR détaillé.
-    Affiche la valeur brute, la conversion en pips, et la comparaison.
-    """
     if len(df) < ATR_PERIOD:
         return False, "Données insuffisantes pour ATR"
     
-    # Calcul de l'ATR en prix
     atr_price = calculate_atr(df, period=ATR_PERIOD)
-    # Conversion en pips
     atr_pips = price_to_pips(atr_price, pair)
     
     min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
     
-    # Log d'audit détaillé
     logger.info(f"[ATR_AUDIT] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
     
     if atr_pips < min_atr_pips:
@@ -1631,10 +1792,6 @@ def filter_close_confirmation(df: pd.DataFrame, direction: str) -> tuple:
             return False, "Bougie M15 non confirmée pour SELL (close > open)"
     
     return False, f"Direction {direction} invalide"
-
-# ============================================================
-# V89.5 - FILTRE ANTI-ESSOUFFLEMENT (conservé)
-# ============================================================
 
 def filter_momentum_exhaustion(
     pair: str,
@@ -1854,9 +2011,6 @@ def calculate_sl_tp(entry_price: float, atr: float, direction: str, pair: str,
         logger.error(f"Erreur SL/TP: {e}")
         return None, None
 
-# =============================
-# ALERTES TELEGRAM
-# =============================
 def send_telegram_alert(pair: str, direction: str, entry_price: float,
                        stop_loss: float, take_profit: float, narrative: dict,
                        bias_analysis: dict, rsi: float, entry_type: str,
@@ -1905,14 +2059,14 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         confluence_tags.append("BOS")
     if score_details.get("Session", "").startswith("+"):
         confluence_tags.append("SESSION")
-    if score_details.get("Structure_V95", "").startswith("+"):
+    if score_details.get("Structure_V96", "").startswith("+"):
         confluence_tags.append("STRUCTURE")
-    if score_details.get("Pullback_V95", "").startswith("+"):
+    if score_details.get("Pullback_V96", "").startswith("+"):
         confluence_tags.append("PULLBACK")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
     
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V95</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V96</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -1935,7 +2089,7 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         logger.error(f"💥 Erreur réseau Telegram: {e}")
 
 # =============================
-# HELPERS SCORING
+# HELPERS SCORING (repris de V95)
 # =============================
 def get_session_quality_bonus(pair: str) -> tuple:
     hour = datetime.utcnow().hour
@@ -2057,9 +2211,9 @@ def get_signal_quality_label(score: int, eqs: int) -> str:
         return "B+"
     return "B"
 
-# ============================================================
-# V95 - SYSTÈME DE SCORING AVEC LOGS DECISION
-# ============================================================
+# =============================
+# SYSTÈME DE SCORING AVEC LOGS DECISION (repris de V95)
+# =============================
 
 def calculate_signal_confidence(
     pair: str,
@@ -2103,7 +2257,6 @@ def calculate_signal_confidence(
         pair=pair, entry_type=entry_type, fvg_data=fvg_data,
     )
     
-    # === V95 : ENTRY QUALITY SCORE (EQS) ===
     eqs_result = calculate_entry_quality_score(
         pair=pair,
         direction=direction,
@@ -2135,9 +2288,6 @@ def calculate_signal_confidence(
     
     details["EQS"] = f"{eqs_score}/100"
     
-    # === FILTRES BLOQUANTS ===
-    
-    # 1. Volatilité minimum (avec audit ATR)
     vol_passed, vol_msg = filter_min_volatility(df_m15, pair)
     if not vol_passed:
         rejection_logs.append(vol_msg)
@@ -2156,7 +2306,6 @@ def calculate_signal_confidence(
         }
     details["Volatility"] = vol_msg
     
-    # 2. Structure de marché
     struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
     if not struct_passed:
         rejection_logs.append(struct_msg)
@@ -2175,12 +2324,11 @@ def calculate_signal_confidence(
         }
     if "partiellement" in struct_msg:
         score_components["Structure"] += 1
-        details["Structure_V95"] = f"+1 ({struct_msg})"
+        details["Structure_V96"] = f"+1 ({struct_msg})"
     else:
         score_components["Structure"] += 2
-        details["Structure_V95"] = f"+2 ({struct_msg})"
+        details["Structure_V96"] = f"+2 ({struct_msg})"
     
-    # 3. Pullback
     pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if not pullback_passed:
         rejection_logs.append(pullback_msg)
@@ -2198,9 +2346,8 @@ def calculate_signal_confidence(
             "rejection_logs": rejection_logs
         }
     score_components["Pullback"] += 2
-    details["Pullback_V95"] = f"+2 ({pullback_msg})"
+    details["Pullback_V96"] = f"+2 ({pullback_msg})"
     
-    # 4. Confirmation de clôture
     close_passed, close_msg = filter_close_confirmation(df_m15, direction)
     if close_passed:
         score_components["Secondary"] += 1
@@ -2208,7 +2355,6 @@ def calculate_signal_confidence(
     else:
         details["Close_Confirm"] = close_msg
     
-    # === FILTRE ANTI-ESSOUFFLEMENT (en pénalités) ===
     momentum_passed, momentum_msg, momentum_penalties, penalty_total = filter_momentum_exhaustion(
         pair=pair,
         direction=direction,
@@ -2228,7 +2374,6 @@ def calculate_signal_confidence(
     
     momentum_filter_info = {"passed": momentum_passed, "message": momentum_msg, "penalties": momentum_penalties}
     
-    # === SCORING PRINCIPAL ===
     if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
         score_components["ICT"] += 3
         details["Trend_H4"] = "+3 (Aligné)"
@@ -2279,7 +2424,6 @@ def calculate_signal_confidence(
     except Exception as exc:
         details["Trend_H1_Error"] = str(exc)
     
-    # Setup type
     if "LIQUIDITY" in entry_type:
         score_components["ICT"] += 2
         details["Setup_Type"] = "+2 Liquidity"
@@ -2296,7 +2440,6 @@ def calculate_signal_confidence(
         score_components["ICT"] += 1
         details["Setup_Type"] = f"+1 ({entry_type})"
     
-    # RR Ratio
     try:
         dist_sl = abs(entry_level - stop_loss)
         dist_tp = abs(take_profit - entry_level)
@@ -2312,7 +2455,6 @@ def calculate_signal_confidence(
     except Exception:
         pass
     
-    # D1 Trend
     try:
         d1_bonus, d1_label = get_d1_trend_bonus(df_d1, direction)
         if d1_bonus > 0:
@@ -2323,7 +2465,6 @@ def calculate_signal_confidence(
     except Exception:
         pass
     
-    # MACD
     try:
         macd_bonus, macd_label = get_macd_h1_bonus(df_h1, direction)
         if macd_bonus > 0:
@@ -2334,7 +2475,6 @@ def calculate_signal_confidence(
     except Exception:
         pass
     
-    # Session
     try:
         session_bonus, session_label = get_session_quality_bonus(pair)
         if session_bonus > 0:
@@ -2345,7 +2485,6 @@ def calculate_signal_confidence(
     except Exception:
         pass
     
-    # Score final
     score = compute_final_score(score_components)
     passed = score >= min_required
     
@@ -2369,8 +2508,6 @@ def calculate_signal_confidence(
     
     log_score_detail(score_components, score, "PASSED" if passed else "REJECTED")
     
-    # === V95 - LOG DECISION ===
-    # Construction de la ligne DECISION
     atr_pips = price_to_pips(atr_value, pair)
     adx = calculate_adx(df_h1)
     rsi = get_last_rsi(df_m15["close"])
@@ -2412,9 +2549,9 @@ def calculate_signal_confidence(
         "rejection_logs": rejection_logs
     }
 
-# ============================================================
-# V89.4 - DÉTECTION BIAS-FIRST (conservée)
-# ============================================================
+# =============================
+# DÉTECTION BIAS-FIRST (repris de V95)
+# =============================
 def detect_setups_aligned_with_bias(
     df_m15: pd.DataFrame,
     df_h1: pd.DataFrame,
@@ -2501,17 +2638,18 @@ def detect_setups_aligned_with_bias(
         logger.debug(f"🎯 Setups {bias} pour {pair}: {len(setups)} détectés")
     return setups
 
-# ============================================================
-# V95 - FONCTION PRINCIPALE AVEC DIAGNOSTIC ATR ET LOGS DECISION
-# ============================================================
-def advanced_main_v95():
+# =============================
+# FONCTION PRINCIPALE AVEC SUIVI DES CLÔTURES
+# =============================
+def advanced_main_v96():
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info("✅ ENTRY QUALITY SCORE (EQS) V95 - Seuil: 60/100")
+        logger.info("✅ ENTRY QUALITY SCORE (EQS) V96 - Seuil: 60/100")
         logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R")
         logger.info("✅ AUDIT ATR ACTIVÉ (valeur brute + conversion en pips)")
         logger.info("✅ LOGS [DECISION] ACTIVÉS")
+        logger.info("✅ SUIVI DES CLÔTURES ACTIF")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -2526,7 +2664,6 @@ def advanced_main_v95():
                 logger.warning(f"⚠️ Données manquantes pour {pair}, analyse ignorée")
                 continue
             
-            # === DIAGNOSTIC ATR ===
             atr_price = calculate_atr(df_m15, period=ATR_PERIOD)
             atr_pips = price_to_pips(atr_price, pair)
             min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
@@ -2654,7 +2791,7 @@ def advanced_main_v95():
                     nb_envoyes += 1
                     continue
                 
-                trade_id = execute_oanda_trade_v893(
+                trade_id = execute_oanda_trade_v96(
                     pair=pair,
                     direction=direction,
                     entry_price=entry_level,
@@ -2662,10 +2799,11 @@ def advanced_main_v95():
                     take_profit=take_profit,
                     score=score,
                     entry_type=entry_type,
+                    eqs=eqs,
+                    setup_type=entry_type
                 )
                 
                 if trade_id:
-                    # === V95 - LOG DECISION EXECUTE ===
                     logger.info(
                         f"[DECISION] {pair} | {direction} | {entry_type} | "
                         f"Score={score} | EQS={eqs} | "
@@ -2699,7 +2837,7 @@ def advanced_main_v95():
     stats.log_summary()
 
 # ============================================================
-# V89.3 - OANDA EXECUTION + API OFFICIELLE (conservée)
+# V96 - OANDA EXECUTION AVEC STOCKAGE DES INFOS DE TRADE
 # ============================================================
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
@@ -3031,40 +3169,262 @@ def get_atr_m15_v88(pair: str) -> float:
         return 0.0
 
 # ============================================================
-# V95 - DIAGNOSTIC DE DÉMARRAGE
+# V96 - EXÉCUTION D'ORDRE AVEC ENREGISTREMENT DES INFOS
 # ============================================================
-def diagnostic_startup_v95():
-    logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V95")
-    logger.info("=" * 60)
-    logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
-    logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {EQS_MIN_THRESHOLD}")
-    logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {MIN_CONFIDENCE_SCORE_BY_PAIR}")
-    logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
-    logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
-    logger.info(f"[DIAG] LOGS [DECISION] ACTIVÉS")
-    
+def execute_oanda_trade_v96(pair: str, direction: str, entry_price: float, stop_loss: float,
+                             take_profit: float, score: int, entry_type: str,
+                             eqs: int, setup_type: str) -> str | None:
+    logger.info(f"[ORDER] V96 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
+        logger.info(f"{pair}: trade déjà ouvert")
+        return None
+    if open_trade_count_v88() >= MAX_TRADES_TOTAL:
+        logger.info(f"Limite trades ouverts atteinte")
+        return None
+    balance = get_balance_v88()
+    if balance <= 0:
+        logger.error("Balance invalide")
+        return None
+    units = calculate_units_v88(pair, entry_price, stop_loss, balance)
+    if not units or float(units) <= 0:
+        logger.error(f"units invalides pour {pair}: {units}")
+        return None
+    margin_info = calculate_margin_v88(pair, units, entry_price)
+    if not margin_info["sufficient"]:
+        units = cap_units_by_margin_v88(pair, units, entry_price, balance)
+        if not units or units <= 0:
+            logger.error(f"[RISK] {pair} order blocked: insufficient margin")
+            return None
+    signed_units = units if direction == "BUY" else -units
+    order_data = {
+        "order": {
+            "type": "MARKET",
+            "instrument": pair,
+            "units": str(signed_units),
+            "positionFill": "DEFAULT",
+            "stopLossOnFill": {"price": round_price_v88(pair, stop_loss), "timeInForce": "GTC"},
+            "takeProfitOnFill": {"price": round_price_v88(pair, take_profit), "timeInForce": "GTC"}
+        }
+    }
+    risk = abs(entry_price - stop_loss)
+    rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
+    logger.info(f"[ORDER] SIGNAL V96 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    if not EXECUTE_TRADES:
+        logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
+        return "SIMULATION"
     try:
-        from oandapyV20.endpoints import trades
-        logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
-    except Exception as e:
-        logger.error(f"[DIAG] ❌ trades.TradeCRCDO indisponible: {e}")
-    
-    try:
-        from oandapyV20.endpoints import orders
-        logger.info("[DIAG] ✅ orders.OrderCreate disponible")
-    except Exception as e:
-        logger.error(f"[DIAG] ❌ orders.OrderCreate indisponible: {e}")
-    
-    try:
-        from oandapyV20.endpoints import trades
-        logger.info("[DIAG] ✅ trades.TradeDetails disponible")
-    except Exception as e:
-        logger.error(f"[DIAG] ❌ trades.TradeDetails indisponible: {e}")
-    logger.info("=" * 60)
+        api = v88_client()
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+        resp = api.request(r)
+        if resp.get("orderRejectTransaction"):
+            reject = resp.get("orderRejectTransaction")
+            logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject}")
+            return None
+        trade_id = extract_trade_id_v89(resp)
+        if not trade_id:
+            logger.warning(f"[ORDER] tradeID non trouvé, recherche...")
+            time.sleep(2)
+            trade_id = find_trade_by_instrument_v89(pair, entry_price, direction)
+            if trade_id:
+                logger.info(f"[ORDER] tradeID retrouvé: {trade_id}")
+            else:
+                logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
+                return None
+        logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
+        logger.info(f"[CONFIRM] Trade ouvert sans trailing")
+        # Stocker les infos du trade pour le suivi des clôtures
+        open_trade_details[trade_id] = {
+            "entry": entry_price,
+            "sl": stop_loss,
+            "tp": take_profit,
+            "direction": direction,
+            "setup_type": setup_type,
+            "eqs": eqs,
+            "pair": pair
+        }
+        return str(trade_id)
+    except Exception as exc:
+        logger.exception(f"[ORDER] Erreur ordre OANDA {pair}: {exc}")
+        return None
+
+def extract_trade_id_v89(response: dict) -> str | None:
+    if not response:
+        return None
+    oft = response.get("orderFillTransaction")
+    if oft:
+        if "tradeOpened" in oft and oft["tradeOpened"]:
+            trade_id = oft["tradeOpened"].get("tradeID")
+            if trade_id:
+                return str(trade_id)
+        if "tradeReduced" in oft and oft["tradeReduced"]:
+            trade_id = oft["tradeReduced"].get("tradeID")
+            if trade_id:
+                return str(trade_id)
+        if "tradesOpened" in oft and oft["tradesOpened"]:
+            opened = oft["tradesOpened"]
+            if opened and opened[0].get("tradeID"):
+                return str(opened[0]["tradeID"])
+    oct = response.get("orderCreateTransaction")
+    if oct and "relatedTransactionIDs" in oct:
+        related = oct.get("relatedTransactionIDs", [])
+        if related:
+            return str(related[-1])
+    if response.get("tradeID"):
+        return str(response["tradeID"])
+    return None
+
+def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) -> str | None:
+    pip_value = get_pip_value_for_pair(pair)
+    atr = get_atr_m15_v88(pair)
+    tolerance = max(5.0 * pip_value, 0.5 * atr, 0.0001)
+    tolerance = round(tolerance, 6)
+    logger.debug(f"[FALLBACK] Tolérance pour {pair}: {tolerance:.6f}")
+    open_trades = get_open_trades_v88(log_raw=True)
+    for t in open_trades:
+        if t.get("instrument") != pair:
+            continue
+        t_dir = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
+        if t_dir != direction:
+            continue
+        t_entry = float(t.get("price", 0))
+        if abs(t_entry - entry_price) <= tolerance:
+            return str(t.get("id"))
+    return None
 
 # ============================================================
-# V89.3 - CONFIRMATION DU TRADE (conservée)
+# V96 - GESTION DES CLÔTURES
+# ============================================================
+def check_closed_trades():
+    """Interroge l'API Transactions pour détecter les trades fermés et met à jour les stats"""
+    global stats
+    try:
+        api = v88_client()
+        params = {"from": stats.last_transaction_id} if stats.last_transaction_id else {"count": 100}
+        r = transactions.Transactions(accountID=OANDA_ACCOUNT_ID, params=params)
+        resp = api.request(r)
+        transactions_list = resp.get("transactions", [])
+        if not transactions_list:
+            return
+        
+        # Mettre à jour le dernier ID
+        if stats.last_transaction_id is None:
+            stats.last_transaction_id = transactions_list[-1].get("id")
+        else:
+            stats.last_transaction_id = transactions_list[-1].get("id")
+        stats._save_last_id()
+        
+        for tx in transactions_list:
+            if tx.get("type") == "ORDER_FILL" and tx.get("orderType") == "MARKET":
+                if "tradeReduced" in tx:
+                    trade = tx["tradeReduced"]
+                    trade_id = trade.get("tradeID")
+                    pair = tx.get("instrument")
+                    pl = float(trade.get("realizedPL", 0.0))
+                    trade_info = open_trade_details.get(trade_id)
+                    if trade_info:
+                        entry = trade_info["entry"]
+                        sl = trade_info["sl"]
+                        direction = trade_info["direction"]
+                        setup_type = trade_info.get("setup_type", "UNKNOWN")
+                        eqs = trade_info.get("eqs", 0)
+                        risk = abs(entry - sl)
+                        pip_val = get_pip_value_for_pair(pair)
+                        if direction == "BUY":
+                            price_move = float(trade.get("price", 0)) - entry
+                        else:
+                            price_move = entry - float(trade.get("price", 0))
+                        price_move_pips = price_move / pip_val
+                        risk_pips = risk / pip_val
+                        r_multiple = price_move_pips / risk_pips if risk_pips > 0 else 0
+                        stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl)
+                        open_trade_details.pop(trade_id, None)
+    except Exception as e:
+        logger.error(f"Erreur lors du check des trades fermés: {e}")
+
+# ============================================================
+# V96 - BREAK EVEN (repris de V95)
+# ============================================================
+def check_breakeven_v96():
+    try:
+        open_trades = get_open_trades_v88()
+        logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil: {BREAKEVEN_TRIGGER_R}R)")
+        for t in open_trades:
+            trade_id = str(t.get("id"))
+            pair = t.get("instrument")
+            direction = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
+            entry = float(t.get("price"))
+            sl_order = t.get("stopLossOrder", {}) or {}
+            current_sl = float(sl_order.get("price", 0))
+            if current_sl <= 0:
+                logger.debug(f"[BE] Trade {trade_id} sans SL, ignoré")
+                continue
+            pip = PIP_SIZE_V88.get(pair, get_pip_value_for_pair(pair))
+            spread_data = get_price_spread_v88(pair)
+            spread = spread_data.get("spread", 0)
+            offset = max(spread, pip * 1.0)
+            if direction == "BUY":
+                be_price = entry + offset
+                already_be = (current_sl >= be_price - 0.0001)
+            else:
+                be_price = entry - offset
+                already_be = (current_sl <= be_price + 0.0001)
+            if already_be:
+                logger.debug(f"[BE] Trade {trade_id} SL déjà au BE ({current_sl:.5f}), saut")
+                continue
+            current_price = get_recent_m5_price_v88(pair)
+            if current_price <= 0:
+                logger.debug(f"[BE] Trade {trade_id} prix indisponible")
+                continue
+            if direction == "BUY":
+                profit = current_price - entry
+                risk = entry - current_sl
+            else:
+                profit = entry - current_price
+                risk = current_sl - entry
+            if risk <= 0:
+                logger.debug(f"[BE] Trade {trade_id} risque invalide")
+                continue
+            r = profit / risk
+            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f}")
+            if r >= BREAKEVEN_TRIGGER_R:
+                logger.info(f"[BE] 🎯 Condition R>={BREAKEVEN_TRIGGER_R} atteinte pour {trade_id}")
+                if direction == "BUY":
+                    be_sl = entry + offset
+                else:
+                    be_sl = entry - offset
+                if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
+                    logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
+                    if modify_trade_sl_v893(trade_id, pair, be_sl):
+                        logger.info(f"[BE] ✅ SL modifié avec succès pour {trade_id}")
+                        time.sleep(1)
+                        _OANDA_CACHE_V88.pop("open_trades_raw", None)
+                        trade_details = get_trade_details_v88(trade_id)
+                        if has_trailing_stop_v88(trade_details):
+                            logger.info(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
+                            continue
+                        atr = get_atr_m15_v88(pair)
+                        spread = spread_data.get("spread", 0)
+                        pip_value = get_pip_value_for_pair(pair)
+                        distance = max(atr * 1.6, spread * 2)
+                        distance = min(distance, atr * 3)
+                        distance = max(distance, pip_value * TRAILING_STOP_MIN_DISTANCE_PIPS)
+                        distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
+                        if distance > 0:
+                            logger.info(f"[TSL] Création du trailing stop pour trade {trade_id}")
+                            if create_oanda_trailing_stop_v893(trade_id, pair, distance):
+                                logger.info(f"[TSL] ✅ Trailing stop créé")
+                            else:
+                                logger.error(f"[TSL] ❌ ÉCHEC création trailing")
+                        else:
+                            logger.warning(f"[TSL] Distance invalide ({distance})")
+                    else:
+                        logger.error(f"[BE] ❌ ÉCHEC modification SL")
+    except Exception as e:
+        logger.error(f"Erreur check_breakeven_v96: {e}")
+        logger.error(traceback.format_exc())
+
+# ============================================================
+# V96 - FONCTIONS DE CONFIRMATION (repris de V95)
 # ============================================================
 def get_trade_details_v88(trade_id: str) -> dict:
     try:
@@ -3154,196 +3514,8 @@ def create_oanda_trailing_stop_v893(trade_id: str, pair: str, distance: float) -
         logger.error(f"[TSL] Erreur création trailing stop trade {trade_id}: {e}")
         return False
 
-def extract_trade_id_v89(response: dict) -> str | None:
-    if not response:
-        return None
-    oft = response.get("orderFillTransaction")
-    if oft:
-        if "tradeOpened" in oft and oft["tradeOpened"]:
-            trade_id = oft["tradeOpened"].get("tradeID")
-            if trade_id:
-                return str(trade_id)
-        if "tradeReduced" in oft and oft["tradeReduced"]:
-            trade_id = oft["tradeReduced"].get("tradeID")
-            if trade_id:
-                return str(trade_id)
-        if "tradesOpened" in oft and oft["tradesOpened"]:
-            opened = oft["tradesOpened"]
-            if opened and opened[0].get("tradeID"):
-                return str(opened[0]["tradeID"])
-    oct = response.get("orderCreateTransaction")
-    if oct and "relatedTransactionIDs" in oct:
-        related = oct.get("relatedTransactionIDs", [])
-        if related:
-            return str(related[-1])
-    if response.get("tradeID"):
-        return str(response["tradeID"])
-    return None
-
-def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) -> str | None:
-    pip_value = get_pip_value_for_pair(pair)
-    atr = get_atr_m15_v88(pair)
-    tolerance = max(5.0 * pip_value, 0.5 * atr, 0.0001)
-    tolerance = round(tolerance, 6)
-    logger.debug(f"[FALLBACK] Tolérance pour {pair}: {tolerance:.6f}")
-    open_trades = get_open_trades_v88(log_raw=True)
-    for t in open_trades:
-        if t.get("instrument") != pair:
-            continue
-        t_dir = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
-        if t_dir != direction:
-            continue
-        t_entry = float(t.get("price", 0))
-        if abs(t_entry - entry_price) <= tolerance:
-            return str(t.get("id"))
-    return None
-
-def check_breakeven_v95():
-    try:
-        open_trades = get_open_trades_v88()
-        logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil: {BREAKEVEN_TRIGGER_R}R)")
-        for t in open_trades:
-            trade_id = str(t.get("id"))
-            pair = t.get("instrument")
-            direction = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
-            entry = float(t.get("price"))
-            sl_order = t.get("stopLossOrder", {}) or {}
-            current_sl = float(sl_order.get("price", 0))
-            if current_sl <= 0:
-                logger.debug(f"[BE] Trade {trade_id} sans SL, ignoré")
-                continue
-            pip = PIP_SIZE_V88.get(pair, get_pip_value_for_pair(pair))
-            spread_data = get_price_spread_v88(pair)
-            spread = spread_data.get("spread", 0)
-            offset = max(spread, pip * 1.0)
-            if direction == "BUY":
-                be_price = entry + offset
-                already_be = (current_sl >= be_price - 0.0001)
-            else:
-                be_price = entry - offset
-                already_be = (current_sl <= be_price + 0.0001)
-            if already_be:
-                logger.debug(f"[BE] Trade {trade_id} SL déjà au BE ({current_sl:.5f}), saut")
-                continue
-            current_price = get_recent_m5_price_v88(pair)
-            if current_price <= 0:
-                logger.debug(f"[BE] Trade {trade_id} prix indisponible")
-                continue
-            if direction == "BUY":
-                profit = current_price - entry
-                risk = entry - current_sl
-            else:
-                profit = entry - current_price
-                risk = current_sl - entry
-            if risk <= 0:
-                logger.debug(f"[BE] Trade {trade_id} risque invalide")
-                continue
-            r = profit / risk
-            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f}")
-            if r >= BREAKEVEN_TRIGGER_R:
-                logger.info(f"[BE] 🎯 Condition R>={BREAKEVEN_TRIGGER_R} atteinte pour {trade_id}")
-                if direction == "BUY":
-                    be_sl = entry + offset
-                else:
-                    be_sl = entry - offset
-                if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
-                    logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
-                    if modify_trade_sl_v893(trade_id, pair, be_sl):
-                        logger.info(f"[BE] ✅ SL modifié avec succès pour {trade_id}")
-                        time.sleep(1)
-                        _OANDA_CACHE_V88.pop("open_trades_raw", None)
-                        trade_details = get_trade_details_v88(trade_id)
-                        if has_trailing_stop_v88(trade_details):
-                            logger.info(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
-                            continue
-                        atr = get_atr_m15_v88(pair)
-                        spread = spread_data.get("spread", 0)
-                        pip_value = get_pip_value_for_pair(pair)
-                        distance = max(atr * 1.6, spread * 2)
-                        distance = min(distance, atr * 3)
-                        distance = max(distance, pip_value * TRAILING_STOP_MIN_DISTANCE_PIPS)
-                        distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
-                        if distance > 0:
-                            logger.info(f"[TSL] Création du trailing stop pour trade {trade_id}")
-                            if create_oanda_trailing_stop_v893(trade_id, pair, distance):
-                                logger.info(f"[TSL] ✅ Trailing stop créé")
-                            else:
-                                logger.error(f"[TSL] ❌ ÉCHEC création trailing")
-                        else:
-                            logger.warning(f"[TSL] Distance invalide ({distance})")
-                    else:
-                        logger.error(f"[BE] ❌ ÉCHEC modification SL")
-    except Exception as e:
-        logger.error(f"Erreur check_breakeven_v95: {e}")
-        logger.error(traceback.format_exc())
-
-def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop_loss: float,
-                             take_profit: float, score: int, entry_type: str) -> str | None:
-    logger.info(f"[ORDER] V95 EXECUTION START {pair} {direction} type={entry_type} score={score}")
-    if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
-        logger.info(f"{pair}: trade déjà ouvert")
-        return None
-    if open_trade_count_v88() >= MAX_TRADES_TOTAL:
-        logger.info(f"Limite trades ouverts atteinte")
-        return None
-    balance = get_balance_v88()
-    if balance <= 0:
-        logger.error("Balance invalide")
-        return None
-    units = calculate_units_v88(pair, entry_price, stop_loss, balance)
-    if not units or float(units) <= 0:
-        logger.error(f"units invalides pour {pair}: {units}")
-        return None
-    margin_info = calculate_margin_v88(pair, units, entry_price)
-    if not margin_info["sufficient"]:
-        units = cap_units_by_margin_v88(pair, units, entry_price, balance)
-        if not units or units <= 0:
-            logger.error(f"[RISK] {pair} order blocked: insufficient margin")
-            return None
-    signed_units = units if direction == "BUY" else -units
-    order_data = {
-        "order": {
-            "type": "MARKET",
-            "instrument": pair,
-            "units": str(signed_units),
-            "positionFill": "DEFAULT",
-            "stopLossOnFill": {"price": round_price_v88(pair, stop_loss), "timeInForce": "GTC"},
-            "takeProfitOnFill": {"price": round_price_v88(pair, take_profit), "timeInForce": "GTC"}
-        }
-    }
-    risk = abs(entry_price - stop_loss)
-    rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V95 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
-    if not EXECUTE_TRADES:
-        logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
-        return "SIMULATION"
-    try:
-        api = v88_client()
-        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
-        resp = api.request(r)
-        if resp.get("orderRejectTransaction"):
-            reject = resp.get("orderRejectTransaction")
-            logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject}")
-            return None
-        trade_id = extract_trade_id_v89(resp)
-        if not trade_id:
-            logger.warning(f"[ORDER] tradeID non trouvé, recherche...")
-            time.sleep(2)
-            trade_id = find_trade_by_instrument_v89(pair, entry_price, direction)
-            if trade_id:
-                logger.info(f"[ORDER] tradeID retrouvé: {trade_id}")
-            else:
-                logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
-                return None
-        logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
-        logger.info(f"[CONFIRM] Trade ouvert sans trailing")
-        return str(trade_id)
-    except Exception as exc:
-        logger.exception(f"[ORDER] Erreur ordre OANDA {pair}: {exc}")
-        return None
-
 # ============================================================
-# STRICT FILTERS
+# V96 - STRICT FILTERS (repris)
 # ============================================================
 STRICT_ALLOWED_ENTRY_TYPES = {
     "FVG_RETEST_PERFECT", "FVG_RETEST", "BISI", "BREAKER",
@@ -3519,26 +3691,49 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V95 - BOUCLE PRINCIPALE
+# V96 - DIAGNOSTIC DE DÉMARRAGE
+# ============================================================
+def diagnostic_startup_v96():
+    logger.info("=" * 60)
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V96")
+    logger.info("=" * 60)
+    logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
+    logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {EQS_MIN_THRESHOLD}")
+    logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {MIN_CONFIDENCE_SCORE_BY_PAIR}")
+    logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
+    logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
+    logger.info(f"[DIAG] SUIVI DES CLÔTURES ACTIVÉ")
+    try:
+        from oandapyV20.endpoints import trades
+        logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
+    except Exception as e:
+        logger.error(f"[DIAG] ❌ trades.TradeCRCDO indisponible: {e}")
+    try:
+        from oandapyV20.endpoints import orders
+        logger.info("[DIAG] ✅ orders.OrderCreate disponible")
+    except Exception as e:
+        logger.error(f"[DIAG] ❌ orders.OrderCreate indisponible: {e}")
+    try:
+        from oandapyV20.endpoints import trades
+        logger.info("[DIAG] ✅ trades.TradeDetails disponible")
+    except Exception as e:
+        logger.error(f"[DIAG] ❌ trades.TradeDetails indisponible: {e}")
+    logger.info("=" * 60)
+
+# ============================================================
+# V96 - BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V95 (Logs Décision)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V96 (Suivi des résultats)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R)")
     logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100 (60)")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
-    logger.info("")
-    logger.info("🛡️ FILTRES V95 :")
-    logger.info("   - Volatilité minimum ATR (audit actif)")
-    logger.info("   - Structure de marché (partielle acceptée)")
-    logger.info("   - Pullback obligatoire (EUR=2, AUD=2, GBP=3)")
-    logger.info("   - Confirmation par clôture M15")
-    logger.info("   - Entry Quality Score (EQS) à 60/100")
-    logger.info("   - LOGS [DECISION] : une ligne par signal évalué")
+    logger.info("📈 SUIVI DES CLÔTURES : logs [CLOSE] et stats mises à jour en temps réel")
     logger.info("")
     
-    diagnostic_startup_v95()
+    diagnostic_startup_v96()
     
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
@@ -3556,10 +3751,14 @@ if __name__ == "__main__":
             current_open_count = open_trade_count_v88()
             logger.info(f"[SCAN] Trades ouverts: {current_open_count}/{MAX_TRADES_TOTAL}")
             
-            check_breakeven_v95()
+            # Vérifier les clôtures
+            check_closed_trades()
+            
+            # Break Even / Trailing
+            check_breakeven_v96()
             
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V95")
+                logger.info(f"⏰ Scan des signaux V96")
                 last_signal_scan = now
                 
                 now_dt = datetime.utcnow()
@@ -3568,7 +3767,7 @@ if __name__ == "__main__":
                 elif current_open_count >= MAX_TRADES_TOTAL:
                     logger.info(f"Limite trades atteinte")
                 else:
-                    advanced_main_v95()
+                    advanced_main_v96()
             
             time.sleep(30)
 
