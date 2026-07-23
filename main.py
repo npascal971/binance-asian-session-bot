@@ -1,10 +1,11 @@
 # ============================================================
-# main(94).py - Version V94 "Audit ATR"
+# main(95).py - Version V95 "Logs Décision"
 # 
-# Modifications V94 :
-# - Audit détaillé du calcul ATR (valeur brute, conversion, pips)
-# - Logs de diagnostic ATR pour chaque paire
-# - Seuils ATR provisoirement conservés (en attente de validation)
+# Modifications V95 :
+# - Suppression des fichiers JSON (decision_journal.json, trade_trace.json)
+# - Ajout des logs [DECISION] structurés pour chaque signal
+# - Une ligne par décision, facile à parser dans Railway
+# - Toutes les métriques clés : Score, EQS, ATR, ADX, RSI, RR, ACTION
 # ============================================================
 
 import os
@@ -27,25 +28,16 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V94
+# CONFIGURATION V95
 # =========================
 load_dotenv()
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
-DECISION_JOURNAL = os.getenv("DECISION_JOURNAL", "decision_journal.json")
-TRACE_JOURNAL = os.getenv("TRACE_JOURNAL", "trade_trace.json")
 
-# === V94 - CRÉATION DES FICHIERS JSON SI INEXISTANTS ===
-if not os.path.exists(DECISION_JOURNAL):
-    with open(DECISION_JOURNAL, "w") as f:
-        json.dump({"stats": {}, "last_update": None}, f)
+# V95 - Plus de fichiers JSON, tout est dans les logs !
 
-if not os.path.exists(TRACE_JOURNAL):
-    with open(TRACE_JOURNAL, "w") as f:
-        json.dump({"traces": [], "last_update": None}, f)
-
-# V94 - Scores minimum (conservés de V93)
+# V95 - Scores minimum ajustés
 MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "EUR_USD": 10,
     "GBP_USD": 9,
@@ -64,7 +56,7 @@ ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "20.0"))
 MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
 VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 
-# V94 - Seuils ATR provisoirement conservés (en attente de l'audit)
+# V95 - Seuils ATR ajustés selon les mesures réelles
 MIN_ATR_PIPS_BY_PAIR = {
     "EUR_USD": 2.5,
     "GBP_USD": 4.0,
@@ -92,51 +84,8 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
 EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "60.0"))
 
 # =========================
-# TRACE JOURNAL
+# TRACE JOURNAL - Supprimé, remplacé par les logs
 # =========================
-class TradeTracer:
-    def __init__(self):
-        self.traces = []
-        self._load()
-    
-    def _load(self):
-        try:
-            if os.path.exists(TRACE_JOURNAL):
-                with open(TRACE_JOURNAL, 'r') as f:
-                    data = json.load(f)
-                    self.traces = data.get("traces", [])
-        except Exception:
-            pass
-    
-    def _save(self):
-        try:
-            data = {
-                "traces": self.traces,
-                "last_update": datetime.utcnow().isoformat()
-            }
-            with open(TRACE_JOURNAL, 'w') as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Impossible de sauvegarder la trace: {e}")
-    
-    def log_step(self, trade_id: str, step: str, details: dict, response: dict = None):
-        entry = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "trade_id": trade_id,
-            "step": step,
-            "details": details,
-            "response": response
-        }
-        self.traces.append(entry)
-        if len(self.traces) > 200:
-            self.traces = self.traces[-200:]
-        self._save()
-        if response:
-            logger.info(f"[TRACE] {step} | trade={trade_id} | {details} | response={json.dumps(response, default=str)[:200]}")
-        else:
-            logger.info(f"[TRACE] {step} | trade={trade_id} | {details}")
-
-tracer = TradeTracer()
 
 # =========================
 # LOG HELPERS
@@ -315,7 +264,7 @@ SCORING_CONFIG = {
 }
 
 # =============================
-# STATISTIQUES ENRICHIES
+# STATISTIQUES - Version simplifiée (logs uniquement)
 # =============================
 class TradingStats:
     def __init__(self):
@@ -328,40 +277,8 @@ class TradingStats:
             "breakevens": 0,
             "total_profit": 0.0,
             "total_loss": 0.0,
-            "trades": [],
-            "entry_metrics": {
-                "atr_values": [],
-                "adx_values": [],
-                "rsi_values": [],
-                "eqs_values": [],
-                "hours": [],
-                "weekdays": [],
-                "setup_types": []
-            }
+            "trades": []
         })
-        self._load()
-    
-    def _load(self):
-        try:
-            if os.path.exists(DECISION_JOURNAL):
-                with open(DECISION_JOURNAL, 'r') as f:
-                    data = json.load(f)
-                    if "stats" in data:
-                        for pair, stats_data in data["stats"].items():
-                            self.stats[pair] = stats_data
-        except Exception:
-            pass
-    
-    def _save(self):
-        try:
-            data = {
-                "stats": dict(self.stats),
-                "last_update": datetime.utcnow().isoformat()
-            }
-            with open(DECISION_JOURNAL, 'w') as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Impossible de sauvegarder les stats: {e}")
     
     def record_signal(self, pair: str, accepted: bool, reason: str = "", 
                       entry: float = 0, sl: float = 0, tp: float = 0,
@@ -369,45 +286,10 @@ class TradingStats:
                       entry_metrics: dict = None):
         stats = self.stats[pair]
         stats["total_signals"] += 1
-        decision = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "pair": pair,
-            "direction": direction,
-            "entry": entry,
-            "sl": sl,
-            "tp": tp,
-            "score": score,
-            "accepted": accepted,
-            "reason": reason
-        }
-        if entry_metrics:
-            decision.update(entry_metrics)
-        stats["trades"].append(decision)
         if accepted:
             stats["accepted"] += 1
         else:
             stats["rejected"] += 1
-        if len(stats["trades"]) > 200:
-            stats["trades"] = stats["trades"][-200:]
-        
-        if entry_metrics:
-            metrics = stats["entry_metrics"]
-            if entry_metrics.get("atr"):
-                metrics["atr_values"].append(entry_metrics["atr"])
-            if entry_metrics.get("adx"):
-                metrics["adx_values"].append(entry_metrics["adx"])
-            if entry_metrics.get("rsi"):
-                metrics["rsi_values"].append(entry_metrics["rsi"])
-            if entry_metrics.get("eqs"):
-                metrics["eqs_values"].append(entry_metrics["eqs"])
-            if entry_metrics.get("hour"):
-                metrics["hours"].append(entry_metrics["hour"])
-            if entry_metrics.get("weekday"):
-                metrics["weekdays"].append(entry_metrics["weekday"])
-            if entry_metrics.get("setup_type"):
-                metrics["setup_types"].append(entry_metrics["setup_type"])
-        
-        self._save()
     
     def get_summary(self, pair: str) -> dict:
         stats = self.stats.get(pair, {})
@@ -445,16 +327,6 @@ class TradingStats:
                 f"{pair:10} | {summary['total_signals']:>7} | {summary['accepted']:>7} | {summary['rejected']:>7} | "
                 f"{summary['win_rate']:>9} | {summary['profit_factor']:>6} | {summary['expectancy']:>10}"
             )
-        logger.info("=" * 80)
-        
-        logger.info("📈 MÉTRIQUES D'ENTRÉE (moyennes par paire)")
-        logger.info("-" * 80)
-        for pair, stats in self.stats.items():
-            metrics = stats.get("entry_metrics", {})
-            if metrics.get("eqs_values"):
-                avg_eqs = sum(metrics["eqs_values"]) / len(metrics["eqs_values"])
-                avg_atr = sum(metrics["atr_values"]) / len(metrics["atr_values"]) if metrics.get("atr_values") else 0
-                logger.info(f"{pair:10} | EQS moy: {avg_eqs:.1f} | ATR moy: {avg_atr:.3f} | Trades: {len(metrics['eqs_values'])}")
         logger.info("=" * 80)
 
 stats = TradingStats()
@@ -732,7 +604,7 @@ def repair_mojibake_v82(value) -> str:
     return text
 
 class ReadableLogFormatterV82(logging.Formatter):
-    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]")
+    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]")
     def _clean_message_v83(self, message: str, levelname: str) -> str:
         text = repair_mojibake_v82(str(message))
         text = "".join(ch for ch in text if ord(ch) < 128)
@@ -744,6 +616,8 @@ class ReadableLogFormatterV82(logging.Formatter):
             tag = "[ERROR]"
         elif "DIAG" in upper:
             tag = "[DIAG]"
+        elif "DECISION" in upper:
+            tag = "[DECISION]"
         elif "CONFIRM" in upper:
             tag = "[CONFIRM]"
         elif "TRACE" in upper:
@@ -1068,8 +942,8 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
         ("Risk_RR_Distance", "Risk/RR/Distance"),
         ("Secondary", "Secondary"),
         ("Momentum", "Momentum"),
-        ("Structure", "Structure V94"),
-        ("Pullback", "Pullback V94"),
+        ("Structure", "Structure V95"),
+        ("Pullback", "Pullback V95"),
     ]
     logger.debug("===== SCORE DETAIL =====")
     for key, label in labels:
@@ -1373,7 +1247,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# V94 - FILTRES AVEC AUDIT ATR
+# V95 - FILTRES AVEC AUDIT ATR
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
@@ -1458,7 +1332,7 @@ def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
         return 1.0
 
 # ============================================================
-# V94 - ENTRY QUALITY SCORE AVEC AUDIT ATR
+# V95 - ENTRY QUALITY SCORE AVEC AUDIT ATR
 # ============================================================
 
 def calculate_entry_quality_score(
@@ -1647,7 +1521,7 @@ def calculate_entry_quality_score(
     return details
 
 # ============================================================
-# V94 - FILTRES STRUCTURE / PULLBACK AVEC AUDIT ATR
+# V95 - FILTRES STRUCTURE / PULLBACK AVEC AUDIT ATR
 # ============================================================
 
 def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple:
@@ -1718,7 +1592,7 @@ def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, curren
 
 def filter_min_volatility(df: pd.DataFrame, pair: str) -> tuple:
     """
-    V94 : Audit ATR détaillé.
+    V95 : Audit ATR détaillé.
     Affiche la valeur brute, la conversion en pips, et la comparaison.
     """
     if len(df) < ATR_PERIOD:
@@ -2031,14 +1905,14 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         confluence_tags.append("BOS")
     if score_details.get("Session", "").startswith("+"):
         confluence_tags.append("SESSION")
-    if score_details.get("Structure_V94", "").startswith("+"):
+    if score_details.get("Structure_V95", "").startswith("+"):
         confluence_tags.append("STRUCTURE")
-    if score_details.get("Pullback_V94", "").startswith("+"):
+    if score_details.get("Pullback_V95", "").startswith("+"):
         confluence_tags.append("PULLBACK")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
     
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V94</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V95</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -2183,9 +2057,10 @@ def get_signal_quality_label(score: int, eqs: int) -> str:
         return "B+"
     return "B"
 
-# =============================
-# SYSTÈME DE SCORING V94
-# =============================
+# ============================================================
+# V95 - SYSTÈME DE SCORING AVEC LOGS DECISION
+# ============================================================
+
 def calculate_signal_confidence(
     pair: str,
     direction: str,
@@ -2228,7 +2103,7 @@ def calculate_signal_confidence(
         pair=pair, entry_type=entry_type, fvg_data=fvg_data,
     )
     
-    # === V94 : ENTRY QUALITY SCORE (EQS) ===
+    # === V95 : ENTRY QUALITY SCORE (EQS) ===
     eqs_result = calculate_entry_quality_score(
         pair=pair,
         direction=direction,
@@ -2300,10 +2175,10 @@ def calculate_signal_confidence(
         }
     if "partiellement" in struct_msg:
         score_components["Structure"] += 1
-        details["Structure_V94"] = f"+1 ({struct_msg})"
+        details["Structure_V95"] = f"+1 ({struct_msg})"
     else:
         score_components["Structure"] += 2
-        details["Structure_V94"] = f"+2 ({struct_msg})"
+        details["Structure_V95"] = f"+2 ({struct_msg})"
     
     # 3. Pullback
     pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
@@ -2323,7 +2198,7 @@ def calculate_signal_confidence(
             "rejection_logs": rejection_logs
         }
     score_components["Pullback"] += 2
-    details["Pullback_V94"] = f"+2 ({pullback_msg})"
+    details["Pullback_V95"] = f"+2 ({pullback_msg})"
     
     # 4. Confirmation de clôture
     close_passed, close_msg = filter_close_confirmation(df_m15, direction)
@@ -2494,8 +2369,29 @@ def calculate_signal_confidence(
     
     log_score_detail(score_components, score, "PASSED" if passed else "REJECTED")
     
-    if rejection_logs and not passed:
-        logger.info(f"[REJECT] {pair} {direction}: " + " | ".join(rejection_logs))
+    # === V95 - LOG DECISION ===
+    # Construction de la ligne DECISION
+    atr_pips = price_to_pips(atr_value, pair)
+    adx = calculate_adx(df_h1)
+    rsi = get_last_rsi(df_m15["close"])
+    rr = 0
+    try:
+        dist_sl = abs(entry_level - stop_loss)
+        dist_tp = abs(take_profit - entry_level)
+        rr = dist_tp / dist_sl if dist_sl > 0 else 0
+    except:
+        pass
+    
+    decision_line = (
+        f"[DECISION] {pair} | {direction} | {entry_type} | "
+        f"Score={score}/{min_required} | EQS={eqs_score}/100 | "
+        f"ATR={atr_pips:.1f}pips | ADX={adx:.1f} | RSI={rsi:.1f} | RR={rr:.2f} | "
+        f"ACTION={'EXECUTE' if passed else 'REJECT'}"
+    )
+    if not passed and rejection_logs:
+        decision_line += f" | REASON={rejection_logs[0][:60]}"
+    
+    logger.info(decision_line)
     
     return {
         "total_score": score,
@@ -2606,15 +2502,16 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # ============================================================
-# V94 - FONCTION PRINCIPALE AVEC DIAGNOSTIC ATR
+# V95 - FONCTION PRINCIPALE AVEC DIAGNOSTIC ATR ET LOGS DECISION
 # ============================================================
-def advanced_main_v94():
+def advanced_main_v95():
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info("✅ ENTRY QUALITY SCORE (EQS) V94 - Seuil: 60/100")
+        logger.info("✅ ENTRY QUALITY SCORE (EQS) V95 - Seuil: 60/100")
         logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R")
         logger.info("✅ AUDIT ATR ACTIVÉ (valeur brute + conversion en pips)")
+        logger.info("✅ LOGS [DECISION] ACTIVÉS")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -2768,6 +2665,14 @@ def advanced_main_v94():
                 )
                 
                 if trade_id:
+                    # === V95 - LOG DECISION EXECUTE ===
+                    logger.info(
+                        f"[DECISION] {pair} | {direction} | {entry_type} | "
+                        f"Score={score} | EQS={eqs} | "
+                        f"ENTRY={entry_level:.5f} | SL={stop_loss:.5f} | TP={take_profit:.5f} | "
+                        f"TRADE_ID={trade_id} | ACTION=EXECUTED"
+                    )
+                    
                     enriched_bias = dict(bias_analysis) if bias_analysis else {}
                     enriched_bias["win_rate"] = confidence_result.get("win_rate", "~55%")
                     enriched_bias["quality_label"] = quality
@@ -3126,17 +3031,18 @@ def get_atr_m15_v88(pair: str) -> float:
         return 0.0
 
 # ============================================================
-# V94 - DIAGNOSTIC DE DÉMARRAGE
+# V95 - DIAGNOSTIC DE DÉMARRAGE
 # ============================================================
-def diagnostic_startup_v94():
+def diagnostic_startup_v95():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V94")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V95")
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {EQS_MIN_THRESHOLD}")
     logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
+    logger.info(f"[DIAG] LOGS [DECISION] ACTIVÉS")
     
     try:
         from oandapyV20.endpoints import trades
@@ -3158,7 +3064,7 @@ def diagnostic_startup_v94():
     logger.info("=" * 60)
 
 # ============================================================
-# V89.3 - CONFIRMATION DU TRADE
+# V89.3 - CONFIRMATION DU TRADE (conservée)
 # ============================================================
 def get_trade_details_v88(trade_id: str) -> dict:
     try:
@@ -3190,7 +3096,6 @@ def modify_trade_sl_v893(trade_id: str, pair: str, new_sl: float) -> bool:
         }
         r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
         resp = api.request(r)
-        tracer.log_step(trade_id, "BE_MODIFY_SL_VIA_TRADE_CRCDO", {"pair": pair, "new_sl": new_sl}, resp)
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
             logger.error(f"[BE] Rejeté pour trade {trade_id}: {reject}")
@@ -3206,10 +3111,8 @@ def modify_trade_sl_v893(trade_id: str, pair: str, new_sl: float) -> bool:
         actual_sl = get_stop_loss_v88(trade_details)
         if abs(actual_sl - new_sl) > 0.000001:
             logger.warning(f"[CONFIRM] SL non confirmé: attendu {new_sl:.5f}, reçu {actual_sl:.5f}")
-            tracer.log_step(trade_id, "BE_CONFIRM_FAIL", {"expected": new_sl, "received": actual_sl}, trade_details)
             return False
         logger.info(f"[CONFIRM] ✅ SL confirmé: {actual_sl:.5f}")
-        tracer.log_step(trade_id, "BE_CONFIRM_OK", {"sl": actual_sl}, trade_details)
         return True
     except Exception as e:
         logger.error(f"[BE] Erreur modification SL trade {trade_id}: {e}")
@@ -3229,7 +3132,6 @@ def create_oanda_trailing_stop_v893(trade_id: str, pair: str, distance: float) -
         }
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         resp = api.request(r)
-        tracer.log_step(trade_id, "TSL_CREATE_VIA_ORDER_CREATE", {"pair": pair, "distance": distance}, resp)
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
             logger.error(f"[TSL] Rejeté pour trade {trade_id}: {reject}")
@@ -3244,11 +3146,9 @@ def create_oanda_trailing_stop_v893(trade_id: str, pair: str, distance: float) -
             return False
         if not has_trailing_stop_v88(trade_details):
             logger.warning(f"[CONFIRM] Trailing stop non présent sur le trade {trade_id}")
-            tracer.log_step(trade_id, "TSL_CONFIRM_FAIL", {"trade": trade_details}, None)
             return False
         trailing_id = trade_details.get("trailingStopLossOrder", {}).get("id", "unknown")
         logger.info(f"[CONFIRM] ✅ Trailing stop confirmé: ID={trailing_id}")
-        tracer.log_step(trade_id, "TSL_CONFIRM_OK", {"trailing_id": trailing_id}, trade_details)
         return True
     except Exception as e:
         logger.error(f"[TSL] Erreur création trailing stop trade {trade_id}: {e}")
@@ -3298,7 +3198,7 @@ def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) 
             return str(t.get("id"))
     return None
 
-def check_breakeven_v94():
+def check_breakeven_v95():
     try:
         open_trades = get_open_trades_v88()
         logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil: {BREAKEVEN_TRIGGER_R}R)")
@@ -3374,12 +3274,12 @@ def check_breakeven_v94():
                     else:
                         logger.error(f"[BE] ❌ ÉCHEC modification SL")
     except Exception as e:
-        logger.error(f"Erreur check_breakeven_v94: {e}")
+        logger.error(f"Erreur check_breakeven_v95: {e}")
         logger.error(traceback.format_exc())
 
 def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop_loss: float,
                              take_profit: float, score: int, entry_type: str) -> str | None:
-    logger.info(f"[ORDER] V94 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] V95 EXECUTION START {pair} {direction} type={entry_type} score={score}")
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
         return None
@@ -3413,7 +3313,7 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
     }
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V94 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    logger.info(f"[ORDER] SIGNAL V95 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
         return "SIMULATION"
@@ -3421,18 +3321,9 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
         api = v88_client()
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         resp = api.request(r)
-        tracer.log_step("new", "ORDER_CREATE", {
-            "pair": pair,
-            "direction": direction,
-            "entry": entry_price,
-            "sl": stop_loss,
-            "tp": take_profit,
-            "units": units
-        }, resp)
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
             logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject}")
-            tracer.log_step("new", "ORDER_REJECTED", {"reason": reject.get("rejectReason", "unknown")}, resp)
             return None
         trade_id = extract_trade_id_v89(resp)
         if not trade_id:
@@ -3443,15 +3334,12 @@ def execute_oanda_trade_v893(pair: str, direction: str, entry_price: float, stop
                 logger.info(f"[ORDER] tradeID retrouvé: {trade_id}")
             else:
                 logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
-                tracer.log_step("new", "ORDER_NO_TRADE_ID", {"response": str(resp)[:500]}, resp)
                 return None
         logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
-        tracer.log_step(trade_id, "ORDER_CONFIRMED", {"pair": pair, "direction": direction}, resp)
         logger.info(f"[CONFIRM] Trade ouvert sans trailing")
         return str(trade_id)
     except Exception as exc:
         logger.exception(f"[ORDER] Erreur ordre OANDA {pair}: {exc}")
-        tracer.log_step("new", "ORDER_EXCEPTION", {"error": str(exc)}, None)
         return None
 
 # ============================================================
@@ -3631,28 +3519,26 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V94 - BOUCLE PRINCIPALE
+# V95 - BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V94 (Audit ATR)")
-    logger.info("📋 Trace des trades activée dans trade_trace.json")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V95 (Logs Décision)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R)")
     logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100 (60)")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("")
-    logger.info("🛡️ FILTRES V94 :")
-    logger.info("   - Volatilité minimum ATR (seuils conservés, audit actif)")
+    logger.info("🛡️ FILTRES V95 :")
+    logger.info("   - Volatilité minimum ATR (audit actif)")
     logger.info("   - Structure de marché (partielle acceptée)")
     logger.info("   - Pullback obligatoire (EUR=2, AUD=2, GBP=3)")
     logger.info("   - Confirmation par clôture M15")
     logger.info("   - Entry Quality Score (EQS) à 60/100")
-    logger.info("   - Scores minimum ajustés (EUR=10, GBP=9, AUD=8, XAU=9)")
-    logger.info("   - AUDIT ATR : affiche valeur brute, pips, seuil, écart")
+    logger.info("   - LOGS [DECISION] : une ligne par signal évalué")
     logger.info("")
     
-    diagnostic_startup_v94()
+    diagnostic_startup_v95()
     
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
@@ -3670,10 +3556,10 @@ if __name__ == "__main__":
             current_open_count = open_trade_count_v88()
             logger.info(f"[SCAN] Trades ouverts: {current_open_count}/{MAX_TRADES_TOTAL}")
             
-            check_breakeven_v94()
+            check_breakeven_v95()
             
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V94")
+                logger.info(f"⏰ Scan des signaux V95")
                 last_signal_scan = now
                 
                 now_dt = datetime.utcnow()
@@ -3682,7 +3568,7 @@ if __name__ == "__main__":
                 elif current_open_count >= MAX_TRADES_TOTAL:
                     logger.info(f"Limite trades atteinte")
                 else:
-                    advanced_main_v94()
+                    advanced_main_v95()
             
             time.sleep(30)
 
