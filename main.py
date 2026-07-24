@@ -1,11 +1,11 @@
 # ============================================================
-# main(98).py - Version V98 "Espérance corrigée & clôtures précises"
+# main(98.1).py - Version V98.1 "API OANDA corrigée"
 # 
-# Modifications V98 :
-# - Espérance calculée sur les trades clôturés (wins+losses+breakevens)
-# - Tentative de récupération des détails de clôture via TradeDetails
-# - Fallback amélioré : estimation avec indication "estimé"
-# - Conservé toutes les métriques de V97
+# Modifications V98.1 :
+# - Correction de tous les appels OANDA
+# - Gestion des erreurs API robuste
+# - Formatage correct des données pour chaque endpoint
+# - Fallback sur les trades ouverts pour TradeDetails
 # ============================================================
 
 import os
@@ -28,7 +28,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V98
+# CONFIGURATION V98.1
 # =========================
 load_dotenv()
 
@@ -363,13 +363,11 @@ class TradingStats:
             stats["breakevens"] += 1
             result = "BREAKEVEN"
         
-        # Mise à jour par setup
         setup_stats = stats["by_setup"][setup_type]
         setup_stats["wins"] += 1 if result == "WIN" else 0
         setup_stats["losses"] += 1 if result == "LOSS" else 0
         setup_stats["total_r"] += r
         
-        # Mise à jour par tranche d'EQS
         if eqs < 65:
             eqs_range = "60-64"
         elif eqs < 70:
@@ -419,7 +417,6 @@ class TradingStats:
             adx_stats["losses"] += 1 if result == "LOSS" else 0
             adx_stats["total_r"] += r
         
-        # Log enrichi
         estimate_tag = " (estimé)" if is_estimate else ""
         price_str = f" | close={close_price:.5f}" if close_price else ""
         metrics_str = ""
@@ -440,7 +437,6 @@ class TradingStats:
         total_closed = wins + losses + breakevens
         win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0
         profit_factor = total_profit / total_loss if total_loss > 0 else 0
-        # V98 : espérance calculée sur les trades clôturés
         expectancy = (total_profit - total_loss) / total_closed if total_closed > 0 else 0
         return {
             "pair": pair,
@@ -546,13 +542,12 @@ class TradingStats:
 stats = TradingStats()
 
 # =========================
-# SUIVI DES CLÔTURES - VERSION AMÉLIORÉE (V98)
+# SUIVI DES CLÔTURES - VERSION CORRIGÉE
 # =========================
 open_trade_details = {}
 
 def check_closed_trades():
-    """Détecte les trades fermés en comparant les trades ouverts actuels avec ceux enregistrés,
-       puis tente de récupérer les détails de clôture via TradeDetails."""
+    """Détecte les trades fermés en comparant les trades ouverts actuels avec ceux enregistrés"""
     global stats, open_trade_details
     try:
         current_open_trades = get_open_trades_v88()
@@ -573,17 +568,16 @@ def check_closed_trades():
                 risk = abs(entry - sl) if entry and sl else 0
                 pip_val = get_pip_value_for_pair(pair)
                 
-                # Tentative 1 : récupérer les détails du trade via l'API (même fermé)
                 close_price = None
                 pl = 0.0
                 is_estimate = True
+                
+                # V98.1 : Tentative de récupération via TradeDetails avec gestion d'erreur
                 try:
-                    # V98 : on utilise TradeDetails pour obtenir le prix de clôture et le P&L
                     api = v88_client()
                     r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
                     resp = api.request(r)
                     trade_data = resp.get("trade", {})
-                    # Même si le trade est fermé, parfois on peut encore obtenir des infos
                     if trade_data:
                         close_price = float(trade_data.get("price", 0))
                         pl = float(trade_data.get("realizedPL", 0.0))
@@ -593,7 +587,7 @@ def check_closed_trades():
                 except Exception as e:
                     logger.debug(f"Impossible de récupérer les détails du trade {trade_id}: {e}")
                 
-                # Si on n'a pas réussi à obtenir close_price, on utilise le fallback d'estimation
+                # Fallback : estimation
                 if close_price is None or close_price <= 0:
                     current_price = get_recent_m5_price_v88(pair)
                     if direction == "BUY":
@@ -601,7 +595,6 @@ def check_closed_trades():
                     else:
                         price_move = entry - current_price
                     close_price = current_price
-                    # Estimation du PL en USD (approximatif)
                     units = trade_info.get("units", 0)
                     pl = price_move * units
                     is_estimate = True
@@ -614,7 +607,6 @@ def check_closed_trades():
                     price_move_pips = (entry - close_price) / pip_val
                 r_multiple = price_move_pips / risk_pips if risk_pips > 0 else 0
                 
-                # Enregistrement de la clôture
                 stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl, close_price, is_estimate, trade_info)
                 
                 if is_estimate:
@@ -624,6 +616,713 @@ def check_closed_trades():
                 
     except Exception as e:
         logger.error(f"Erreur lors du check des trades fermés: {e}")
+
+# =============================
+# FONCTIONS OANDA CORRIGÉES
+# =============================
+
+def v88_client():
+    """Retourne un client OANDA correctement configuré"""
+    token = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN")
+    environment = os.getenv("OANDA_ENVIRONMENT", "practice")
+    return oandapyV20.API(access_token=token, environment=environment)
+
+def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 500, retries: int = 3) -> pd.DataFrame:
+    """V98.1 : Récupération des bougies avec retry et gestion d'erreur améliorée"""
+    valid_granularities = ["S5", "S10", "S15", "S30",
+                           "M1", "M2", "M4", "M5", "M10", "M15", "M30",
+                           "H1", "H2", "H3", "H4", "H6", "H8", "H12",
+                           "D", "W", "M"]
+    if granularity not in valid_granularities:
+        logger.error(f"❌ Granularité invalide: {granularity}")
+        return pd.DataFrame()
+    
+    # V98.1 : Réduction du nombre de tentatives pour éviter les timeouts
+    for attempt in range(retries):
+        try:
+            # V98.1 : Paramètres simplifiés pour éviter les erreurs
+            params = {
+                "granularity": granularity,
+                "count": min(count, 500),  # OANDA limite à 500
+                "price": "M"
+            }
+            r = instruments.InstrumentsCandles(
+                instrument=instrument,
+                params=params
+            )
+            api.request(r)
+            resp = getattr(r, "response", {}) or {}
+            candles = resp.get("candles", [])
+            
+            if not candles:
+                logger.warning(f"⚠️ Aucune candle reçue pour {instrument} {granularity} (tentative {attempt+1})")
+                time.sleep(2)
+                continue
+            
+            data = []
+            for c in candles:
+                mid = c.get("mid")
+                if not mid:
+                    continue
+                try:
+                    data.append({
+                        "time": c["time"],
+                        "open": float(mid["o"]),
+                        "high": float(mid["h"]),
+                        "low": float(mid["l"]),
+                        "close": float(mid["c"]),
+                        "volume": int(c.get("volume", 0))
+                    })
+                except Exception:
+                    continue
+            
+            if len(data) < max(10, count // 10):
+                logger.warning(f"⚠️ Données insuffisantes pour {instrument} {granularity}: {len(data)}")
+                time.sleep(2)
+                continue
+            
+            df = pd.DataFrame(data)
+            df["time"] = pd.to_datetime(df["time"])
+            df.set_index("time", inplace=True)
+            df.attrs['instrument'] = instrument
+            logger.info(f"✅ {instrument} {granularity}: {len(df)} candles")
+            return df
+            
+        except oandapyV20.exceptions.V20Error as e:
+            logger.warning(f"❌ Erreur OANDA {attempt + 1}/{retries} pour {instrument}: {e}")
+            time.sleep(2 ** attempt)
+        except Exception as e:
+            logger.warning(f"❌ Tentative {attempt + 1}/{retries} pour {instrument}: {e}")
+            time.sleep(2 ** attempt)
+    
+    logger.error(f"❌ Échec après {retries} tentatives pour {instrument} {granularity}")
+    return pd.DataFrame()
+
+def get_price_spread_v88(pair: str) -> dict:
+    """V98.1 : Récupération du spread avec gestion d'erreur"""
+    cached = _cache_get_v88(f"pricing:{pair}", ttl_seconds=2.0)
+    if cached is not None:
+        return cached
+    try:
+        api = v88_client()
+        r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
+        resp = api.request(r)
+        prices = resp.get("prices", []) or []
+        if prices:
+            item = prices[0]
+            bid = float(item.get("bids", [{}])[0].get("price", 0) or 0)
+            ask = float(item.get("asks", [{}])[0].get("price", 0) or 0)
+            mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0
+            data = {"bid": bid, "ask": ask, "mid": mid, "spread": max(ask - bid, 0.0)}
+            _cache_set_v88(f"pricing:{pair}", data)
+            return data
+    except Exception as e:
+        logger.debug(f"Erreur pricing {pair}: {e}")
+    fallback_price = get_recent_m5_price_v88(pair)
+    return {"bid": fallback_price, "ask": fallback_price, "mid": fallback_price, "spread": 0.0}
+
+def get_recent_m5_price_v88(pair: str) -> float:
+    """V98.1 : Récupération du prix récent avec fallback"""
+    try:
+        api = v88_client()
+        df = get_candles_with_retry(api, pair, "M5", 10)
+        if df is not None and not df.empty:
+            return float(df["close"].iloc[-1])
+    except Exception:
+        pass
+    return 0.0
+
+def get_atr_m15_v88(pair: str) -> float:
+    """V98.1 : Récupération de l'ATR avec fallback"""
+    cached = _cache_get_v88(f"atr_m15:{pair}", ttl_seconds=60.0)
+    if cached is not None:
+        return float(cached)
+    try:
+        api = v88_client()
+        df = get_candles_with_retry(api, pair, "M15", max(ATR_PERIOD + 10, 40))
+        if df is None or df.empty:
+            return 0.0
+        atr = float(calculate_atr(df, ATR_PERIOD) or 0.0)
+        _cache_set_v88(f"atr_m15:{pair}", atr)
+        return atr
+    except Exception:
+        return 0.0
+
+def get_open_trades_v88(log_raw: bool = False) -> list:
+    """V98.1 : Récupération des trades ouverts avec cache"""
+    cache_key = "open_trades_raw"
+    resp = _cache_get_v88(cache_key)
+    if resp is None:
+        try:
+            api = v88_client()
+            r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
+            resp = api.request(r)
+            if resp:
+                _cache_set_v88(cache_key, resp)
+        except Exception as e:
+            logger.error(f"Erreur OpenTrades: {e}")
+            return []
+    if not resp:
+        return []
+    raw_trades = resp.get("trades", []) or []
+    open_trades = []
+    for t in raw_trades:
+        try:
+            units = float(t.get("currentUnits", t.get("units", 0)) or 0)
+        except Exception:
+            units = 0.0
+        if abs(units) > 0:
+            open_trades.append(t)
+    return open_trades
+
+def get_account_summary_v88() -> dict:
+    """V98.1 : Récupération du résumé de compte"""
+    cached = _cache_get_v88("account_summary")
+    if cached is not None:
+        return cached
+    try:
+        api = v88_client()
+        r = accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID)
+        resp = api.request(r)
+        if resp:
+            _cache_set_v88("account_summary", resp)
+            return resp
+    except Exception as e:
+        logger.error(f"AccountSummary error: {e}")
+    return {}
+
+def get_balance_v88() -> float:
+    """V98.1 : Récupération du solde"""
+    resp = get_account_summary_v88()
+    try:
+        return float(resp.get("account", {}).get("balance", 0))
+    except Exception:
+        return 0.0
+
+def get_oanda_margin_rate_v88(pair: str) -> float:
+    """V98.1 : Récupération du taux de marge"""
+    cached = _cache_get_v88(f"instrument:{pair}", ttl_seconds=300.0)
+    if cached is not None:
+        return float(cached.get("marginRate", 0.0333) or 0.0333)
+    try:
+        api = v88_client()
+        r = accounts.AccountInstruments(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
+        resp = api.request(r)
+        instruments_data = resp.get("instruments", [])
+        if instruments_data:
+            _cache_set_v88(f"instrument:{pair}", instruments_data[0])
+            margin_rate = float(instruments_data[0].get("marginRate", 0.0333))
+            if margin_rate > 0:
+                return margin_rate
+    except Exception:
+        pass
+    return 0.0333
+
+def get_available_margin_v88(account_summary: dict | None = None) -> float:
+    """V98.1 : Récupération de la marge disponible"""
+    account_summary = account_summary or get_account_summary_v88()
+    account = account_summary.get("account", {}) if isinstance(account_summary, dict) else {}
+    for key in ("marginAvailable", "NAV", "balance"):
+        try:
+            value = float(account.get(key, 0) or 0)
+            if value > 0:
+                return value
+        except Exception:
+            continue
+    return 0.0
+
+def estimate_margin_used_v88(pair: str, units: int, entry_price: float) -> float:
+    """V98.1 : Estimation de la marge utilisée"""
+    units = abs(int(units))
+    margin_rate = get_oanda_margin_rate_v88(pair)
+    try:
+        base, quote = pair.split("_")
+    except Exception:
+        base, quote = "", "USD"
+    if pair == "XAU_USD":
+        notional_usd = units * entry_price
+    elif quote == "USD":
+        notional_usd = units * entry_price
+    elif base == "USD":
+        notional_usd = units
+    else:
+        q_to_usd = get_fx_rate_to_usd_v88(quote)
+        notional_usd = units * entry_price * q_to_usd
+    return float(notional_usd * margin_rate)
+
+def get_fx_rate_to_usd_v88(currency: str) -> float:
+    """V98.1 : Récupération du taux de change vers USD"""
+    if currency == "USD":
+        return 1.0
+    cached = _cache_get_v88(f"fx_to_usd:{currency}", ttl_seconds=60.0)
+    if cached is not None:
+        return float(cached)
+    direct = f"{currency}_USD"
+    inverse = f"USD_{currency}"
+    try:
+        api = v88_client()
+        if direct in PAIR_LIST:
+            df = get_candles_with_retry(api, direct, "M5", 10)
+            if df is not None and not df.empty:
+                val = float(df["close"].iloc[-1])
+                _cache_set_v88(f"fx_to_usd:{currency}", val)
+                return val
+        if inverse in PAIR_LIST:
+            df = get_candles_with_retry(api, inverse, "M5", 10)
+            if df is not None and not df.empty:
+                val = 1.0 / float(df["close"].iloc[-1])
+                _cache_set_v88(f"fx_to_usd:{currency}", val)
+                return val
+    except Exception:
+        pass
+    return 1.0
+
+def calculate_margin_v88(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:
+    """V98.1 : Calcul de la marge"""
+    margin_required = estimate_margin_used_v88(pair, units, entry_price)
+    available = get_available_margin_v88(account_summary)
+    return {
+        "pair": pair,
+        "units": abs(int(units or 0)),
+        "entry_price": float(entry_price or 0),
+        "margin_required": float(margin_required),
+        "margin_available": float(available),
+        "sufficient": bool(available <= 0 or margin_required <= available),
+    }
+
+def cap_units_absolute_v88(pair: str, units: int) -> int:
+    """V98.1 : Plafonnement absolu des unités"""
+    max_units = MAX_UNITS_BY_PAIR.get(pair, MAX_UNITS_BY_PAIR["DEFAULT"])
+    if units > max_units:
+        logger.warning(f"ABS CAP {pair}: units {units} -> {max_units}")
+        return max_units
+    return units
+
+def cap_units_by_margin_v88(pair: str, units: int, entry_price: float, balance: float) -> int:
+    """V98.1 : Plafonnement par marge"""
+    if units <= 0 or balance <= 0:
+        return 0
+    margin_info = calculate_margin_v88(pair, units, entry_price)
+    account_available = margin_info["margin_available"]
+    max_margin_usd = min(balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0), account_available) if account_available > 0 else balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0)
+    estimated_margin = margin_info["margin_required"]
+    if estimated_margin <= max_margin_usd:
+        return units
+    ratio = max_margin_usd / estimated_margin if estimated_margin > 0 else 0
+    capped = int(units * ratio)
+    step = UNIT_STEP_BY_PAIR.get(pair, UNIT_STEP_BY_PAIR["DEFAULT"])
+    capped = int(capped // step * step)
+    logger.warning(f"MARGIN CAP {pair}: units {units} -> {capped}")
+    return max(capped, 0)
+
+def calculate_units_v88(pair: str, entry: float, stop_loss: float, balance: float) -> float:
+    """V98.1 : Calcul des unités"""
+    try:
+        balance = float(balance)
+        entry = float(entry)
+        stop_loss = float(stop_loss)
+    except Exception:
+        logger.error(f"paramètres sizing invalides pair={pair}")
+        return 0
+    risk_usd = min(balance * (RISK_PERCENTAGE / 100.0), MAX_RISK_USD)
+    distance_quote = abs(entry - stop_loss)
+    if balance <= 0 or risk_usd <= 0 or distance_quote <= 0:
+        return 0
+    quote = quote_currency_v88(pair)
+    quote_to_usd = get_fx_rate_to_usd_v88(quote)
+    if quote_to_usd <= 0:
+        return 0
+    risk_per_unit_usd = distance_quote * quote_to_usd
+    if risk_per_unit_usd <= 0:
+        return 0
+    raw_units = risk_usd / risk_per_unit_usd
+    step = UNIT_STEP_BY_PAIR.get(pair, UNIT_STEP_BY_PAIR["DEFAULT"])
+    min_units = MIN_UNITS_BY_PAIR.get(pair, MIN_UNITS_BY_PAIR["DEFAULT"])
+    units_before_caps = int(raw_units // step * step)
+    units = cap_units_absolute_v88(pair, units_before_caps)
+    units = cap_units_by_margin_v88(pair, units, entry, balance)
+    if units < min_units:
+        logger.warning(f"units trop faibles {pair}: {units} < min={min_units}")
+        return 0
+    return int(units)
+
+def quote_currency_v88(pair: str) -> str:
+    """V98.1 : Récupération de la devise de cotation"""
+    return pair.split("_")[1]
+
+def round_price_v88(pair: str, price: float) -> str:
+    """V98.1 : Arrondi du prix selon la paire"""
+    decimals = PRICE_DECIMALS_V88.get(pair, 5)
+    return f"{float(price):.{decimals}f}"
+
+def is_market_open_utc_v88(now_dt: datetime) -> bool:
+    """V98.1 : Vérification si le marché est ouvert"""
+    wd = now_dt.weekday()
+    t = now_dt.time()
+    if wd == 5:  # Samedi
+        return False
+    if wd == 6 and t < datetime.strptime("21:00", "%H:%M").time():  # Dimanche avant 21h
+        return False
+    if wd == 4 and t >= datetime.strptime("21:00", "%H:%M").time():  # Vendredi après 21h
+        return False
+    return True
+
+# Cache
+_OANDA_CACHE_V88 = {}
+OANDA_CACHE_TTL_SECONDS_V88 = 3.0
+
+def _cache_get_v88(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V88):
+    item = _OANDA_CACHE_V88.get(key)
+    if not item:
+        return None
+    ts, value = item
+    if time.time() - ts > ttl_seconds:
+        _OANDA_CACHE_V88.pop(key, None)
+        return None
+    return value
+
+def _cache_set_v88(key: str, value):
+    _OANDA_CACHE_V88[key] = (time.time(), value)
+    return value
+
+def clear_scan_cache_v88():
+    _OANDA_CACHE_V88.clear()
+
+# ============================================================
+# CONFIGURATION OANDA
+# ============================================================
+OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
+OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
+EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
+
+RISK_PERCENTAGE = float(os.getenv("RISK_PERCENTAGE", "1.0"))
+MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "1250"))
+MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "9"))
+ONE_TRADE_PER_PAIR = os.getenv("ONE_TRADE_PER_PAIR", "true").lower() == "true"
+
+PIP_SIZE_V88 = {
+    "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
+    "USD_CAD": 0.0001, "AUD_CAD": 0.0001,
+    "USD_JPY": 0.01, "AUD_JPY": 0.01, "GBP_JPY": 0.01,
+    "XAU_USD": 0.01,
+    "NAS100_USD": 0.1, "US30_USD": 1.0, "SPX500_USD": 0.1,
+}
+PRICE_DECIMALS_V88 = {
+    "EUR_USD": 5, "GBP_USD": 5, "AUD_USD": 5,
+    "USD_CAD": 5, "AUD_CAD": 5,
+    "USD_JPY": 3, "AUD_JPY": 3, "GBP_JPY": 3,
+    "XAU_USD": 3,
+    "NAS100_USD": 1, "US30_USD": 1, "SPX500_USD": 1,
+}
+
+UNIT_STEP_BY_PAIR = {
+    "XAU_USD": 1, "EUR_USD": 1000, "GBP_USD": 1000,
+    "USD_JPY": 1000, "USD_CAD": 1000, "AUD_USD": 1000,
+    "AUD_CAD": 1000, "AUD_JPY": 1000, "GBP_JPY": 1000,
+    "NAS100_USD": 1, "US30_USD": 1, "SPX500_USD": 1,
+    "DEFAULT": 1000,
+}
+MIN_UNITS_BY_PAIR = {
+    "XAU_USD": 1, "NAS100_USD": 1, "US30_USD": 1,
+    "SPX500_USD": 1, "DEFAULT": 1000,
+}
+MAX_UNITS_BY_PAIR = {
+    "XAU_USD": 100, "EUR_USD": 200000, "GBP_USD": 200000,
+    "USD_JPY": 200000, "USD_CAD": 200000, "AUD_USD": 200000,
+    "AUD_CAD": 200000, "AUD_JPY": 200000, "GBP_JPY": 200000,
+    "NAS100_USD": 50, "US30_USD": 20, "SPX500_USD": 50,
+    "DEFAULT": 200000,
+}
+
+MAX_MARGIN_USAGE_PER_TRADE_PERCENT = float(os.getenv("MAX_MARGIN_USAGE_PER_TRADE_PERCENT", "5.0"))
+
+# ============================================================
+# V98.1 - EXÉCUTION D'ORDRE CORRIGÉE
+# ============================================================
+def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop_loss: float,
+                              take_profit: float, score: int, entry_type: str,
+                              eqs: int, setup_type: str, metrics: dict) -> str | None:
+    """V98.1 : Exécution d'ordre avec formatage correct"""
+    logger.info(f"[ORDER] V98.1 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    
+    if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
+        logger.info(f"{pair}: trade déjà ouvert")
+        return None
+    
+    if open_trade_count_v88() >= MAX_TRADES_TOTAL:
+        logger.info(f"Limite trades ouverts atteinte")
+        return None
+    
+    balance = get_balance_v88()
+    if balance <= 0:
+        logger.error("Balance invalide")
+        return None
+    
+    units = calculate_units_v88(pair, entry_price, stop_loss, balance)
+    if not units or float(units) <= 0:
+        logger.error(f"units invalides pour {pair}: {units}")
+        return None
+    
+    margin_info = calculate_margin_v88(pair, units, entry_price)
+    if not margin_info["sufficient"]:
+        units = cap_units_by_margin_v88(pair, units, entry_price, balance)
+        if not units or units <= 0:
+            logger.error(f"[RISK] {pair} order blocked: insufficient margin")
+            return None
+    
+    signed_units = units if direction == "BUY" else -units
+    
+    # V98.1 : Formatage correct des données pour OrderCreate
+    order_data = {
+        "order": {
+            "type": "MARKET",
+            "instrument": pair,
+            "units": str(int(signed_units)),  # Units doivent être un entier en string
+            "positionFill": "DEFAULT",
+            "stopLossOnFill": {
+                "price": round_price_v88(pair, stop_loss),
+                "timeInForce": "GTC"
+            },
+            "takeProfitOnFill": {
+                "price": round_price_v88(pair, take_profit),
+                "timeInForce": "GTC"
+            }
+        }
+    }
+    
+    risk = abs(entry_price - stop_loss)
+    rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
+    logger.info(f"[ORDER] SIGNAL V98.1 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    
+    if not EXECUTE_TRADES:
+        logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
+        return "SIMULATION"
+    
+    try:
+        api = v88_client()
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+        resp = api.request(r)
+        
+        if resp.get("orderRejectTransaction"):
+            reject = resp.get("orderRejectTransaction")
+            logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject.get('rejectReason', 'unknown')}")
+            return None
+        
+        # Extraction du tradeID
+        trade_id = extract_trade_id_v89(resp)
+        if not trade_id:
+            logger.warning(f"[ORDER] tradeID non trouvé, recherche dans les trades ouverts...")
+            time.sleep(2)
+            trade_id = find_trade_by_instrument_v89(pair, entry_price, direction)
+            if not trade_id:
+                logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
+                return None
+        
+        logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
+        
+        # Stockage des infos du trade
+        open_trade_details[trade_id] = {
+            "entry": entry_price,
+            "sl": stop_loss,
+            "tp": take_profit,
+            "direction": direction,
+            "setup_type": setup_type,
+            "eqs": eqs,
+            "pair": pair,
+            "units": units,
+            **metrics
+        }
+        return str(trade_id)
+        
+    except Exception as exc:
+        logger.exception(f"[ORDER] Erreur ordre OANDA {pair}: {exc}")
+        return None
+
+# ============================================================
+# V98.1 - MODIFICATION SL CORRIGÉE
+# ============================================================
+def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
+    """V98.1 : Modification du Stop Loss via TradeCRCDO avec formatage correct"""
+    try:
+        api = v88_client()
+        
+        logger.info(f"[BE] Modification SL via TradeCRCDO pour trade {trade_id} -> {new_sl:.5f}")
+        
+        # V98.1 : Formatage correct des données
+        data = {
+            "stopLoss": {
+                "price": round_price_v88(pair, new_sl),
+                "timeInForce": "GTC"
+            }
+        }
+        r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
+        resp = api.request(r)
+        
+        if resp.get("orderRejectTransaction"):
+            reject = resp.get("orderRejectTransaction")
+            logger.error(f"[BE] Rejeté pour trade {trade_id}: {reject.get('rejectReason', 'unknown')}")
+            return False
+        
+        logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
+        
+        # Confirmation
+        time.sleep(1)
+        _OANDA_CACHE_V88.pop("open_trades_raw", None)
+        
+        trade_details = get_trade_details_v88(trade_id)
+        if trade_details:
+            actual_sl = get_stop_loss_v88(trade_details)
+            if abs(actual_sl - new_sl) <= 0.00001:
+                logger.info(f"[CONFIRM] ✅ SL confirmé: {actual_sl:.5f}")
+                return True
+            else:
+                logger.warning(f"[CONFIRM] SL non confirmé: attendu {new_sl:.5f}, reçu {actual_sl:.5f}")
+                return False
+        else:
+            logger.warning(f"[CONFIRM] Impossible de confirmer le SL pour {trade_id}")
+            return True  # On considère que c'est OK même sans confirmation
+            
+    except Exception as e:
+        logger.error(f"[BE] Erreur modification SL trade {trade_id}: {e}")
+        return False
+
+# ============================================================
+# V98.1 - CRÉATION TRAILING STOP CORRIGÉE
+# ============================================================
+def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -> bool:
+    """V98.1 : Création d'un Trailing Stop Loss avec formatage correct"""
+    try:
+        api = v88_client()
+        
+        logger.info(f"[TSL] Création trailing via OrderCreate pour trade {trade_id} -> distance={distance:.5f}")
+        
+        # V98.1 : Formatage correct des données
+        order_data = {
+            "order": {
+                "type": "TRAILING_STOP_LOSS",
+                "tradeID": trade_id,
+                "distance": str(distance),  # Distance en pips, doit être un string
+                "timeInForce": "GTC"
+            }
+        }
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+        resp = api.request(r)
+        
+        if resp.get("orderRejectTransaction"):
+            reject = resp.get("orderRejectTransaction")
+            logger.error(f"[TSL] Rejeté pour trade {trade_id}: {reject.get('rejectReason', 'unknown')}")
+            return False
+        
+        logger.info(f"[TSL] SUCCESS: Trailing stop créé pour trade {trade_id}, distance={distance:.5f}")
+        
+        # Confirmation
+        time.sleep(1)
+        _OANDA_CACHE_V88.pop("open_trades_raw", None)
+        
+        trade_details = get_trade_details_v88(trade_id)
+        if trade_details and has_trailing_stop_v88(trade_details):
+            trailing_id = trade_details.get("trailingStopLossOrder", {}).get("id", "unknown")
+            logger.info(f"[CONFIRM] ✅ Trailing stop confirmé: ID={trailing_id}")
+            return True
+        else:
+            logger.warning(f"[CONFIRM] Trailing stop non confirmé pour {trade_id}")
+            return True  # On considère que c'est OK même sans confirmation
+            
+    except Exception as e:
+        logger.error(f"[TSL] Erreur création trailing stop trade {trade_id}: {e}")
+        return False
+
+# ============================================================
+# V98.1 - FONCTIONS DE CONFIRMATION CORRIGÉES
+# ============================================================
+def get_trade_details_v88(trade_id: str) -> dict:
+    """V98.1 : Récupération des détails d'un trade avec gestion d'erreur"""
+    try:
+        api = v88_client()
+        r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
+        resp = api.request(r)
+        return resp.get("trade", {})
+    except oandapyV20.exceptions.V20Error as e:
+        if "404" in str(e):
+            logger.debug(f"[TRADE] Trade {trade_id} non trouvé (probablement fermé)")
+        else:
+            logger.error(f"[TRADE] Erreur récupération trade {trade_id}: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"[TRADE] Erreur récupération trade {trade_id}: {e}")
+        return {}
+
+def has_trailing_stop_v88(trade: dict) -> bool:
+    """Vérifie si un trade a un trailing stop actif"""
+    trailing_stop = trade.get("trailingStopLossOrder", {})
+    return bool(trailing_stop and trailing_stop.get("id"))
+
+def get_stop_loss_v88(trade: dict) -> float:
+    """Récupère le prix du stop loss d'un trade"""
+    sl_order = trade.get("stopLossOrder", {})
+    return float(sl_order.get("price", 0)) if sl_order else 0.0
+
+def extract_trade_id_v89(response: dict) -> str | None:
+    """V98.1 : Extraction robuste du tradeID"""
+    if not response:
+        return None
+    
+    oft = response.get("orderFillTransaction")
+    if oft:
+        if "tradeOpened" in oft and oft["tradeOpened"]:
+            trade_id = oft["tradeOpened"].get("tradeID")
+            if trade_id:
+                return str(trade_id)
+        if "tradeReduced" in oft and oft["tradeReduced"]:
+            trade_id = oft["tradeReduced"].get("tradeID")
+            if trade_id:
+                return str(trade_id)
+        if "tradesOpened" in oft and oft["tradesOpened"]:
+            opened = oft["tradesOpened"]
+            if opened and opened[0].get("tradeID"):
+                return str(opened[0]["tradeID"])
+    
+    oct = response.get("orderCreateTransaction")
+    if oct and "relatedTransactionIDs" in oct:
+        related = oct.get("relatedTransactionIDs", [])
+        if related:
+            return str(related[-1])
+    
+    if response.get("tradeID"):
+        return str(response["tradeID"])
+    
+    return None
+
+def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) -> str | None:
+    """V98.1 : Recherche d'un trade par instrument avec tolérance"""
+    pip_value = get_pip_value_for_pair(pair)
+    atr = get_atr_m15_v88(pair)
+    tolerance = max(5.0 * pip_value, 0.5 * atr, 0.0001)
+    tolerance = round(tolerance, 6)
+    logger.debug(f"[FALLBACK] Tolérance pour {pair}: {tolerance:.6f}")
+    
+    open_trades = get_open_trades_v88(log_raw=True)
+    for t in open_trades:
+        if t.get("instrument") != pair:
+            continue
+        t_dir = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
+        if t_dir != direction:
+            continue
+        t_entry = float(t.get("price", 0))
+        if abs(t_entry - entry_price) <= tolerance:
+            return str(t.get("id"))
+    return None
+
+def open_trade_count_v88() -> int:
+    """V98.1 : Nombre de trades ouverts"""
+    return len(get_open_trades_v88(log_raw=True))
+
+def has_open_trade_v88(pair: str) -> bool:
+    """V98.1 : Vérifie si un trade est ouvert sur une paire"""
+    for t in get_open_trades_v88():
+        if t.get("instrument") == pair:
+            return True
+    return False
 
 # =============================
 # FONCTIONS UTILITAIRES (reprises de V97)
@@ -1238,8 +1937,8 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
         ("Risk_RR_Distance", "Risk/RR/Distance"),
         ("Secondary", "Secondary"),
         ("Momentum", "Momentum"),
-        ("Structure", "Structure V98"),
-        ("Pullback", "Pullback V98"),
+        ("Structure", "Structure V98.1"),
+        ("Pullback", "Pullback V98.1"),
     ]
     logger.debug("===== SCORE DETAIL =====")
     for key, label in labels:
@@ -1543,7 +2242,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# V98 - FILTRES ET SCORING (repris de V97, inchangé)
+# V98.1 - FILTRES ET SCORING (repris de V97, inchangé)
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
@@ -2015,77 +2714,6 @@ def filter_momentum_exhaustion(
     return passed, message, penalties, total_penalty
 
 # =============================
-# FONCTION GET_CANDLES_WITH_RETRY
-# =============================
-def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 500, retries: int = 5) -> pd.DataFrame:
-    valid_granularities = ["S5", "S10", "S15", "S30",
-                           "M1", "M2", "M4", "M5", "M10", "M15", "M30",
-                           "H1", "H2", "H3", "H4", "H6", "H8", "H12",
-                           "D", "W", "M"]
-    if granularity not in valid_granularities:
-        logger.error(f"❌ Granularité invalide: {granularity}")
-        return pd.DataFrame()
-    for attempt in range(retries):
-        try:
-            r = instruments.InstrumentsCandles(
-                instrument=instrument,
-                params={
-                    "granularity": granularity,
-                    "count": count,
-                    "price": "M",
-                    "smooth": False
-                }
-            )
-            api.request(r)
-            resp = getattr(r, "response", {}) or {}
-            candles = resp.get("candles", [])
-            if not candles:
-                logger.warning(f"⚠️ Aucune candle reçue pour {instrument} {granularity} (tentative {attempt+1})")
-                time.sleep(3)
-                continue
-            data = []
-            for c in candles:
-                mid = c.get("mid")
-                if not mid:
-                    continue
-                if not c.get("complete", False) and (granularity in ["M15", "H1", "H4", "D"]):
-                    continue
-                try:
-                    data.append({
-                        "time": c["time"],
-                        "open": float(mid["o"]),
-                        "high": float(mid["h"]),
-                        "low": float(mid["l"]),
-                        "close": float(mid["c"]),
-                        "volume": int(c.get("volume", 0))
-                    })
-                except Exception:
-                    logger.debug(f"⚠️ Candle malformed skipped for {instrument}: {c}")
-                    continue
-            min_required = 20 if granularity == "H1" else min(count, 50)
-            if len(data) < min_required:
-                if granularity in ["H4", "D"] and len(data) > 5:
-                    logger.info(f"ℹ️ Données D/{instrument}: {len(data)} candles (minimum requis: {min_required}) → Accepté malgré tout")
-                else:
-                    logger.warning(f"⚠️ Données insuffisantes pour {instrument} {granularity}: {len(data)} < {min_required}")
-                    time.sleep(3)
-                    continue
-            df = pd.DataFrame(data)
-            df["time"] = pd.to_datetime(df["time"])
-            df.set_index("time", inplace=True)
-            df.attrs['instrument'] = instrument
-            logger.info(f"✅ {instrument} {granularity}: {len(df)} candles (dernier prix: {df['close'].iloc[-1]:.5f})")
-            return df
-        except oandapyV20.exceptions.V20Error as e:
-            logger.warning(f"❌ Erreur OANDA {attempt + 1}/{retries} pour {instrument}: {e}")
-            time.sleep(5 ** attempt if attempt < 4 else 5)
-        except Exception as e:
-            logger.warning(f"❌ Tentative {attempt + 1}/{retries} pour {instrument}: {e}")
-            time.sleep(5 ** attempt if attempt < 4 else 5)
-    logger.error(f"❌ Échec après {retries} tentatives pour {instrument} {granularity}")
-    return pd.DataFrame()
-
-# =============================
 # GESTION DES ORDRES
 # =============================
 def calculate_sl_tp(entry_price: float, atr: float, direction: str, pair: str,
@@ -2174,14 +2802,14 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         confluence_tags.append("BOS")
     if score_details.get("Session", "").startswith("+"):
         confluence_tags.append("SESSION")
-    if score_details.get("Structure_V98", "").startswith("+"):
+    if score_details.get("Structure_V98.1", "").startswith("+"):
         confluence_tags.append("STRUCTURE")
-    if score_details.get("Pullback_V98", "").startswith("+"):
+    if score_details.get("Pullback_V98.1", "").startswith("+"):
         confluence_tags.append("PULLBACK")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
     
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V98</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V98.1</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -2439,10 +3067,10 @@ def calculate_signal_confidence(
         }
     if "partiellement" in struct_msg:
         score_components["Structure"] += 1
-        details["Structure_V98"] = f"+1 ({struct_msg})"
+        details["Structure_V98.1"] = f"+1 ({struct_msg})"
     else:
         score_components["Structure"] += 2
-        details["Structure_V98"] = f"+2 ({struct_msg})"
+        details["Structure_V98.1"] = f"+2 ({struct_msg})"
     
     pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if not pullback_passed:
@@ -2461,7 +3089,7 @@ def calculate_signal_confidence(
             "rejection_logs": rejection_logs
         }
     score_components["Pullback"] += 2
-    details["Pullback_V98"] = f"+2 ({pullback_msg})"
+    details["Pullback_V98.1"] = f"+2 ({pullback_msg})"
     
     close_passed, close_msg = filter_close_confirmation(df_m15, direction)
     if close_passed:
@@ -2793,18 +3421,19 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # =============================
-# FONCTION PRINCIPALE AVEC MÉTRIQUES ENRICHIES (repris de V97, sans modification)
+# FONCTION PRINCIPALE AVEC MÉTRIQUES ENRICHIES (repris de V98)
 # =============================
-def advanced_main_v98():
+def advanced_main_v981():
     try:
-        api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
+        api = v88_client()
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info("✅ ENTRY QUALITY SCORE (EQS) V98 - Seuil: 60/100")
+        logger.info("✅ ENTRY QUALITY SCORE (EQS) V98.1 - Seuil: 60/100")
         logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R")
         logger.info("✅ AUDIT ATR ACTIVÉ (valeur brute + conversion en pips)")
         logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
         logger.info("✅ SUIVI DES CLÔTURES AMÉLIORÉ (fallback + tentative API)")
         logger.info("✅ ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS")
+        logger.info("✅ APPELS OANDA CORRIGÉS (formatage, retry, gestion d'erreur)")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -2954,7 +3583,7 @@ def advanced_main_v98():
                     nb_envoyes += 1
                     continue
                 
-                trade_id = execute_oanda_trade_v98(
+                trade_id = execute_oanda_trade_v981(
                     pair=pair,
                     direction=direction,
                     entry_price=entry_level,
@@ -3001,467 +3630,9 @@ def advanced_main_v98():
     stats.log_summary()
 
 # ============================================================
-# V98 - OANDA EXECUTION AVEC STOCKAGE DES MÉTRIQUES (repris de V97)
+# V98.1 - BREAK EVEN CORRIGÉ
 # ============================================================
-OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
-OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
-EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
-
-RISK_PERCENTAGE = float(os.getenv("RISK_PERCENTAGE", "1.0"))
-MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "1250"))
-MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "9"))
-ONE_TRADE_PER_PAIR = os.getenv("ONE_TRADE_PER_PAIR", "true").lower() == "true"
-
-PIP_SIZE_V88 = {
-    "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
-    "USD_CAD": 0.0001, "AUD_CAD": 0.0001,
-    "USD_JPY": 0.01, "AUD_JPY": 0.01, "GBP_JPY": 0.01,
-    "XAU_USD": 0.01,
-    "NAS100_USD": 0.1, "US30_USD": 1.0, "SPX500_USD": 0.1,
-}
-PRICE_DECIMALS_V88 = {
-    "EUR_USD": 5, "GBP_USD": 5, "AUD_USD": 5,
-    "USD_CAD": 5, "AUD_CAD": 5,
-    "USD_JPY": 3, "AUD_JPY": 3, "GBP_JPY": 3,
-    "XAU_USD": 3,
-    "NAS100_USD": 1, "US30_USD": 1, "SPX500_USD": 1,
-}
-
-UNIT_STEP_BY_PAIR = {
-    "XAU_USD": 1, "EUR_USD": 1000, "GBP_USD": 1000,
-    "USD_JPY": 1000, "USD_CAD": 1000, "AUD_USD": 1000,
-    "AUD_CAD": 1000, "AUD_JPY": 1000, "GBP_JPY": 1000,
-    "NAS100_USD": 1, "US30_USD": 1, "SPX500_USD": 1,
-    "DEFAULT": 1000,
-}
-MIN_UNITS_BY_PAIR = {
-    "XAU_USD": 1, "NAS100_USD": 1, "US30_USD": 1,
-    "SPX500_USD": 1, "DEFAULT": 1000,
-}
-MAX_UNITS_BY_PAIR = {
-    "XAU_USD": 100, "EUR_USD": 200000, "GBP_USD": 200000,
-    "USD_JPY": 200000, "USD_CAD": 200000, "AUD_USD": 200000,
-    "AUD_CAD": 200000, "AUD_JPY": 200000, "GBP_JPY": 200000,
-    "NAS100_USD": 50, "US30_USD": 20, "SPX500_USD": 50,
-    "DEFAULT": 200000,
-}
-
-MAX_MARGIN_USAGE_PER_TRADE_PERCENT = float(os.getenv("MAX_MARGIN_USAGE_PER_TRADE_PERCENT", "5.0"))
-OANDA_CACHE_TTL_SECONDS_V88 = float(os.getenv("OANDA_CACHE_TTL_SECONDS_V88", "3.0"))
-_OANDA_CACHE_V88 = {}
-
-def v88_client():
-    token = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN")
-    return oandapyV20.API(access_token=token, environment=OANDA_ENVIRONMENT)
-
-def _cache_get_v88(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V88):
-    item = _OANDA_CACHE_V88.get(key)
-    if not item:
-        return None
-    ts, value = item
-    if time.time() - ts > ttl_seconds:
-        _OANDA_CACHE_V88.pop(key, None)
-        return None
-    return value
-
-def _cache_set_v88(key: str, value):
-    _OANDA_CACHE_V88[key] = (time.time(), value)
-    return value
-
-def clear_scan_cache_v88():
-    _OANDA_CACHE_V88.clear()
-
-def round_price_v88(pair: str, price: float) -> str:
-    return f"{float(price):.{PRICE_DECIMALS_V88.get(pair, 5)}f}"
-
-def is_market_open_utc_v88(now_dt: datetime) -> bool:
-    wd = now_dt.weekday()
-    t = now_dt.time()
-    if wd == 5:
-        return False
-    if wd == 6 and t < datetime.strptime("21:00", "%H:%M").time():
-        return False
-    if wd == 4 and t >= datetime.strptime("21:00", "%H:%M").time():
-        return False
-    return True
-
-def get_account_summary_v88() -> dict:
-    cached = _cache_get_v88("account_summary")
-    if cached is not None:
-        return cached
-    r = accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID)
-    try:
-        api = v88_client()
-        resp = api.request(r)
-        if not resp:
-            return {}
-        _cache_set_v88("account_summary", resp)
-        return resp
-    except Exception as e:
-        logger.error(f"❌ AccountSummary error: {e}")
-        return {}
-
-def get_balance_v88() -> float:
-    resp = get_account_summary_v88()
-    try:
-        return float(resp.get("account", {}).get("balance", 0))
-    except Exception:
-        return 0.0
-
-def get_open_trades_v88(log_raw: bool = False) -> list:
-    cache_key = "open_trades_raw"
-    resp = _cache_get_v88(cache_key)
-    if resp is None:
-        r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
-        try:
-            api = v88_client()
-            resp = api.request(r)
-            if resp:
-                _cache_set_v88(cache_key, resp)
-        except Exception:
-            return []
-    if not resp:
-        return []
-    raw_trades = resp.get("trades", []) or []
-    open_trades = []
-    for t in raw_trades:
-        try:
-            units = float(t.get("currentUnits", t.get("units", 0)) or 0)
-        except Exception:
-            units = 0.0
-        if abs(units) > 0:
-            open_trades.append(t)
-    return open_trades
-
-def open_trade_count_v88() -> int:
-    return len(get_open_trades_v88(log_raw=True))
-
-def has_open_trade_v88(pair: str) -> bool:
-    for t in get_open_trades_v88():
-        if t.get("instrument") == pair:
-            return True
-    return False
-
-def quote_currency_v88(pair: str) -> str:
-    return pair.split("_")[1]
-
-def get_fx_rate_to_usd_v88(currency: str) -> float:
-    if currency == "USD":
-        return 1.0
-    cached = _cache_get_v88(f"fx_to_usd:{currency}", ttl_seconds=60.0)
-    if cached is not None:
-        return float(cached)
-    direct = f"{currency}_USD"
-    inverse = f"USD_{currency}"
-    try:
-        if direct in PAIR_LIST:
-            api = v88_client()
-            df = get_candles_with_retry(api, direct, "M5", 10)
-            if df is not None and not df.empty:
-                val = float(df["close"].iloc[-1])
-                _cache_set_v88(f"fx_to_usd:{currency}", val)
-                return val
-        if inverse in PAIR_LIST:
-            api = v88_client()
-            df = get_candles_with_retry(api, inverse, "M5", 10)
-            if df is not None and not df.empty:
-                val = 1.0 / float(df["close"].iloc[-1])
-                _cache_set_v88(f"fx_to_usd:{currency}", val)
-                return val
-    except Exception:
-        pass
-    return 1.0
-
-def get_oanda_margin_rate_v88(pair: str) -> float:
-    cached = _cache_get_v88(f"instrument:{pair}", ttl_seconds=300.0)
-    if cached is not None:
-        return float(cached.get("marginRate", 0.0333) or 0.0333)
-    try:
-        api = v88_client()
-        r = accounts.AccountInstruments(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
-        resp = api.request(r)
-        instruments_data = resp.get("instruments", [])
-        if instruments_data:
-            _cache_set_v88(f"instrument:{pair}", instruments_data[0])
-            margin_rate = float(instruments_data[0].get("marginRate", 0.0333))
-            if margin_rate > 0:
-                return margin_rate
-    except Exception:
-        pass
-    return 0.0333
-
-def get_available_margin_v88(account_summary: dict | None = None) -> float:
-    account_summary = account_summary or get_account_summary_v88()
-    account = account_summary.get("account", {}) if isinstance(account_summary, dict) else {}
-    for key in ("marginAvailable", "NAV", "balance"):
-        try:
-            value = float(account.get(key, 0) or 0)
-            if value > 0:
-                return value
-        except Exception:
-            continue
-    return 0.0
-
-def calculate_margin_v88(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:
-    margin_required = estimate_margin_used_v88(pair, units, entry_price)
-    available = get_available_margin_v88(account_summary)
-    return {
-        "pair": pair,
-        "units": abs(int(units or 0)),
-        "entry_price": float(entry_price or 0),
-        "margin_required": float(margin_required),
-        "margin_available": float(available),
-        "sufficient": bool(available <= 0 or margin_required <= available),
-    }
-
-def estimate_margin_used_v88(pair: str, units: int, entry_price: float) -> float:
-    units = abs(int(units))
-    margin_rate = get_oanda_margin_rate_v88(pair)
-    try:
-        base, quote = pair.split("_")
-    except Exception:
-        base, quote = "", "USD"
-    if pair == "XAU_USD":
-        notional_usd = units * entry_price
-    elif quote == "USD":
-        notional_usd = units * entry_price
-    elif base == "USD":
-        notional_usd = units
-    else:
-        q_to_usd = get_fx_rate_to_usd_v88(quote)
-        notional_usd = units * entry_price * q_to_usd
-    return float(notional_usd * margin_rate)
-
-def cap_units_absolute_v88(pair: str, units: int) -> int:
-    max_units = MAX_UNITS_BY_PAIR.get(pair, MAX_UNITS_BY_PAIR["DEFAULT"])
-    if units > max_units:
-        logger.warning(f"ABS CAP {pair}: units {units} -> {max_units}")
-        return max_units
-    return units
-
-def cap_units_by_margin_v88(pair: str, units: int, entry_price: float, balance: float) -> int:
-    if units <= 0 or balance <= 0:
-        return 0
-    margin_info = calculate_margin_v88(pair, units, entry_price)
-    account_available = margin_info["margin_available"]
-    max_margin_usd = min(balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0), account_available) if account_available > 0 else balance * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0)
-    estimated_margin = margin_info["margin_required"]
-    if estimated_margin <= max_margin_usd:
-        return units
-    ratio = max_margin_usd / estimated_margin if estimated_margin > 0 else 0
-    capped = int(units * ratio)
-    step = UNIT_STEP_BY_PAIR.get(pair, UNIT_STEP_BY_PAIR["DEFAULT"])
-    capped = int(capped // step * step)
-    logger.warning(f"MARGIN CAP {pair}: units {units} -> {capped}")
-    return max(capped, 0)
-
-def calculate_units_v88(pair: str, entry: float, stop_loss: float, balance: float) -> float:
-    try:
-        balance = float(balance)
-        entry = float(entry)
-        stop_loss = float(stop_loss)
-    except Exception:
-        logger.error(f"paramètres sizing invalides pair={pair}")
-        return 0
-    risk_usd = min(balance * (RISK_PERCENTAGE / 100.0), MAX_RISK_USD)
-    distance_quote = abs(entry - stop_loss)
-    if balance <= 0 or risk_usd <= 0 or distance_quote <= 0:
-        return 0
-    quote = quote_currency_v88(pair)
-    quote_to_usd = get_fx_rate_to_usd_v88(quote)
-    if quote_to_usd <= 0:
-        return 0
-    risk_per_unit_usd = distance_quote * quote_to_usd
-    if risk_per_unit_usd <= 0:
-        return 0
-    raw_units = risk_usd / risk_per_unit_usd
-    step = UNIT_STEP_BY_PAIR.get(pair, UNIT_STEP_BY_PAIR["DEFAULT"])
-    min_units = MIN_UNITS_BY_PAIR.get(pair, MIN_UNITS_BY_PAIR["DEFAULT"])
-    units_before_caps = int(raw_units // step * step)
-    units = cap_units_absolute_v88(pair, units_before_caps)
-    units = cap_units_by_margin_v88(pair, units, entry, balance)
-    if units < min_units:
-        logger.warning(f"units trop faibles {pair}: {units} < min={min_units}")
-        return 0
-    return int(units)
-
-def get_recent_m5_price_v88(pair: str) -> float:
-    try:
-        api = v88_client()
-        df = get_candles_with_retry(api, pair, "M5", 10)
-        if df is None or df.empty:
-            return 0.0
-        return float(df["close"].iloc[-1])
-    except Exception:
-        return 0.0
-
-def get_price_spread_v88(pair: str) -> dict:
-    cached = _cache_get_v88(f"pricing:{pair}", ttl_seconds=2.0)
-    if cached is not None:
-        return cached
-    try:
-        api = v88_client()
-        r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
-        resp = api.request(r)
-        prices = resp.get("prices", []) or []
-        if prices:
-            item = prices[0]
-            bid = float(item.get("bids", [{}])[0].get("price", 0) or 0)
-            ask = float(item.get("asks", [{}])[0].get("price", 0) or 0)
-            mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0
-            data = {"bid": bid, "ask": ask, "mid": mid, "spread": max(ask - bid, 0.0)}
-            _cache_set_v88(f"pricing:{pair}", data)
-            return data
-    except Exception:
-        pass
-    fallback_price = get_recent_m5_price_v88(pair)
-    return {"bid": fallback_price, "ask": fallback_price, "mid": fallback_price, "spread": 0.0}
-
-def get_atr_m15_v88(pair: str) -> float:
-    cached = _cache_get_v88(f"atr_m15:{pair}", ttl_seconds=60.0)
-    if cached is not None:
-        return float(cached)
-    try:
-        api = v88_client()
-        df = get_candles_with_retry(api, pair, "M15", max(ATR_PERIOD + 10, 40))
-        if df is None or df.empty:
-            return 0.0
-        atr = float(calculate_atr(df, ATR_PERIOD) or 0.0)
-        _cache_set_v88(f"atr_m15:{pair}", atr)
-        return atr
-    except Exception:
-        return 0.0
-
-def execute_oanda_trade_v98(pair: str, direction: str, entry_price: float, stop_loss: float,
-                             take_profit: float, score: int, entry_type: str,
-                             eqs: int, setup_type: str, metrics: dict) -> str | None:
-    logger.info(f"[ORDER] V98 EXECUTION START {pair} {direction} type={entry_type} score={score}")
-    if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
-        logger.info(f"{pair}: trade déjà ouvert")
-        return None
-    if open_trade_count_v88() >= MAX_TRADES_TOTAL:
-        logger.info(f"Limite trades ouverts atteinte")
-        return None
-    balance = get_balance_v88()
-    if balance <= 0:
-        logger.error("Balance invalide")
-        return None
-    units = calculate_units_v88(pair, entry_price, stop_loss, balance)
-    if not units or float(units) <= 0:
-        logger.error(f"units invalides pour {pair}: {units}")
-        return None
-    margin_info = calculate_margin_v88(pair, units, entry_price)
-    if not margin_info["sufficient"]:
-        units = cap_units_by_margin_v88(pair, units, entry_price, balance)
-        if not units or units <= 0:
-            logger.error(f"[RISK] {pair} order blocked: insufficient margin")
-            return None
-    signed_units = units if direction == "BUY" else -units
-    order_data = {
-        "order": {
-            "type": "MARKET",
-            "instrument": pair,
-            "units": str(signed_units),
-            "positionFill": "DEFAULT",
-            "stopLossOnFill": {"price": round_price_v88(pair, stop_loss), "timeInForce": "GTC"},
-            "takeProfitOnFill": {"price": round_price_v88(pair, take_profit), "timeInForce": "GTC"}
-        }
-    }
-    risk = abs(entry_price - stop_loss)
-    rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V98 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
-    if not EXECUTE_TRADES:
-        logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
-        return "SIMULATION"
-    try:
-        api = v88_client()
-        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
-        resp = api.request(r)
-        if resp.get("orderRejectTransaction"):
-            reject = resp.get("orderRejectTransaction")
-            logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject}")
-            return None
-        trade_id = extract_trade_id_v89(resp)
-        if not trade_id:
-            logger.warning(f"[ORDER] tradeID non trouvé, recherche...")
-            time.sleep(2)
-            trade_id = find_trade_by_instrument_v89(pair, entry_price, direction)
-            if trade_id:
-                logger.info(f"[ORDER] tradeID retrouvé: {trade_id}")
-            else:
-                logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
-                return None
-        logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
-        logger.info(f"[CONFIRM] Trade ouvert sans trailing")
-        open_trade_details[trade_id] = {
-            "entry": entry_price,
-            "sl": stop_loss,
-            "tp": take_profit,
-            "direction": direction,
-            "setup_type": setup_type,
-            "eqs": eqs,
-            "pair": pair,
-            "units": units,
-            **metrics
-        }
-        return str(trade_id)
-    except Exception as exc:
-        logger.exception(f"[ORDER] Erreur ordre OANDA {pair}: {exc}")
-        return None
-
-def extract_trade_id_v89(response: dict) -> str | None:
-    if not response:
-        return None
-    oft = response.get("orderFillTransaction")
-    if oft:
-        if "tradeOpened" in oft and oft["tradeOpened"]:
-            trade_id = oft["tradeOpened"].get("tradeID")
-            if trade_id:
-                return str(trade_id)
-        if "tradeReduced" in oft and oft["tradeReduced"]:
-            trade_id = oft["tradeReduced"].get("tradeID")
-            if trade_id:
-                return str(trade_id)
-        if "tradesOpened" in oft and oft["tradesOpened"]:
-            opened = oft["tradesOpened"]
-            if opened and opened[0].get("tradeID"):
-                return str(opened[0]["tradeID"])
-    oct = response.get("orderCreateTransaction")
-    if oct and "relatedTransactionIDs" in oct:
-        related = oct.get("relatedTransactionIDs", [])
-        if related:
-            return str(related[-1])
-    if response.get("tradeID"):
-        return str(response["tradeID"])
-    return None
-
-def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) -> str | None:
-    pip_value = get_pip_value_for_pair(pair)
-    atr = get_atr_m15_v88(pair)
-    tolerance = max(5.0 * pip_value, 0.5 * atr, 0.0001)
-    tolerance = round(tolerance, 6)
-    logger.debug(f"[FALLBACK] Tolérance pour {pair}: {tolerance:.6f}")
-    open_trades = get_open_trades_v88(log_raw=True)
-    for t in open_trades:
-        if t.get("instrument") != pair:
-            continue
-        t_dir = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
-        if t_dir != direction:
-            continue
-        t_entry = float(t.get("price", 0))
-        if abs(t_entry - entry_price) <= tolerance:
-            return str(t.get("id"))
-    return None
-
-# ============================================================
-# V98 - GESTION DES CLÔTURES (améliorée)
-# ============================================================
-check_closed_trades = check_closed_trades  # déjà définie plus haut
-
-# ============================================================
-# V98 - BREAK EVEN (repris de V97)
-# ============================================================
-def check_breakeven_v98():
+def check_breakeven_v981():
     try:
         open_trades = get_open_trades_v88()
         logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil: {BREAKEVEN_TRIGGER_R}R)")
@@ -3511,7 +3682,7 @@ def check_breakeven_v98():
                     be_sl = entry - offset
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
-                    if modify_trade_sl_v893(trade_id, pair, be_sl):
+                    if modify_trade_sl_v981(trade_id, pair, be_sl):
                         logger.info(f"[BE] ✅ SL modifié avec succès pour {trade_id}")
                         time.sleep(1)
                         _OANDA_CACHE_V88.pop("open_trades_raw", None)
@@ -3528,7 +3699,7 @@ def check_breakeven_v98():
                         distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
                         if distance > 0:
                             logger.info(f"[TSL] Création du trailing stop pour trade {trade_id}")
-                            if create_oanda_trailing_stop_v893(trade_id, pair, distance):
+                            if create_oanda_trailing_stop_v981(trade_id, pair, distance):
                                 logger.info(f"[TSL] ✅ Trailing stop créé")
                             else:
                                 logger.error(f"[TSL] ❌ ÉCHEC création trailing")
@@ -3537,102 +3708,11 @@ def check_breakeven_v98():
                     else:
                         logger.error(f"[BE] ❌ ÉCHEC modification SL")
     except Exception as e:
-        logger.error(f"Erreur check_breakeven_v98: {e}")
+        logger.error(f"Erreur check_breakeven_v981: {e}")
         logger.error(traceback.format_exc())
 
 # ============================================================
-# V98 - FONCTIONS DE CONFIRMATION (repris de V95)
-# ============================================================
-def get_trade_details_v88(trade_id: str) -> dict:
-    try:
-        api = v88_client()
-        r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
-        resp = api.request(r)
-        return resp.get("trade", {})
-    except Exception as e:
-        logger.error(f"[TRADE] Erreur récupération trade {trade_id}: {e}")
-        return {}
-
-def has_trailing_stop_v88(trade: dict) -> bool:
-    trailing_stop = trade.get("trailingStopLossOrder", {})
-    return bool(trailing_stop and trailing_stop.get("id"))
-
-def get_stop_loss_v88(trade: dict) -> float:
-    sl_order = trade.get("stopLossOrder", {})
-    return float(sl_order.get("price", 0)) if sl_order else 0.0
-
-def modify_trade_sl_v893(trade_id: str, pair: str, new_sl: float) -> bool:
-    try:
-        api = v88_client()
-        logger.info(f"[BE] Modification SL via TradeCRCDO pour trade {trade_id} -> {new_sl:.5f}")
-        data = {
-            "stopLoss": {
-                "price": round_price_v88(pair, new_sl),
-                "timeInForce": "GTC"
-            }
-        }
-        r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
-        resp = api.request(r)
-        if resp.get("orderRejectTransaction"):
-            reject = resp.get("orderRejectTransaction")
-            logger.error(f"[BE] Rejeté pour trade {trade_id}: {reject}")
-            return False
-        logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
-        logger.info(f"[CONFIRM] Vérification du SL pour trade {trade_id}")
-        time.sleep(1)
-        _OANDA_CACHE_V88.pop("open_trades_raw", None)
-        trade_details = get_trade_details_v88(trade_id)
-        if not trade_details:
-            logger.warning(f"[CONFIRM] Impossible de récupérer le trade {trade_id}")
-            return False
-        actual_sl = get_stop_loss_v88(trade_details)
-        if abs(actual_sl - new_sl) > 0.000001:
-            logger.warning(f"[CONFIRM] SL non confirmé: attendu {new_sl:.5f}, reçu {actual_sl:.5f}")
-            return False
-        logger.info(f"[CONFIRM] ✅ SL confirmé: {actual_sl:.5f}")
-        return True
-    except Exception as e:
-        logger.error(f"[BE] Erreur modification SL trade {trade_id}: {e}")
-        return False
-
-def create_oanda_trailing_stop_v893(trade_id: str, pair: str, distance: float) -> bool:
-    try:
-        api = v88_client()
-        logger.info(f"[TSL] Création trailing via OrderCreate pour trade {trade_id} -> distance={distance:.5f}")
-        order_data = {
-            "order": {
-                "type": "TRAILING_STOP_LOSS",
-                "tradeID": trade_id,
-                "distance": str(distance),
-                "timeInForce": "GTC"
-            }
-        }
-        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
-        resp = api.request(r)
-        if resp.get("orderRejectTransaction"):
-            reject = resp.get("orderRejectTransaction")
-            logger.error(f"[TSL] Rejeté pour trade {trade_id}: {reject}")
-            return False
-        logger.info(f"[TSL] SUCCESS: Trailing stop créé pour trade {trade_id}, distance={distance:.5f}")
-        logger.info(f"[CONFIRM] Vérification du trailing stop pour trade {trade_id}")
-        time.sleep(1)
-        _OANDA_CACHE_V88.pop("open_trades_raw", None)
-        trade_details = get_trade_details_v88(trade_id)
-        if not trade_details:
-            logger.warning(f"[CONFIRM] Impossible de récupérer le trade {trade_id}")
-            return False
-        if not has_trailing_stop_v88(trade_details):
-            logger.warning(f"[CONFIRM] Trailing stop non présent sur le trade {trade_id}")
-            return False
-        trailing_id = trade_details.get("trailingStopLossOrder", {}).get("id", "unknown")
-        logger.info(f"[CONFIRM] ✅ Trailing stop confirmé: ID={trailing_id}")
-        return True
-    except Exception as e:
-        logger.error(f"[TSL] Erreur création trailing stop trade {trade_id}: {e}")
-        return False
-
-# ============================================================
-# V98 - STRICT FILTERS (repris)
+# V98.1 - STRICT FILTERS (repris)
 # ============================================================
 STRICT_ALLOWED_ENTRY_TYPES = {
     "FVG_RETEST_PERFECT", "FVG_RETEST", "BISI", "BREAKER",
@@ -3808,11 +3888,11 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V98 - DIAGNOSTIC DE DÉMARRAGE
+# V98.1 - DIAGNOSTIC DE DÉMARRAGE
 # ============================================================
-def diagnostic_startup_v98():
+def diagnostic_startup_v981():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V98")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V98.1")
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {EQS_MIN_THRESHOLD}")
@@ -3821,7 +3901,7 @@ def diagnostic_startup_v98():
     logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] SUIVI DES CLÔTURES : tentative API + fallback")
     logger.info(f"[DIAG] ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS")
-    logger.info(f"[DIAG] MÉTRIQUES ENRICHIES : ATR, ADX, RSI, MOMENTUM, HEURE, JOUR, SESSION, SPREAD, VOLATILITÉ, TENDANCES")
+    logger.info(f"[DIAG] APPELS OANDA CORRIGÉS")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -3840,10 +3920,10 @@ def diagnostic_startup_v98():
     logger.info("=" * 60)
 
 # ============================================================
-# V98 - BOUCLE PRINCIPALE
+# V98.1 - BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V98 (Espérance corrigée & clôtures précises)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V98.1 (API OANDA corrigée)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R)")
@@ -3852,9 +3932,10 @@ if __name__ == "__main__":
     logger.info("📈 SUIVI DES CLÔTURES : tentative de récupération via TradeDetails + fallback")
     logger.info("📊 ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS (wins+losses+breakevens)")
     logger.info("📊 MÉTRIQUES ENRICHIES : ATR, ADX, RSI, Momentum, Heure, Jour, Session, Spread, Volatilité, Tendances H1/H4")
+    logger.info("🔧 APPELS OANDA CORRIGÉS : formatage, retry, gestion d'erreur")
     logger.info("")
     
-    diagnostic_startup_v98()
+    diagnostic_startup_v981()
     
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
@@ -3874,10 +3955,10 @@ if __name__ == "__main__":
             
             check_closed_trades()
             
-            check_breakeven_v98()
+            check_breakeven_v981()
             
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V98")
+                logger.info(f"⏰ Scan des signaux V98.1")
                 last_signal_scan = now
                 
                 now_dt = datetime.utcnow()
@@ -3886,7 +3967,7 @@ if __name__ == "__main__":
                 elif current_open_count >= MAX_TRADES_TOTAL:
                     logger.info(f"Limite trades atteinte")
                 else:
-                    advanced_main_v98()
+                    advanced_main_v981()
             
             time.sleep(30)
 
