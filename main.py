@@ -1,11 +1,11 @@
 # ============================================================
-# main(97).py - Version V97 "Métriques enrichies"
+# main(98).py - Version V98 "Espérance corrigée & clôtures précises"
 # 
-# Modifications V97 :
-# - Enregistrement de toutes les métriques à l'ouverture (ATR, ADX, RSI, momentum, heure, jour, spread, volatilité, session, tendances)
-# - Logs [DECISION] et [CLOSE] enrichis
-# - Suivi des clôtures robuste (fallback sur open trades)
-# - Préparation pour analyses post-trade (par setup, jour, session, etc.)
+# Modifications V98 :
+# - Espérance calculée sur les trades clôturés (wins+losses+breakevens)
+# - Tentative de récupération des détails de clôture via TradeDetails
+# - Fallback amélioré : estimation avec indication "estimé"
+# - Conservé toutes les métriques de V97
 # ============================================================
 
 import os
@@ -22,15 +22,13 @@ import pandas as pd
 from dotenv import load_dotenv
 import oandapyV20
 from oandapyV20.endpoints import instruments, pricing, orders, accounts, trades, positions
-# On n'importe plus Transactions directement pour éviter l'erreur
-import oandapyV20.endpoints.transactions as transactions_endpoint
 import talib
 import traceback
 from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V97
+# CONFIGURATION V98
 # =========================
 load_dotenv()
 
@@ -258,7 +256,7 @@ SCORING_CONFIG = {
 }
 
 # =============================
-# STATISTIQUES ENRICHIES AVEC MÉTRIQUES
+# STATISTIQUES ENRICHIES AVEC MÉTRIQUES ET ESPÉRANCE CORRIGÉE
 # =============================
 class TradingStats:
     def __init__(self):
@@ -344,11 +342,14 @@ class TradingStats:
                 "session": entry_metrics.get("session", "UNKNOWN"),
                 "h1_trend": entry_metrics.get("h1_trend", 0),
                 "h4_trend": entry_metrics.get("h4_trend", 0),
-                "result": None
+                "result": None,
+                "close_price": None,
+                "close_pl": None
             }
             stats["trades"].append(trade_record)
     
-    def record_close(self, trade_id: str, pair: str, setup_type: str, eqs: int, r: float, profit_loss: float, trade_info: dict = None):
+    def record_close(self, trade_id: str, pair: str, setup_type: str, eqs: int, r: float, profit_loss: float, 
+                     close_price: float = None, is_estimate: bool = False, trade_info: dict = None):
         stats = self.stats[pair]
         if r > 0.02:
             stats["wins"] += 1
@@ -382,32 +383,27 @@ class TradingStats:
         eqs_stats["losses"] += 1 if result == "LOSS" else 0
         eqs_stats["total_r"] += r
         
-        # Si on a les métriques, on enrichit les stats
         if trade_info:
             hour = trade_info.get("hour", 0)
             weekday = trade_info.get("weekday", 0)
             session = trade_info.get("session", "UNKNOWN")
             adx = trade_info.get("adx", 0)
             
-            # Par heure
             hour_stats = stats["by_hour"][hour]
             hour_stats["wins"] += 1 if result == "WIN" else 0
             hour_stats["losses"] += 1 if result == "LOSS" else 0
             hour_stats["total_r"] += r
             
-            # Par jour
             wd_stats = stats["by_weekday"][weekday]
             wd_stats["wins"] += 1 if result == "WIN" else 0
             wd_stats["losses"] += 1 if result == "LOSS" else 0
             wd_stats["total_r"] += r
             
-            # Par session
             sess_stats = stats["by_session"][session]
             sess_stats["wins"] += 1 if result == "WIN" else 0
             sess_stats["losses"] += 1 if result == "LOSS" else 0
             sess_stats["total_r"] += r
             
-            # Par tranche d'ADX
             if adx < 20:
                 adx_range = "0-19"
             elif adx < 25:
@@ -424,15 +420,16 @@ class TradingStats:
             adx_stats["total_r"] += r
         
         # Log enrichi
+        estimate_tag = " (estimé)" if is_estimate else ""
+        price_str = f" | close={close_price:.5f}" if close_price else ""
         metrics_str = ""
         if trade_info:
             metrics_str = f" | ATR={trade_info.get('atr',0):.1f} | ADX={trade_info.get('adx',0):.1f} | RSI={trade_info.get('rsi',0):.1f} | H={trade_info.get('hour',0)} | Sess={trade_info.get('session','UNKNOWN')}"
-        
-        logger.info(f"[CLOSE] {pair} | {setup_type} | {result} | R={r:.2f} | P&L={profit_loss:+.2f} | EQS={eqs}{metrics_str}")
+        logger.info(f"[CLOSE] {pair} | {setup_type} | {result}{estimate_tag} | R={r:.2f} | P&L={profit_loss:+.2f} | EQS={eqs}{price_str}{metrics_str}")
     
     def get_summary(self, pair: str) -> dict:
         stats = self.stats.get(pair, {})
-        total = stats.get("total_signals", 0)
+        total_signals = stats.get("total_signals", 0)
         accepted = stats.get("accepted", 0)
         rejected = stats.get("rejected", 0)
         wins = stats.get("wins", 0)
@@ -440,17 +437,20 @@ class TradingStats:
         breakevens = stats.get("breakevens", 0)
         total_profit = stats.get("total_profit", 0.0)
         total_loss = stats.get("total_loss", 0.0)
+        total_closed = wins + losses + breakevens
         win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0
         profit_factor = total_profit / total_loss if total_loss > 0 else 0
-        expectancy = (total_profit - total_loss) / total if total > 0 else 0
+        # V98 : espérance calculée sur les trades clôturés
+        expectancy = (total_profit - total_loss) / total_closed if total_closed > 0 else 0
         return {
             "pair": pair,
-            "total_signals": total,
+            "total_signals": total_signals,
             "accepted": accepted,
             "rejected": rejected,
             "wins": wins,
             "losses": losses,
             "breakevens": breakevens,
+            "total_closed": total_closed,
             "win_rate": f"{win_rate*100:.1f}%",
             "profit_factor": f"{profit_factor:.2f}",
             "expectancy": f"${expectancy:.2f}"
@@ -460,13 +460,13 @@ class TradingStats:
         logger.info("=" * 80)
         logger.info("📊 STATISTIQUES GLOBALES")
         logger.info("=" * 80)
-        logger.info(f"{'Paire':10} | {'Signaux':>7} | {'Acceptés':>7} | {'Rejetés':>7} | {'Win Rate':>9} | {'PF':>6} | {'Espérance':>10}")
+        logger.info(f"{'Paire':10} | {'Signaux':>7} | {'Acceptés':>7} | {'Rejetés':>7} | {'Clôturés':>7} | {'Win Rate':>9} | {'PF':>6} | {'Espérance':>10}")
         logger.info("-" * 80)
         for pair in sorted(self.stats.keys()):
             summary = self.get_summary(pair)
             logger.info(
                 f"{pair:10} | {summary['total_signals']:>7} | {summary['accepted']:>7} | {summary['rejected']:>7} | "
-                f"{summary['win_rate']:>9} | {summary['profit_factor']:>6} | {summary['expectancy']:>10}"
+                f"{summary['total_closed']:>7} | {summary['win_rate']:>9} | {summary['profit_factor']:>6} | {summary['expectancy']:>10}"
             )
         logger.info("=" * 80)
         
@@ -546,22 +546,20 @@ class TradingStats:
 stats = TradingStats()
 
 # =========================
-# SUIVI DES CLÔTURES - VERSION ROBUSTE (fallback)
+# SUIVI DES CLÔTURES - VERSION AMÉLIORÉE (V98)
 # =========================
 open_trade_details = {}
 
 def check_closed_trades():
-    """Détecte les trades fermés en comparant les trades ouverts actuels avec ceux enregistrés"""
+    """Détecte les trades fermés en comparant les trades ouverts actuels avec ceux enregistrés,
+       puis tente de récupérer les détails de clôture via TradeDetails."""
     global stats, open_trade_details
     try:
-        # Récupérer les trades ouverts actuels
         current_open_trades = get_open_trades_v88()
         current_open_ids = {t.get("id") for t in current_open_trades}
         
-        # Parcourir les trades enregistrés
         for trade_id in list(open_trade_details.keys()):
             if trade_id not in current_open_ids:
-                # Le trade a disparu -> il a été fermé
                 trade_info = open_trade_details.pop(trade_id, None)
                 if not trade_info:
                     continue
@@ -569,55 +567,66 @@ def check_closed_trades():
                 pair = trade_info.get("pair")
                 setup_type = trade_info.get("setup_type", "UNKNOWN")
                 eqs = trade_info.get("eqs", 0)
+                entry = trade_info.get("entry")
+                direction = trade_info.get("direction")
+                sl = trade_info.get("sl")
+                risk = abs(entry - sl) if entry and sl else 0
+                pip_val = get_pip_value_for_pair(pair)
                 
-                # On va essayer de récupérer le PL et le prix de clôture via l'historique
-                # Pour simplifier, on va utiliser la différence de prix entre l'entrée et le prix actuel
-                # Mais on peut aussi utiliser l'API Positions pour le PL réalisé
+                # Tentative 1 : récupérer les détails du trade via l'API (même fermé)
+                close_price = None
+                pl = 0.0
+                is_estimate = True
                 try:
-                    # Essayer de récupérer le PL via l'API Positions
+                    # V98 : on utilise TradeDetails pour obtenir le prix de clôture et le P&L
                     api = v88_client()
-                    r = positions.Position(accountID=OANDA_ACCOUNT_ID, instrument=pair)
+                    r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
                     resp = api.request(r)
-                    position = resp.get("position", {})
-                    pl = float(position.get("pl", 0.0))
-                    # Si la position est fermée, le PL est le PL réalisé cumulé
-                    # Mais ce n'est pas fiable pour un seul trade, on va plutôt utiliser la différence de prix
-                    # On récupère le prix actuel (last)
+                    trade_data = resp.get("trade", {})
+                    # Même si le trade est fermé, parfois on peut encore obtenir des infos
+                    if trade_data:
+                        close_price = float(trade_data.get("price", 0))
+                        pl = float(trade_data.get("realizedPL", 0.0))
+                        if close_price > 0:
+                            is_estimate = False
+                            logger.info(f"[CLOSE_DETAILS] Trade {trade_id} récupéré via API: close={close_price:.5f}, PL={pl:.2f}")
+                except Exception as e:
+                    logger.debug(f"Impossible de récupérer les détails du trade {trade_id}: {e}")
+                
+                # Si on n'a pas réussi à obtenir close_price, on utilise le fallback d'estimation
+                if close_price is None or close_price <= 0:
                     current_price = get_recent_m5_price_v88(pair)
-                    entry = trade_info.get("entry")
-                    direction = trade_info.get("direction")
                     if direction == "BUY":
                         price_move = current_price - entry
                     else:
                         price_move = entry - current_price
-                    pip_val = get_pip_value_for_pair(pair)
-                    risk = abs(entry - trade_info.get("sl"))
-                    risk_pips = risk / pip_val
-                    price_move_pips = price_move / pip_val
-                    r_multiple = price_move_pips / risk_pips if risk_pips > 0 else 0
-                    
-                    # Estimer le PL en USD (approximatif)
-                    # On utilise le nombre d'unités pour estimer le PL
+                    close_price = current_price
+                    # Estimation du PL en USD (approximatif)
                     units = trade_info.get("units", 0)
-                    if units > 0:
-                        # PL approximatif = price_move * units
-                        pl_approx = price_move * units
-                    else:
-                        pl_approx = 0
-                    
-                    # Log
-                    logger.info(f"[CLOSE_DETECTED] Trade {trade_id} fermé (détecté par disparition)")
-                    stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl_approx, trade_info)
-                    
-                except Exception as e:
-                    logger.warning(f"Erreur lors de la récupération du PL pour {trade_id}: {e}")
-                    # On enregistre quand même une clôture sans PL précis
-                    stats.record_close(trade_id, pair, setup_type, eqs, 0, 0, trade_info)
+                    pl = price_move * units
+                    is_estimate = True
+                
+                # Calcul du R multiple
+                risk_pips = risk / pip_val if risk > 0 and pip_val > 0 else 0
+                if direction == "BUY":
+                    price_move_pips = (close_price - entry) / pip_val
+                else:
+                    price_move_pips = (entry - close_price) / pip_val
+                r_multiple = price_move_pips / risk_pips if risk_pips > 0 else 0
+                
+                # Enregistrement de la clôture
+                stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl, close_price, is_estimate, trade_info)
+                
+                if is_estimate:
+                    logger.info(f"[CLOSE_ESTIMATED] Trade {trade_id} fermé (estimé) - prix actuel={close_price:.5f}")
+                else:
+                    logger.info(f"[CLOSE_CONFIRMED] Trade {trade_id} fermé (confirmé) - prix={close_price:.5f}")
+                
     except Exception as e:
         logger.error(f"Erreur lors du check des trades fermés: {e}")
 
 # =============================
-# FONCTIONS UTILITAIRES (reprises de V95)
+# FONCTIONS UTILITAIRES (reprises de V97)
 # =============================
 def get_dynamic_max_distance(df: pd.DataFrame, pair: str, atr_multiplier: float = 1.5) -> float:
     if df is None or len(df) < 14:
@@ -808,7 +817,7 @@ def get_pair_settings(pair: str) -> dict:
     return PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
 # =============================
-# LOGGING (repris de V95)
+# LOGGING (repris de V97)
 # =============================
 LOG_ASCII_SAFE = os.getenv("LOG_ASCII_SAFE", "true").lower() == "true"
 
@@ -889,7 +898,7 @@ def repair_mojibake_v82(value) -> str:
     return text
 
 class ReadableLogFormatterV82(logging.Formatter):
-    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]", "[CLOSE]", "[CLOSE_DETECTED]")
+    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]", "[CLOSE]", "[CLOSE_DETAILS]", "[CLOSE_ESTIMATED]", "[CLOSE_CONFIRMED]")
     def _clean_message_v83(self, message: str, levelname: str) -> str:
         text = repair_mojibake_v82(str(message))
         text = "".join(ch for ch in text if ord(ch) < 128)
@@ -959,7 +968,7 @@ for _noisy_logger_v82 in ("urllib3", "requests", "oandapyV20", "oandapy"):
 logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
 
 # =============================
-# GESTION DES SIGNAUX (repris de V95)
+# GESTION DES SIGNAUX (repris de V97)
 # =============================
 sent_signals = {}
 recent_signals = {}
@@ -990,7 +999,7 @@ def mark_signal_sent(pair: str, direction: str, entry_level: float, zone_start: 
     logger.info(f"✅ Signal marqué comme envoyé : {key}")
 
 # =============================
-# INDICATEURS TECHNIQUES (repris de V95)
+# INDICATEURS TECHNIQUES (repris de V97)
 # =============================
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
@@ -1229,8 +1238,8 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
         ("Risk_RR_Distance", "Risk/RR/Distance"),
         ("Secondary", "Secondary"),
         ("Momentum", "Momentum"),
-        ("Structure", "Structure V97"),
-        ("Pullback", "Pullback V97"),
+        ("Structure", "Structure V98"),
+        ("Pullback", "Pullback V98"),
     ]
     logger.debug("===== SCORE DETAIL =====")
     for key, label in labels:
@@ -1534,7 +1543,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# V97 - FILTRES ET LOGS DECISION (repris de V95, avec enrichissement)
+# V98 - FILTRES ET SCORING (repris de V97, inchangé)
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
@@ -2165,14 +2174,14 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         confluence_tags.append("BOS")
     if score_details.get("Session", "").startswith("+"):
         confluence_tags.append("SESSION")
-    if score_details.get("Structure_V97", "").startswith("+"):
+    if score_details.get("Structure_V98", "").startswith("+"):
         confluence_tags.append("STRUCTURE")
-    if score_details.get("Pullback_V97", "").startswith("+"):
+    if score_details.get("Pullback_V98", "").startswith("+"):
         confluence_tags.append("PULLBACK")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
     
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V97</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V98</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -2195,7 +2204,7 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         logger.error(f"💥 Erreur réseau Telegram: {e}")
 
 # =============================
-# HELPERS SCORING (repris de V95)
+# HELPERS SCORING (repris de V97)
 # =============================
 def get_session_quality_bonus(pair: str) -> tuple:
     hour = datetime.utcnow().hour
@@ -2318,7 +2327,7 @@ def get_signal_quality_label(score: int, eqs: int) -> str:
     return "B"
 
 # =============================
-# SYSTÈME DE SCORING AVEC LOGS DECISION ENRICHIS (V97)
+# SYSTÈME DE SCORING AVEC LOGS DECISION ENRICHIS (repris de V97)
 # =============================
 
 def calculate_signal_confidence(
@@ -2430,10 +2439,10 @@ def calculate_signal_confidence(
         }
     if "partiellement" in struct_msg:
         score_components["Structure"] += 1
-        details["Structure_V97"] = f"+1 ({struct_msg})"
+        details["Structure_V98"] = f"+1 ({struct_msg})"
     else:
         score_components["Structure"] += 2
-        details["Structure_V97"] = f"+2 ({struct_msg})"
+        details["Structure_V98"] = f"+2 ({struct_msg})"
     
     pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if not pullback_passed:
@@ -2452,7 +2461,7 @@ def calculate_signal_confidence(
             "rejection_logs": rejection_logs
         }
     score_components["Pullback"] += 2
-    details["Pullback_V97"] = f"+2 ({pullback_msg})"
+    details["Pullback_V98"] = f"+2 ({pullback_msg})"
     
     close_passed, close_msg = filter_close_confirmation(df_m15, direction)
     if close_passed:
@@ -2625,7 +2634,6 @@ def calculate_signal_confidence(
     spread_data = get_price_spread_v88(pair)
     spread = spread_data.get("spread", 0.0)
     volatility_ratio = atr_value / current_price if current_price > 0 else 0
-    # Session
     if 7 <= hour < 16:
         session = "LONDON"
     elif 12 <= hour < 21:
@@ -2634,7 +2642,6 @@ def calculate_signal_confidence(
         session = "ASIA"
     else:
         session = "OTHER"
-    # Tendance H1 et H4 (score directionnel)
     h1_trend = score_ema_trend(df_h1)
     h4_trend = score_ema_trend(df_h4)
     
@@ -2660,7 +2667,6 @@ def calculate_signal_confidence(
     
     logger.info(decision_line)
     
-    # Stockage des métriques pour l'enregistrement ultérieur
     metrics = {
         "eqs": eqs_score,
         "setup_type": entry_type,
@@ -2698,7 +2704,7 @@ def calculate_signal_confidence(
     }
 
 # =============================
-# DÉTECTION BIAS-FIRST (repris de V95)
+# DÉTECTION BIAS-FIRST (repris de V97)
 # =============================
 def detect_setups_aligned_with_bias(
     df_m15: pd.DataFrame,
@@ -2787,17 +2793,18 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # =============================
-# FONCTION PRINCIPALE AVEC SUIVI DES CLÔTURES ET MÉTRIQUES ENRICHIES
+# FONCTION PRINCIPALE AVEC MÉTRIQUES ENRICHIES (repris de V97, sans modification)
 # =============================
-def advanced_main_v97():
+def advanced_main_v98():
     try:
         api = oandapyV20.API(access_token=os.getenv("OANDA_API_KEY"))
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info("✅ ENTRY QUALITY SCORE (EQS) V97 - Seuil: 60/100")
+        logger.info("✅ ENTRY QUALITY SCORE (EQS) V98 - Seuil: 60/100")
         logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R")
         logger.info("✅ AUDIT ATR ACTIVÉ (valeur brute + conversion en pips)")
         logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
-        logger.info("✅ SUIVI DES CLÔTURES ACTIF (fallback robuste)")
+        logger.info("✅ SUIVI DES CLÔTURES AMÉLIORÉ (fallback + tentative API)")
+        logger.info("✅ ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -2925,7 +2932,6 @@ def advanced_main_v97():
                 
                 logger.info(f"📊 TRADE {pair} {direction} {entry_type} @{entry_level:.5f} | Score: {score} | EQS: {eqs}/100 | Qualité: {quality}")
                 
-                # Préparer les métriques pour l'enregistrement
                 entry_metrics = {
                     "atr": metrics.get("atr", 0),
                     "adx": metrics.get("adx", 0),
@@ -2948,7 +2954,7 @@ def advanced_main_v97():
                     nb_envoyes += 1
                     continue
                 
-                trade_id = execute_oanda_trade_v97(
+                trade_id = execute_oanda_trade_v98(
                     pair=pair,
                     direction=direction,
                     entry_price=entry_level,
@@ -2995,7 +3001,7 @@ def advanced_main_v97():
     stats.log_summary()
 
 # ============================================================
-# V97 - OANDA EXECUTION AVEC STOCKAGE DES MÉTRIQUES
+# V98 - OANDA EXECUTION AVEC STOCKAGE DES MÉTRIQUES (repris de V97)
 # ============================================================
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
@@ -3326,10 +3332,10 @@ def get_atr_m15_v88(pair: str) -> float:
     except Exception:
         return 0.0
 
-def execute_oanda_trade_v97(pair: str, direction: str, entry_price: float, stop_loss: float,
+def execute_oanda_trade_v98(pair: str, direction: str, entry_price: float, stop_loss: float,
                              take_profit: float, score: int, entry_type: str,
                              eqs: int, setup_type: str, metrics: dict) -> str | None:
-    logger.info(f"[ORDER] V97 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] V98 EXECUTION START {pair} {direction} type={entry_type} score={score}")
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
         return None
@@ -3363,7 +3369,7 @@ def execute_oanda_trade_v97(pair: str, direction: str, entry_price: float, stop_
     }
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V97 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    logger.info(f"[ORDER] SIGNAL V98 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
         return "SIMULATION"
@@ -3387,7 +3393,6 @@ def execute_oanda_trade_v97(pair: str, direction: str, entry_price: float, stop_
                 return None
         logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
         logger.info(f"[CONFIRM] Trade ouvert sans trailing")
-        # Stocker les informations complètes pour le suivi des clôtures
         open_trade_details[trade_id] = {
             "entry": entry_price,
             "sl": stop_loss,
@@ -3449,14 +3454,14 @@ def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) 
     return None
 
 # ============================================================
-# V97 - GESTION DES CLÔTURES (fallback robuste)
+# V98 - GESTION DES CLÔTURES (améliorée)
 # ============================================================
 check_closed_trades = check_closed_trades  # déjà définie plus haut
 
 # ============================================================
-# V97 - BREAK EVEN (repris de V95)
+# V98 - BREAK EVEN (repris de V97)
 # ============================================================
-def check_breakeven_v97():
+def check_breakeven_v98():
     try:
         open_trades = get_open_trades_v88()
         logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil: {BREAKEVEN_TRIGGER_R}R)")
@@ -3532,11 +3537,11 @@ def check_breakeven_v97():
                     else:
                         logger.error(f"[BE] ❌ ÉCHEC modification SL")
     except Exception as e:
-        logger.error(f"Erreur check_breakeven_v97: {e}")
+        logger.error(f"Erreur check_breakeven_v98: {e}")
         logger.error(traceback.format_exc())
 
 # ============================================================
-# V97 - FONCTIONS DE CONFIRMATION (repris de V95)
+# V98 - FONCTIONS DE CONFIRMATION (repris de V95)
 # ============================================================
 def get_trade_details_v88(trade_id: str) -> dict:
     try:
@@ -3627,7 +3632,7 @@ def create_oanda_trailing_stop_v893(trade_id: str, pair: str, distance: float) -
         return False
 
 # ============================================================
-# V97 - STRICT FILTERS (repris)
+# V98 - STRICT FILTERS (repris)
 # ============================================================
 STRICT_ALLOWED_ENTRY_TYPES = {
     "FVG_RETEST_PERFECT", "FVG_RETEST", "BISI", "BREAKER",
@@ -3803,18 +3808,19 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V97 - DIAGNOSTIC DE DÉMARRAGE
+# V98 - DIAGNOSTIC DE DÉMARRAGE
 # ============================================================
-def diagnostic_startup_v97():
+def diagnostic_startup_v98():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V97")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V98")
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {EQS_MIN_THRESHOLD}")
     logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
-    logger.info(f"[DIAG] SUIVI DES CLÔTURES ACTIF (fallback)")
+    logger.info(f"[DIAG] SUIVI DES CLÔTURES : tentative API + fallback")
+    logger.info(f"[DIAG] ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS")
     logger.info(f"[DIAG] MÉTRIQUES ENRICHIES : ATR, ADX, RSI, MOMENTUM, HEURE, JOUR, SESSION, SPREAD, VOLATILITÉ, TENDANCES")
     try:
         from oandapyV20.endpoints import trades
@@ -3834,20 +3840,21 @@ def diagnostic_startup_v97():
     logger.info("=" * 60)
 
 # ============================================================
-# V97 - BOUCLE PRINCIPALE
+# V98 - BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V97 (Métriques enrichies)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V98 (Espérance corrigée & clôtures précises)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R)")
     logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100 (60)")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
-    logger.info("📈 SUIVI DES CLÔTURES : détection par disparition des trades ouverts (fallback robuste)")
+    logger.info("📈 SUIVI DES CLÔTURES : tentative de récupération via TradeDetails + fallback")
+    logger.info("📊 ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS (wins+losses+breakevens)")
     logger.info("📊 MÉTRIQUES ENRICHIES : ATR, ADX, RSI, Momentum, Heure, Jour, Session, Spread, Volatilité, Tendances H1/H4")
     logger.info("")
     
-    diagnostic_startup_v97()
+    diagnostic_startup_v98()
     
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
@@ -3867,10 +3874,10 @@ if __name__ == "__main__":
             
             check_closed_trades()
             
-            check_breakeven_v97()
+            check_breakeven_v98()
             
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V97")
+                logger.info(f"⏰ Scan des signaux V98")
                 last_signal_scan = now
                 
                 now_dt = datetime.utcnow()
@@ -3879,7 +3886,7 @@ if __name__ == "__main__":
                 elif current_open_count >= MAX_TRADES_TOTAL:
                     logger.info(f"Limite trades atteinte")
                 else:
-                    advanced_main_v97()
+                    advanced_main_v98()
             
             time.sleep(30)
 
