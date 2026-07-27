@@ -16,6 +16,7 @@
 # 6. ✅ Détection et gestion de la maintenance OANDA
 # 7. ✅ Suspension automatique des appels API
 # 8. ✅ Suivi des trades stagnants
+# 9. ✅ CORRECTION : Variables globales pour MAINTENANCE_DETECTED
 # ============================================================
 
 import os
@@ -90,8 +91,11 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
 EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "60.0"))
 
 # ============================================================
-# GESTION DE LA MAINTENANCE OANDA
+# ÉTAT GLOBAL DE LA MAINTENANCE - CORRIGÉ AVEC GLOBAL
 # ============================================================
+
+# Ces variables sont modifiées par plusieurs fonctions
+# Elles doivent être déclarées GLOBAL dans chaque fonction qui les modifie
 
 MAINTENANCE_DETECTED = False
 MAINTENANCE_SUSPEND_TIME = 0
@@ -119,6 +123,9 @@ def handle_api_error(error: Exception) -> tuple:
     Gère les erreurs API avec détection de maintenance
     Retourne (should_suspend, suspend_duration, log_level)
     """
+    # ============================================================
+    # CORRECTION : DECLARATION GLOBAL
+    # ============================================================
     global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
 
     if is_oanda_in_maintenance(error):
@@ -142,7 +149,11 @@ def handle_api_error(error: Exception) -> tuple:
 
 def reset_maintenance_state():
     """Réinitialise l'état de maintenance après une réponse réussie"""
+    # ============================================================
+    # CORRECTION : DECLARATION GLOBAL
+    # ============================================================
     global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
+    
     MAINTENANCE_DETECTED = False
     MAINTENANCE_SUSPEND_TIME = 0
     MAINTENANCE_ERROR_COUNT = 0
@@ -150,6 +161,11 @@ def reset_maintenance_state():
 
 def is_maintenance_suspended() -> bool:
     """Vérifie si les appels API doivent être suspendus"""
+    # ============================================================
+    # CORRECTION : DECLARATION GLOBAL
+    # ============================================================
+    global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
+    
     if not MAINTENANCE_DETECTED:
         return False
     if time.time() < MAINTENANCE_SUSPEND_TIME:
@@ -4325,6 +4341,7 @@ if __name__ == "__main__":
     logger.info("  ✅ Détection et gestion de la maintenance OANDA")
     logger.info("  ✅ Suspension automatique des appels API")
     logger.info("  ✅ Suivi des trades stagnants")
+    logger.info("  ✅ Correction des variables globales MAINTENANCE_DETECTED")
     logger.info("")
 
     diagnostic_startup_v981()
@@ -4384,6 +4401,8 @@ if __name__ == "__main__":
             # Vérifier si c'est une erreur de maintenance
             if is_oanda_in_maintenance(e):
                 logger.warning(f"🔧 Maintenance OANDA détectée: {e}")
+                # Correction : utiliser les variables globales correctement
+                global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
                 MAINTENANCE_DETECTED = True
                 MAINTENANCE_SUSPEND_TIME = time.time() + MAINTENANCE_RETRY_INTERVAL
                 time.sleep(10)
