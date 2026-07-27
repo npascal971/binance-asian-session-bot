@@ -13,6 +13,9 @@
 # 3. ✅ Confirmation du trailing stop après création (create_oanda_trailing_stop_v981)
 # 4. ✅ Pas de double entrée (continue dans advanced_main_v981)
 # 5. ✅ Logs enrichis pour les rejets
+# 6. ✅ Détection et gestion de la maintenance OANDA
+# 7. ✅ Suspension automatique des appels API
+# 8. ✅ Suivi des trades stagnants
 # ============================================================
 
 import os
@@ -86,17 +89,138 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
 
 EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "60.0"))
 
+# ============================================================
+# GESTION DE LA MAINTENANCE OANDA
+# ============================================================
+
+MAINTENANCE_DETECTED = False
+MAINTENANCE_SUSPEND_TIME = 0
+MAINTENANCE_RETRY_INTERVAL = 120  # secondes
+MAINTENANCE_ERROR_COUNT = 0
+MAINTENANCE_MAX_ERRORS_BEFORE_SUSPEND = 3
+
+
+def is_oanda_in_maintenance(error: Exception) -> bool:
+    """Détecte si l'erreur est liée à une maintenance OANDA"""
+    error_str = str(error).lower()
+    maintenance_patterns = [
+        "system under maintenance",
+        "maintenance",
+        "temporarily unavailable",
+        "service unavailable",
+        "maintenance mode",
+        "api is currently unavailable"
+    ]
+    return any(pattern in error_str for pattern in maintenance_patterns)
+
+
+def handle_api_error(error: Exception) -> tuple:
+    """
+    Gère les erreurs API avec détection de maintenance
+    Retourne (should_suspend, suspend_duration, log_level)
+    """
+    global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
+
+    if is_oanda_in_maintenance(error):
+        MAINTENANCE_ERROR_COUNT += 1
+
+        if MAINTENANCE_ERROR_COUNT >= MAINTENANCE_MAX_ERRORS_BEFORE_SUSPEND:
+            MAINTENANCE_DETECTED = True
+            MAINTENANCE_SUSPEND_TIME = time.time() + MAINTENANCE_RETRY_INTERVAL
+            logger.warning(
+                f"🔧 OANDA en maintenance détecté ({MAINTENANCE_ERROR_COUNT} erreurs) - "
+                f"suspension des appels pendant {MAINTENANCE_RETRY_INTERVAL}s"
+            )
+            return True, MAINTENANCE_RETRY_INTERVAL, "WARNING"
+        else:
+            logger.warning(f"⚠️ OANDA semble en maintenance (tentative {MAINTENANCE_ERROR_COUNT})")
+            return False, 5, "WARNING"
+
+    # Erreur normale
+    return False, 0, "ERROR"
+
+
+def reset_maintenance_state():
+    """Réinitialise l'état de maintenance après une réponse réussie"""
+    global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
+    MAINTENANCE_DETECTED = False
+    MAINTENANCE_SUSPEND_TIME = 0
+    MAINTENANCE_ERROR_COUNT = 0
+
+
+def is_maintenance_suspended() -> bool:
+    """Vérifie si les appels API doivent être suspendus"""
+    if not MAINTENANCE_DETECTED:
+        return False
+    if time.time() < MAINTENANCE_SUSPEND_TIME:
+        return True
+    # La période de suspension est écoulée, on réessaye
+    MAINTENANCE_DETECTED = False
+    MAINTENANCE_SUSPEND_TIME = 0
+    MAINTENANCE_ERROR_COUNT = 0
+    logger.info("🔧 Fin de la suspension OANDA - reprise des appels")
+    return False
+
+
+# ============================================================
+# SUIVI DES TRADES STAGNANTS
+# ============================================================
+
+stagnant_trade_tracker = {}
+
+
+def check_stagnant_trades(trade_id: str, pair: str, direction: str, entry: float, current_r: float):
+    """Surveille les trades qui stagnent et pourrait déclencher des actions"""
+    global stagnant_trade_tracker
+
+    if trade_id not in stagnant_trade_tracker:
+        stagnant_trade_tracker[trade_id] = {
+            "first_seen": time.time(),
+            "last_r": current_r,
+            "r_stable_count": 0,
+            "action_taken": False
+        }
+
+    tracker = stagnant_trade_tracker[trade_id]
+
+    # Si le R est toujours dans la même zone (-0.15 à 0.15)
+    if -0.15 <= current_r <= 0.15:
+        # Vérifier si on est stable depuis plus de 1h
+        if time.time() - tracker["first_seen"] > 3600:
+            if abs(current_r - tracker["last_r"]) < 0.02:
+                tracker["r_stable_count"] += 1
+
+                # Après 2 heures de stagnation, on réduit le trailing
+                if tracker["r_stable_count"] > 120 and not tracker["action_taken"]:
+                    # 120 * 30s = 1h de stagnation en plus
+                    logger.info(
+                        f"[STAGNANT] Trade {trade_id} {pair} stagne à R={current_r:.2f} "
+                        f"depuis {int((time.time() - tracker['first_seen'])/60)}min"
+                    )
+                    # Ici on pourrait : réduire le trailing stop, ajouter une alerte, fermer progressivement
+                    tracker["action_taken"] = True
+    else:
+        # Le trade a bougé, réinitialiser
+        tracker["first_seen"] = time.time()
+        tracker["r_stable_count"] = 0
+        tracker["action_taken"] = False
+
+    tracker["last_r"] = current_r
+
+
 # =========================
 # LOG HELPERS
 # =========================
 _seen_log_keys_fvg_recent = set()
-_seen_log_keys_fvg_added  = set()
+_seen_log_keys_fvg_added = set()
 _seen_log_keys_kept_entry = set()
+
 
 def _reset_log_dedup():
     _seen_log_keys_fvg_recent.clear()
     _seen_log_keys_fvg_added.clear()
     _seen_log_keys_kept_entry.clear()
+
 
 def _log_fvg_recent_once(pair: str, direction: str, level: float, msg: str, precision: int = 5):
     if not DEBUG_MODE:
@@ -107,6 +231,7 @@ def _log_fvg_recent_once(pair: str, direction: str, level: float, msg: str, prec
     _seen_log_keys_fvg_recent.add(key)
     logger.debug(msg)
 
+
 def _log_fvg_added_once(pair: str, direction: str, level: float, fvg_type: str, msg: str, precision: int = 5):
     if not DEBUG_MODE:
         return
@@ -115,6 +240,7 @@ def _log_fvg_added_once(pair: str, direction: str, level: float, fvg_type: str, 
         return
     _seen_log_keys_fvg_added.add(key)
     logger.debug(msg)
+
 
 def _log_narrative_list(entries: list, top_n: int = 10):
     if not DEBUG_MODE:
@@ -301,7 +427,7 @@ class TradingStats:
         })
         self.last_transaction_id = None
         self._load_last_id()
-    
+
     def _load_last_id(self):
         try:
             if os.path.exists("last_transaction_id.txt"):
@@ -309,15 +435,15 @@ class TradingStats:
                     self.last_transaction_id = f.read().strip()
         except:
             pass
-    
+
     def _save_last_id(self):
         try:
             with open("last_transaction_id.txt", "w") as f:
                 f.write(str(self.last_transaction_id))
         except:
             pass
-    
-    def record_signal(self, pair: str, accepted: bool, reason: str = "", 
+
+    def record_signal(self, pair: str, accepted: bool, reason: str = "",
                       entry: float = 0, sl: float = 0, tp: float = 0,
                       score: int = 0, direction: str = "",
                       entry_metrics: dict = None):
@@ -354,8 +480,8 @@ class TradingStats:
                 "close_pl": None
             }
             stats["trades"].append(trade_record)
-    
-    def record_close(self, trade_id: str, pair: str, setup_type: str, eqs: int, r: float, profit_loss: float, 
+
+    def record_close(self, trade_id: str, pair: str, setup_type: str, eqs: int, r: float, profit_loss: float,
                      close_price: float = None, is_estimate: bool = False, trade_info: dict = None):
         stats = self.stats[pair]
         if r > 0.02:
@@ -369,12 +495,12 @@ class TradingStats:
         else:
             stats["breakevens"] += 1
             result = "BREAKEVEN"
-        
+
         setup_stats = stats["by_setup"][setup_type]
         setup_stats["wins"] += 1 if result == "WIN" else 0
         setup_stats["losses"] += 1 if result == "LOSS" else 0
         setup_stats["total_r"] += r
-        
+
         if eqs < 65:
             eqs_range = "60-64"
         elif eqs < 70:
@@ -387,28 +513,28 @@ class TradingStats:
         eqs_stats["wins"] += 1 if result == "WIN" else 0
         eqs_stats["losses"] += 1 if result == "LOSS" else 0
         eqs_stats["total_r"] += r
-        
+
         if trade_info:
             hour = trade_info.get("hour", 0)
             weekday = trade_info.get("weekday", 0)
             session = trade_info.get("session", "UNKNOWN")
             adx = trade_info.get("adx", 0)
-            
+
             hour_stats = stats["by_hour"][hour]
             hour_stats["wins"] += 1 if result == "WIN" else 0
             hour_stats["losses"] += 1 if result == "LOSS" else 0
             hour_stats["total_r"] += r
-            
+
             wd_stats = stats["by_weekday"][weekday]
             wd_stats["wins"] += 1 if result == "WIN" else 0
             wd_stats["losses"] += 1 if result == "LOSS" else 0
             wd_stats["total_r"] += r
-            
+
             sess_stats = stats["by_session"][session]
             sess_stats["wins"] += 1 if result == "WIN" else 0
             sess_stats["losses"] += 1 if result == "LOSS" else 0
             sess_stats["total_r"] += r
-            
+
             if adx < 20:
                 adx_range = "0-19"
             elif adx < 25:
@@ -423,14 +549,14 @@ class TradingStats:
             adx_stats["wins"] += 1 if result == "WIN" else 0
             adx_stats["losses"] += 1 if result == "LOSS" else 0
             adx_stats["total_r"] += r
-        
+
         estimate_tag = " (estimé)" if is_estimate else ""
         price_str = f" | close={close_price:.5f}" if close_price else ""
         metrics_str = ""
         if trade_info:
             metrics_str = f" | ATR={trade_info.get('atr',0):.1f} | ADX={trade_info.get('adx',0):.1f} | RSI={trade_info.get('rsi',0):.1f} | H={trade_info.get('hour',0)} | Sess={trade_info.get('session','UNKNOWN')}"
         logger.info(f"[CLOSE] {pair} | {setup_type} | {result}{estimate_tag} | R={r:.2f} | P&L={profit_loss:+.2f} | EQS={eqs}{price_str}{metrics_str}")
-    
+
     def get_summary(self, pair: str) -> dict:
         stats = self.stats.get(pair, {})
         total_signals = stats.get("total_signals", 0)
@@ -458,7 +584,7 @@ class TradingStats:
             "profit_factor": f"{profit_factor:.2f}",
             "expectancy": f"${expectancy:.2f}"
         }
-    
+
     def log_summary(self):
         logger.info("=" * 80)
         logger.info("📊 STATISTIQUES GLOBALES")
@@ -472,7 +598,7 @@ class TradingStats:
                 f"{summary['total_closed']:>7} | {summary['win_rate']:>9} | {summary['profit_factor']:>6} | {summary['expectancy']:>10}"
             )
         logger.info("=" * 80)
-        
+
         logger.info("📈 PERFORMANCE PAR SETUP")
         logger.info("-" * 80)
         for pair, stats in self.stats.items():
@@ -483,7 +609,7 @@ class TradingStats:
                     win_rate = data["wins"] / total
                     avg_r = data["total_r"] / total
                     logger.info(f"{pair:10} | {setup:20} | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
-        
+
         logger.info("=" * 80)
         logger.info("📈 PERFORMANCE PAR TRANCHE EQS")
         logger.info("-" * 80)
@@ -495,7 +621,7 @@ class TradingStats:
                     win_rate = data["wins"] / total
                     avg_r = data["total_r"] / total
                     logger.info(f"{pair:10} | EQS {range_label:6} | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
-        
+
         logger.info("=" * 80)
         logger.info("📈 PERFORMANCE PAR HEURE")
         logger.info("-" * 80)
@@ -507,7 +633,7 @@ class TradingStats:
                     win_rate = data["wins"] / total
                     avg_r = data["total_r"] / total
                     logger.info(f"{pair:10} | H{hour:02d}       | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
-        
+
         logger.info("=" * 80)
         logger.info("📈 PERFORMANCE PAR JOUR")
         logger.info("-" * 80)
@@ -520,7 +646,7 @@ class TradingStats:
                     win_rate = data["wins"] / total
                     avg_r = data["total_r"] / total
                     logger.info(f"{pair:10} | {days[wd]}       | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
-        
+
         logger.info("=" * 80)
         logger.info("📈 PERFORMANCE PAR SESSION")
         logger.info("-" * 80)
@@ -532,7 +658,7 @@ class TradingStats:
                     win_rate = data["wins"] / total
                     avg_r = data["total_r"] / total
                     logger.info(f"{pair:10} | {session:12} | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
-        
+
         logger.info("=" * 80)
         logger.info("📈 PERFORMANCE PAR TRANCHE ADX")
         logger.info("-" * 80)
@@ -546,6 +672,7 @@ class TradingStats:
                     logger.info(f"{pair:10} | ADX {range_label:6} | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
         logger.info("=" * 80)
 
+
 stats = TradingStats()
 
 # =========================
@@ -553,19 +680,25 @@ stats = TradingStats()
 # =========================
 open_trade_details = {}
 
+
 def check_closed_trades():
     """Détecte les trades fermés en comparant les trades ouverts actuels avec ceux enregistrés"""
     global stats, open_trade_details
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            logger.debug("⏳ OANDA en maintenance - check_closed_trades suspendu")
+            return
+
         current_open_trades = get_open_trades_v88()
         current_open_ids = {t.get("id") for t in current_open_trades}
-        
+
         for trade_id in list(open_trade_details.keys()):
             if trade_id not in current_open_ids:
                 trade_info = open_trade_details.pop(trade_id, None)
                 if not trade_info:
                     continue
-                
+
                 pair = trade_info.get("pair")
                 setup_type = trade_info.get("setup_type", "UNKNOWN")
                 eqs = trade_info.get("eqs", 0)
@@ -574,11 +707,11 @@ def check_closed_trades():
                 sl = trade_info.get("sl")
                 risk = abs(entry - sl) if entry and sl else 0
                 pip_val = get_pip_value_for_pair(pair)
-                
+
                 close_price = None
                 pl = 0.0
                 is_estimate = True
-                
+
                 # V98.1 : Tentative de récupération via TradeDetails avec gestion d'erreur
                 try:
                     api = v88_client()
@@ -593,7 +726,7 @@ def check_closed_trades():
                             logger.info(f"[CLOSE_DETAILS] Trade {trade_id} récupéré via API: close={close_price:.5f}, PL={pl:.2f}")
                 except Exception as e:
                     logger.debug(f"Impossible de récupérer les détails du trade {trade_id}: {e}")
-                
+
                 # Fallback : estimation
                 if close_price is None or close_price <= 0:
                     current_price = get_recent_m5_price_v88(pair)
@@ -605,7 +738,7 @@ def check_closed_trades():
                     units = trade_info.get("units", 0)
                     pl = price_move * units
                     is_estimate = True
-                
+
                 # Calcul du R multiple
                 risk_pips = risk / pip_val if risk > 0 and pip_val > 0 else 0
                 if direction == "BUY":
@@ -613,20 +746,21 @@ def check_closed_trades():
                 else:
                     price_move_pips = (entry - close_price) / pip_val
                 r_multiple = price_move_pips / risk_pips if risk_pips > 0 else 0
-                
+
                 stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl, close_price, is_estimate, trade_info)
-                
+
                 if is_estimate:
                     logger.info(f"[CLOSE_ESTIMATED] Trade {trade_id} fermé (estimé) - prix actuel={close_price:.5f}")
                 else:
                     logger.info(f"[CLOSE_CONFIRMED] Trade {trade_id} fermé (confirmé) - prix={close_price:.5f}")
-                
+
     except Exception as e:
         logger.error(f"Erreur lors du check des trades fermés: {e}")
 
 # =============================
-# FONCTIONS OANDA CORRIGÉES
+# FONCTIONS OANDA CORRIGÉES AVEC GESTION DE MAINTENANCE
 # =============================
+
 
 def v88_client():
     """Retourne un client OANDA correctement configuré"""
@@ -634,8 +768,9 @@ def v88_client():
     environment = os.getenv("OANDA_ENVIRONMENT", "practice")
     return oandapyV20.API(access_token=token, environment=environment)
 
+
 def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 500, retries: int = 3) -> pd.DataFrame:
-    """V98.1 : Récupération des bougies avec retry et gestion d'erreur améliorée"""
+    """V98.1 : Récupération des bougies avec retry et gestion d'erreur améliorée + maintenance"""
     valid_granularities = ["S5", "S10", "S15", "S30",
                            "M1", "M2", "M4", "M5", "M10", "M15", "M30",
                            "H1", "H2", "H3", "H4", "H6", "H8", "H12",
@@ -643,14 +778,17 @@ def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 
     if granularity not in valid_granularities:
         logger.error(f"❌ Granularité invalide: {granularity}")
         return pd.DataFrame()
-    
-    # V98.1 : Réduction du nombre de tentatives pour éviter les timeouts
+
+    # Vérifier si on est en maintenance
+    if is_maintenance_suspended():
+        logger.debug(f"⏳ OANDA en maintenance - get_candles {instrument} suspendu")
+        return pd.DataFrame()
+
     for attempt in range(retries):
         try:
-            # V98.1 : Paramètres simplifiés pour éviter les erreurs
             params = {
                 "granularity": granularity,
-                "count": min(count, 500),  # OANDA limite à 500
+                "count": min(count, 500),
                 "price": "M"
             }
             r = instruments.InstrumentsCandles(
@@ -660,12 +798,12 @@ def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 
             api.request(r)
             resp = getattr(r, "response", {}) or {}
             candles = resp.get("candles", [])
-            
+
             if not candles:
                 logger.warning(f"⚠️ Aucune candle reçue pour {instrument} {granularity} (tentative {attempt+1})")
                 time.sleep(2)
                 continue
-            
+
             data = []
             for c in candles:
                 mid = c.get("mid")
@@ -682,28 +820,42 @@ def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 
                     })
                 except Exception:
                     continue
-            
+
             if len(data) < max(10, count // 10):
                 logger.warning(f"⚠️ Données insuffisantes pour {instrument} {granularity}: {len(data)}")
                 time.sleep(2)
                 continue
-            
+
             df = pd.DataFrame(data)
             df["time"] = pd.to_datetime(df["time"])
             df.set_index("time", inplace=True)
             df.attrs['instrument'] = instrument
             logger.info(f"✅ {instrument} {granularity}: {len(df)} candles")
             return df
-            
+
         except oandapyV20.exceptions.V20Error as e:
+            # Vérifier si c'est une erreur de maintenance
+            if is_oanda_in_maintenance(e):
+                should_suspend, duration, log_level = handle_api_error(e)
+                if should_suspend:
+                    logger.warning(f"🔧 Maintenance OANDA - suspension {duration}s")
+                    time.sleep(duration)
+                    return pd.DataFrame()
+                else:
+                    logger.warning(f"⚠️ OANDA en maintenance (tentative {attempt+1}) - attente 5s")
+                    time.sleep(5)
+                    continue
+
             logger.warning(f"❌ Erreur OANDA {attempt + 1}/{retries} pour {instrument}: {e}")
             time.sleep(2 ** attempt)
+
         except Exception as e:
             logger.warning(f"❌ Tentative {attempt + 1}/{retries} pour {instrument}: {e}")
             time.sleep(2 ** attempt)
-    
+
     logger.error(f"❌ Échec après {retries} tentatives pour {instrument} {granularity}")
     return pd.DataFrame()
+
 
 def get_price_spread_v88(pair: str) -> dict:
     """V98.1 : Récupération du spread avec gestion d'erreur"""
@@ -711,6 +863,11 @@ def get_price_spread_v88(pair: str) -> dict:
     if cached is not None:
         return cached
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            fallback_price = get_recent_m5_price_v88(pair)
+            return {"bid": fallback_price, "ask": fallback_price, "mid": fallback_price, "spread": 0.0}
+
         api = v88_client()
         r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
         resp = api.request(r)
@@ -725,12 +882,20 @@ def get_price_spread_v88(pair: str) -> dict:
             return data
     except Exception as e:
         logger.debug(f"Erreur pricing {pair}: {e}")
+        # Vérifier si c'est une erreur de maintenance
+        if is_oanda_in_maintenance(e):
+            handle_api_error(e)
     fallback_price = get_recent_m5_price_v88(pair)
     return {"bid": fallback_price, "ask": fallback_price, "mid": fallback_price, "spread": 0.0}
+
 
 def get_recent_m5_price_v88(pair: str) -> float:
     """V98.1 : Récupération du prix récent avec fallback"""
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            return 0.0
+
         api = v88_client()
         df = get_candles_with_retry(api, pair, "M5", 10)
         if df is not None and not df.empty:
@@ -739,12 +904,17 @@ def get_recent_m5_price_v88(pair: str) -> float:
         pass
     return 0.0
 
+
 def get_atr_m15_v88(pair: str) -> float:
     """V98.1 : Récupération de l'ATR avec fallback"""
     cached = _cache_get_v88(f"atr_m15:{pair}", ttl_seconds=60.0)
     if cached is not None:
         return float(cached)
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            return 0.0
+
         api = v88_client()
         df = get_candles_with_retry(api, pair, "M15", max(ATR_PERIOD + 10, 40))
         if df is None or df.empty:
@@ -755,22 +925,53 @@ def get_atr_m15_v88(pair: str) -> float:
     except Exception:
         return 0.0
 
-def get_open_trades_v88(log_raw: bool = False) -> list:
-    """V98.1 : Récupération des trades ouverts avec cache"""
+
+def get_open_trades_v88(log_raw: bool = False, skip_maintenance_check: bool = False) -> list:
+    """V98.1 : Récupération des trades ouverts avec cache et gestion de maintenance"""
     cache_key = "open_trades_raw"
+
+    # Vérifier si on est en suspension pour maintenance
+    if not skip_maintenance_check and is_maintenance_suspended():
+        logger.debug("⏳ OANDA en maintenance - appel OpenTrades suspendu")
+        return []
+
     resp = _cache_get_v88(cache_key)
+
     if resp is None:
         try:
             api = v88_client()
             r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
             resp = api.request(r)
+
+            # Réinitialiser l'état de maintenance en cas de succès
+            reset_maintenance_state()
+
             if resp:
                 _cache_set_v88(cache_key, resp)
+
+        except oandapyV20.exceptions.V20Error as e:
+            should_suspend, duration, log_level = handle_api_error(e)
+
+            if log_level == "WARNING":
+                logger.warning(f"⚠️ Erreur OpenTrades: {e}")
+            else:
+                logger.error(f"❌ Erreur OpenTrades: {e}")
+
+            # En cas d'erreur, on retourne le cache existant si disponible
+            cached_resp = _cache_get_v88(cache_key, ttl_seconds=10.0)
+            if cached_resp is not None:
+                logger.debug("📦 Utilisation du cache pour OpenTrades")
+                resp = cached_resp
+            else:
+                return []
+
         except Exception as e:
             logger.error(f"Erreur OpenTrades: {e}")
             return []
+
     if not resp:
         return []
+
     raw_trades = resp.get("trades", []) or []
     open_trades = []
     for t in raw_trades:
@@ -782,12 +983,17 @@ def get_open_trades_v88(log_raw: bool = False) -> list:
             open_trades.append(t)
     return open_trades
 
+
 def get_account_summary_v88() -> dict:
     """V98.1 : Récupération du résumé de compte"""
     cached = _cache_get_v88("account_summary")
     if cached is not None:
         return cached
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            return {}
+
         api = v88_client()
         r = accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID)
         resp = api.request(r)
@@ -796,7 +1002,11 @@ def get_account_summary_v88() -> dict:
             return resp
     except Exception as e:
         logger.error(f"AccountSummary error: {e}")
+        # Vérifier si c'est une erreur de maintenance
+        if is_oanda_in_maintenance(e):
+            handle_api_error(e)
     return {}
+
 
 def get_balance_v88() -> float:
     """V98.1 : Récupération du solde"""
@@ -806,12 +1016,17 @@ def get_balance_v88() -> float:
     except Exception:
         return 0.0
 
+
 def get_oanda_margin_rate_v88(pair: str) -> float:
     """V98.1 : Récupération du taux de marge"""
     cached = _cache_get_v88(f"instrument:{pair}", ttl_seconds=300.0)
     if cached is not None:
         return float(cached.get("marginRate", 0.0333) or 0.0333)
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            return 0.0333
+
         api = v88_client()
         r = accounts.AccountInstruments(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
         resp = api.request(r)
@@ -825,6 +1040,7 @@ def get_oanda_margin_rate_v88(pair: str) -> float:
         pass
     return 0.0333
 
+
 def get_available_margin_v88(account_summary: dict | None = None) -> float:
     """V98.1 : Récupération de la marge disponible"""
     account_summary = account_summary or get_account_summary_v88()
@@ -837,6 +1053,7 @@ def get_available_margin_v88(account_summary: dict | None = None) -> float:
         except Exception:
             continue
     return 0.0
+
 
 def estimate_margin_used_v88(pair: str, units: int, entry_price: float) -> float:
     """V98.1 : Estimation de la marge utilisée"""
@@ -857,6 +1074,7 @@ def estimate_margin_used_v88(pair: str, units: int, entry_price: float) -> float
         notional_usd = units * entry_price * q_to_usd
     return float(notional_usd * margin_rate)
 
+
 def get_fx_rate_to_usd_v88(currency: str) -> float:
     """V98.1 : Récupération du taux de change vers USD"""
     if currency == "USD":
@@ -867,6 +1085,10 @@ def get_fx_rate_to_usd_v88(currency: str) -> float:
     direct = f"{currency}_USD"
     inverse = f"USD_{currency}"
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            return 1.0
+
         api = v88_client()
         if direct in PAIR_LIST:
             df = get_candles_with_retry(api, direct, "M5", 10)
@@ -884,6 +1106,7 @@ def get_fx_rate_to_usd_v88(currency: str) -> float:
         pass
     return 1.0
 
+
 def calculate_margin_v88(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:
     """V98.1 : Calcul de la marge"""
     margin_required = estimate_margin_used_v88(pair, units, entry_price)
@@ -897,6 +1120,7 @@ def calculate_margin_v88(pair: str, units: int, entry_price: float, account_summ
         "sufficient": bool(available <= 0 or margin_required <= available),
     }
 
+
 def cap_units_absolute_v88(pair: str, units: int) -> int:
     """V98.1 : Plafonnement absolu des unités"""
     max_units = MAX_UNITS_BY_PAIR.get(pair, MAX_UNITS_BY_PAIR["DEFAULT"])
@@ -904,6 +1128,7 @@ def cap_units_absolute_v88(pair: str, units: int) -> int:
         logger.warning(f"ABS CAP {pair}: units {units} -> {max_units}")
         return max_units
     return units
+
 
 def cap_units_by_margin_v88(pair: str, units: int, entry_price: float, balance: float) -> int:
     """V98.1 : Plafonnement par marge"""
@@ -921,6 +1146,7 @@ def cap_units_by_margin_v88(pair: str, units: int, entry_price: float, balance: 
     capped = int(capped // step * step)
     logger.warning(f"MARGIN CAP {pair}: units {units} -> {capped}")
     return max(capped, 0)
+
 
 def calculate_units_v88(pair: str, entry: float, stop_loss: float, balance: float) -> float:
     """V98.1 : Calcul des unités"""
@@ -953,14 +1179,17 @@ def calculate_units_v88(pair: str, entry: float, stop_loss: float, balance: floa
         return 0
     return int(units)
 
+
 def quote_currency_v88(pair: str) -> str:
     """V98.1 : Récupération de la devise de cotation"""
     return pair.split("_")[1]
+
 
 def round_price_v88(pair: str, price: float) -> str:
     """V98.1 : Arrondi du prix selon la paire"""
     decimals = PRICE_DECIMALS_V88.get(pair, 5)
     return f"{float(price):.{decimals}f}"
+
 
 def is_market_open_utc_v88(now_dt: datetime) -> bool:
     """V98.1 : Vérification si le marché est ouvert"""
@@ -978,6 +1207,7 @@ def is_market_open_utc_v88(now_dt: datetime) -> bool:
 _OANDA_CACHE_V88 = {}
 OANDA_CACHE_TTL_SECONDS_V88 = 3.0
 
+
 def _cache_get_v88(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V88):
     item = _OANDA_CACHE_V88.get(key)
     if not item:
@@ -988,9 +1218,11 @@ def _cache_get_v88(key: str, ttl_seconds: float = OANDA_CACHE_TTL_SECONDS_V88):
         return None
     return value
 
+
 def _cache_set_v88(key: str, value):
     _OANDA_CACHE_V88[key] = (time.time(), value)
     return value
+
 
 def clear_scan_cache_v88():
     _OANDA_CACHE_V88.clear()
@@ -1051,34 +1283,39 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
                               eqs: int, setup_type: str, metrics: dict) -> str | None:
     """V98.1 : Exécution d'ordre avec formatage correct et CONFIRMATION"""
     logger.info(f"[ORDER] V98.1 EXECUTION START {pair} {direction} type={entry_type} score={score}")
-    
+
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
         return None
-    
+
     if open_trade_count_v88() >= MAX_TRADES_TOTAL:
         logger.info(f"Limite trades ouverts atteinte")
         return None
-    
+
+    # Vérifier si on est en maintenance
+    if is_maintenance_suspended():
+        logger.warning(f"[ORDER] OANDA en maintenance - ordre suspendu pour {pair}")
+        return None
+
     balance = get_balance_v88()
     if balance <= 0:
         logger.error("Balance invalide")
         return None
-    
+
     units = calculate_units_v88(pair, entry_price, stop_loss, balance)
     if not units or float(units) <= 0:
         logger.error(f"units invalides pour {pair}: {units}")
         return None
-    
+
     margin_info = calculate_margin_v88(pair, units, entry_price)
     if not margin_info["sufficient"]:
         units = cap_units_by_margin_v88(pair, units, entry_price, balance)
         if not units or units <= 0:
             logger.error(f"[RISK] {pair} order blocked: insufficient margin")
             return None
-    
+
     signed_units = units if direction == "BUY" else -units
-    
+
     # V98.1 : Formatage correct des données pour OrderCreate
     order_data = {
         "order": {
@@ -1096,34 +1333,34 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
             }
         }
     }
-    
+
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
     logger.info(f"[ORDER] SIGNAL V98.1 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
-    
+
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
         return "SIMULATION"
-    
+
     try:
         api = v88_client()
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         resp = api.request(r)
-        
+
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
             logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject.get('rejectReason', 'unknown')}")
             return None
-        
+
         # ============================================================
         # CORRECTION 1 : ATTENTE DE CONFIRMATION AVEC RETRY
         # ============================================================
         # Attendre 1 seconde avant de vérifier
         time.sleep(1)
-        
+
         trade_id = None
         for attempt in range(5):
-            open_trades = get_open_trades_v88(log_raw=True)
+            open_trades = get_open_trades_v88(skip_maintenance_check=True)
             for t in open_trades:
                 if t.get("instrument") == pair:
                     t_entry = float(t.get("price", 0))
@@ -1135,13 +1372,13 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
                 break
             logger.warning(f"[ORDER] Confirmation tentative {attempt+1}/5 pour {pair}...")
             time.sleep(0.5)
-        
+
         if not trade_id:
             logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
             return None
-        
+
         logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
-        
+
         # Stockage des infos du trade
         open_trade_details[trade_id] = {
             "entry": entry_price,
@@ -1155,9 +1392,12 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
             **metrics
         }
         return str(trade_id)
-        
+
     except Exception as exc:
         logger.exception(f"[ORDER] Erreur ordre OANDA {pair}: {exc}")
+        # Vérifier si c'est une erreur de maintenance
+        if is_oanda_in_maintenance(exc):
+            handle_api_error(exc)
         return None
 
 # ============================================================
@@ -1166,10 +1406,15 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
     """V98.1 : Modification du Stop Loss via TradeCRCDO avec CONFIRMATION"""
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            logger.warning(f"[BE] OANDA en maintenance - modification SL suspendue pour {trade_id}")
+            return False
+
         api = v88_client()
-        
+
         logger.info(f"[BE] Modification SL via TradeCRCDO pour trade {trade_id} -> {new_sl:.5f}")
-        
+
         # V98.1 : Formatage correct des données
         data = {
             "stopLoss": {
@@ -1179,20 +1424,20 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
         }
         r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
         resp = api.request(r)
-        
+
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
             logger.error(f"[BE] Rejeté pour trade {trade_id}: {reject.get('rejectReason', 'unknown')}")
             return False
-        
+
         logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
-        
+
         # ============================================================
         # CORRECTION 2 : CONFIRMATION DU SL
         # ============================================================
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
-        
+
         trade_details = get_trade_details_v88(trade_id)
         if trade_details:
             actual_sl = get_stop_loss_v88(trade_details)
@@ -1206,9 +1451,12 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
         else:
             logger.warning(f"[CONFIRM] Impossible de confirmer le SL pour {trade_id}")
             return True  # On considère que c'est OK même sans confirmation
-            
+
     except Exception as e:
         logger.error(f"[BE] Erreur modification SL trade {trade_id}: {e}")
+        # Vérifier si c'est une erreur de maintenance
+        if is_oanda_in_maintenance(e):
+            handle_api_error(e)
         return False
 
 # ============================================================
@@ -1217,10 +1465,15 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
 def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -> bool:
     """V98.1 : Création d'un Trailing Stop Loss avec CONFIRMATION"""
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            logger.warning(f"[TSL] OANDA en maintenance - trailing suspendu pour {trade_id}")
+            return False
+
         api = v88_client()
-        
+
         logger.info(f"[TSL] Création trailing via OrderCreate pour trade {trade_id} -> distance={distance:.5f}")
-        
+
         # V98.1 : Formatage correct des données
         order_data = {
             "order": {
@@ -1232,20 +1485,20 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
         }
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         resp = api.request(r)
-        
+
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
             logger.error(f"[TSL] Rejeté pour trade {trade_id}: {reject.get('rejectReason', 'unknown')}")
             return False
-        
+
         logger.info(f"[TSL] SUCCESS: Trailing stop créé pour trade {trade_id}, distance={distance:.5f}")
-        
+
         # ============================================================
         # CORRECTION 3 : CONFIRMATION DU TRAILING STOP
         # ============================================================
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
-        
+
         trade_details = get_trade_details_v88(trade_id)
         if trade_details and has_trailing_stop_v88(trade_details):
             trailing_id = trade_details.get("trailingStopLossOrder", {}).get("id", "unknown")
@@ -1254,9 +1507,12 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
         else:
             logger.warning(f"[CONFIRM] Trailing stop non confirmé pour {trade_id}")
             return True  # On considère que c'est OK même sans confirmation
-            
+
     except Exception as e:
         logger.error(f"[TSL] Erreur création trailing stop trade {trade_id}: {e}")
+        # Vérifier si c'est une erreur de maintenance
+        if is_oanda_in_maintenance(e):
+            handle_api_error(e)
         return False
 
 # ============================================================
@@ -1265,6 +1521,10 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
 def get_trade_details_v88(trade_id: str) -> dict:
     """V98.1 : Récupération des détails d'un trade avec gestion d'erreur"""
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            return {}
+
         api = v88_client()
         r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
         resp = api.request(r)
@@ -1279,21 +1539,24 @@ def get_trade_details_v88(trade_id: str) -> dict:
         logger.error(f"[TRADE] Erreur récupération trade {trade_id}: {e}")
         return {}
 
+
 def has_trailing_stop_v88(trade: dict) -> bool:
     """Vérifie si un trade a un trailing stop actif"""
     trailing_stop = trade.get("trailingStopLossOrder", {})
     return bool(trailing_stop and trailing_stop.get("id"))
+
 
 def get_stop_loss_v88(trade: dict) -> float:
     """Récupère le prix du stop loss d'un trade"""
     sl_order = trade.get("stopLossOrder", {})
     return float(sl_order.get("price", 0)) if sl_order else 0.0
 
+
 def extract_trade_id_v89(response: dict) -> str | None:
     """V98.1 : Extraction robuste du tradeID"""
     if not response:
         return None
-    
+
     oft = response.get("orderFillTransaction")
     if oft:
         if "tradeOpened" in oft and oft["tradeOpened"]:
@@ -1308,17 +1571,18 @@ def extract_trade_id_v89(response: dict) -> str | None:
             opened = oft["tradesOpened"]
             if opened and opened[0].get("tradeID"):
                 return str(opened[0]["tradeID"])
-    
+
     oct = response.get("orderCreateTransaction")
     if oct and "relatedTransactionIDs" in oct:
         related = oct.get("relatedTransactionIDs", [])
         if related:
             return str(related[-1])
-    
+
     if response.get("tradeID"):
         return str(response["tradeID"])
-    
+
     return None
+
 
 def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) -> str | None:
     """V98.1 : Recherche d'un trade par instrument avec tolérance"""
@@ -1327,8 +1591,8 @@ def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) 
     tolerance = max(5.0 * pip_value, 0.5 * atr, 0.0001)
     tolerance = round(tolerance, 6)
     logger.debug(f"[FALLBACK] Tolérance pour {pair}: {tolerance:.6f}")
-    
-    open_trades = get_open_trades_v88(log_raw=True)
+
+    open_trades = get_open_trades_v88(log_raw=True, skip_maintenance_check=True)
     for t in open_trades:
         if t.get("instrument") != pair:
             continue
@@ -1340,9 +1604,11 @@ def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) 
             return str(t.get("id"))
     return None
 
+
 def open_trade_count_v88() -> int:
     """V98.1 : Nombre de trades ouverts"""
     return len(get_open_trades_v88(log_raw=True))
+
 
 def has_open_trade_v88(pair: str) -> bool:
     """V98.1 : Vérifie si un trade est ouvert sur une paire"""
@@ -1365,6 +1631,7 @@ def get_dynamic_max_distance(df: pd.DataFrame, pair: str, atr_multiplier: float 
     except Exception:
         return 20.0
 
+
 def detect_imbalances(df: pd.DataFrame, lookback: int = 3) -> list:
     if len(df) < lookback + 2:
         return []
@@ -1380,11 +1647,13 @@ def detect_imbalances(df: pd.DataFrame, lookback: int = 3) -> list:
             ibs.append({'type': 'BEARISH', 'high': next_low, 'low': current_low, 'level': (current_low + next_low) / 2})
     return ibs
 
+
 def is_in_imbalance_zone(entry_level: float, ibs: list, tolerance: float = 0.0001) -> dict:
     for ib in ibs:
         if ib['low'] - tolerance <= entry_level <= ib['high'] + tolerance:
             return {'is_in_zone': True, 'type': ib['type'], 'level': ib['level']}
     return {'is_in_zone': False, 'type': None, 'level': None}
+
 
 def detect_breaker(df: pd.DataFrame, lookback: int = 10) -> dict:
     if len(df) < lookback + 3:
@@ -1397,6 +1666,7 @@ def detect_breaker(df: pd.DataFrame, lookback: int = 10) -> dict:
         elif candle['close'] < prev_candle['low']:
             return {"type": "SELL", "level": prev_candle['low'], "time": df.index[i]}
     return {"type": None, "level": None}
+
 
 def detect_dealing_range(df: pd.DataFrame, lookback: int = 50) -> dict:
     if df is None or df.empty or len(df) < lookback:
@@ -1425,6 +1695,7 @@ def detect_dealing_range(df: pd.DataFrame, lookback: int = 50) -> dict:
         return {"high": range_high, "low": range_low, "range_size": range_high - range_low}
     return None
 
+
 def classify_zone_irl_erl(zone_level: float, dealing_range: dict, tolerance: float = 0.0001) -> str:
     if not dealing_range or dealing_range.get("high") is None or dealing_range.get("low") is None:
         return None
@@ -1434,6 +1705,7 @@ def classify_zone_irl_erl(zone_level: float, dealing_range: dict, tolerance: flo
         return "IRL"
     else:
         return "ERL"
+
 
 def detect_amd_phase(df: pd.DataFrame, lookback: int = 50) -> str:
     if df.empty or len(df) < lookback:
@@ -1449,6 +1721,7 @@ def detect_amd_phase(df: pd.DataFrame, lookback: int = 50) -> str:
     if current_price > recent_high or current_price < recent_low:
         return "DISTRIBUTION"
     return "UNKNOWN"
+
 
 def cluster_signals(signals: List[Dict], pair: str, max_distance_pips_for_clustering: float = None) -> List[Dict]:
     if not signals:
@@ -1478,6 +1751,7 @@ def cluster_signals(signals: List[Dict], pair: str, max_distance_pips_for_cluste
         clusters.append(best_signal_in_cluster)
     return clusters
 
+
 def detect_crt_candle(candle: pd.Series, min_body_ratio: float = 0.5) -> bool:
     body = abs(candle['close'] - candle['open'])
     total_range = candle['high'] - candle['low']
@@ -1490,12 +1764,14 @@ def detect_crt_candle(candle: pd.Series, min_body_ratio: float = 0.5) -> bool:
     lower_wick_ratio = lower_wick / total_range
     return body_ratio >= min_body_ratio and upper_wick_ratio <= 0.2 and lower_wick_ratio <= 0.2
 
+
 def rr_points(rr: float) -> int:
     if rr >= 3.0:
         return 2
     if rr >= 2.0:
         return 1
     return 0
+
 
 def detect_tbs_setup(df: pd.DataFrame) -> dict:
     if df.empty or len(df) < 3:
@@ -1529,6 +1805,7 @@ def detect_tbs_setup(df: pd.DataFrame) -> dict:
                 return {"type": "TBS_PIN_SELL", "level": prev_candle['low']}
     return {"type": "", "level": None}
 
+
 def compute_confidence_score(*, bias_points: int, structure_points: int, rr: float, nested_fvg_in_zone: bool = False, other_bonuses: int = 0) -> int:
     score = 0
     score += bias_points
@@ -1538,6 +1815,7 @@ def compute_confidence_score(*, bias_points: int, structure_points: int, rr: flo
         score += 1
     score += other_bonuses
     return score
+
 
 def get_pair_settings(pair: str) -> dict:
     return PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
@@ -1568,6 +1846,7 @@ _MOJIBAKE_ASCII_REPLACEMENTS_V82 = {
     "ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â·": "-", "Ãƒâ€šÃ‚Â·": "-",
     "ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€š": "", "Ãƒâ€š": "",
 }
+
 
 def repair_mojibake_v82(value) -> str:
     text = str(value)
@@ -1623,8 +1902,10 @@ def repair_mojibake_v82(value) -> str:
             text = text.replace(bad, good)
     return text
 
+
 class ReadableLogFormatterV82(logging.Formatter):
     ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]", "[CLOSE]", "[CLOSE_DETAILS]", "[CLOSE_ESTIMATED]", "[CLOSE_CONFIRMED]")
+
     def _clean_message_v83(self, message: str, levelname: str) -> str:
         text = repair_mojibake_v82(str(message))
         text = "".join(ch for ch in text if ord(ch) < 128)
@@ -1661,6 +1942,7 @@ class ReadableLogFormatterV82(logging.Formatter):
         else:
             tag = "[INFO]"
         return f"{tag} {text}"
+
     def format(self, record):
         original_msg = record.msg
         original_args = record.args
@@ -1671,6 +1953,7 @@ class ReadableLogFormatterV82(logging.Formatter):
         finally:
             record.msg = original_msg
             record.args = original_args
+
 
 _log_formatter_v82 = ReadableLogFormatterV82(
     fmt="%(asctime)s | %(levelname)-8s | %(message)s",
@@ -1699,6 +1982,7 @@ logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
 sent_signals = {}
 recent_signals = {}
 
+
 def is_signal_sent_recently(pair: str, direction: str, price: float, zone_start: float, zone_end: float) -> bool:
     global sent_signals
     now = time.time()
@@ -1719,6 +2003,7 @@ def is_signal_sent_recently(pair: str, direction: str, price: float, zone_start:
         sent_signals.pop(k, None)
     return is_sent
 
+
 def mark_signal_sent(pair: str, direction: str, entry_level: float, zone_start: float, zone_end: float):
     key = (pair, direction, round(entry_level, 5), round(zone_start, 5), round(zone_end, 5))
     sent_signals[key] = time.time()
@@ -1727,6 +2012,7 @@ def mark_signal_sent(pair: str, direction: str, entry_level: float, zone_start: 
 # =============================
 # INDICATEURS TECHNIQUES (repris de V97)
 # =============================
+
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
     delta = prices.diff()
@@ -1737,6 +2023,7 @@ def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
+
 
 def get_last_rsi(prices: pd.Series, period: int = 14) -> float:
     try:
@@ -1752,6 +2039,7 @@ def get_last_rsi(prices: pd.Series, period: int = 14) -> float:
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
         return rsi.dropna().iloc[-1] if len(rsi.dropna()) > 0 else 50.0
+
 
 def calculate_stoch_rsi(prices: pd.Series, rsi_period: int = 14, stoch_period: int = 14,
                         smooth_k: int = 3, smooth_d: int = 3) -> tuple:
@@ -1771,6 +2059,7 @@ def calculate_stoch_rsi(prices: pd.Series, rsi_period: int = 14, stoch_period: i
         return k_val, d_val
     except Exception:
         return 50.0, 50.0
+
 
 def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
     try:
@@ -1792,6 +2081,7 @@ def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
             logger.warning(f"⚠️ ATR fallback = 0 pour {df.attrs.get('instrument', 'N/A')} → Utilisation de 0.0001")
             return 0.0001
         return float(atr_fallback)
+
 
 def detect_rsi_divergence(df: pd.DataFrame, lookback: int = 14, divergence_type: str = "all") -> bool:
     if len(df) < lookback * 2 + 5:
@@ -1827,6 +2117,7 @@ def detect_rsi_divergence(df: pd.DataFrame, lookback: int = 14, divergence_type:
             return True
     return False
 
+
 def detect_mss(df: pd.DataFrame, lookback: int = 10) -> dict:
     if df.empty or len(df) < lookback + 5:
         return {"type": None, "level": None}
@@ -1840,6 +2131,7 @@ def detect_mss(df: pd.DataFrame, lookback: int = 10) -> dict:
     if last_close < lows.iloc[-2] and last_close < ema20:
         return {"type": "MSS_SELL", "level": lows.iloc[-2], "time": last_time}
     return {"type": None, "level": None}
+
 
 def detect_bos(df: pd.DataFrame, lookback: int = 50) -> dict:
     if len(df) < lookback + 10:
@@ -1857,6 +2149,7 @@ def detect_bos(df: pd.DataFrame, lookback: int = 50) -> dict:
     if current_close < last_swing_low and current_low < last_swing_low:
         return {"type": "BOS_SELL", "level": last_swing_low, "time": df.index[-1]}
     return {"type": None, "level": None, "time": None}
+
 
 def detect_choch(df: pd.DataFrame, lookback: int = 50) -> dict:
     if len(df) < lookback + 15:
@@ -1886,8 +2179,10 @@ def detect_choch(df: pd.DataFrame, lookback: int = 50) -> dict:
             return {"type": "CHOCH_BUY", "level": hh, "time": current_time}
     return {"type": None, "level": None, "time": None}
 
+
 def ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
+
 
 def calculate_macd_momentum(df: pd.DataFrame) -> pd.Series:
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
@@ -1896,6 +2191,7 @@ def calculate_macd_momentum(df: pd.DataFrame) -> pd.Series:
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     histogram = macd_line - signal_line
     return histogram
+
 
 def score_ema_trend(df_h1: pd.DataFrame) -> int:
     if df_h1 is None or df_h1.empty or "close" not in df_h1 or len(df_h1) < 2:
@@ -1907,6 +2203,7 @@ def score_ema_trend(df_h1: pd.DataFrame) -> int:
     score = 2 if price > float(ema50.iloc[-1]) else -1
     score += 1 if float(ema50.iloc[-1]) > float(ema50.iloc[-2]) else -2
     return max(-3, min(3, int(score)))
+
 
 def score_market_structure(df_h1: pd.DataFrame) -> int:
     if df_h1 is None or df_h1.empty or len(df_h1) < 10:
@@ -1939,8 +2236,10 @@ def score_market_structure(df_h1: pd.DataFrame) -> int:
         return -1
     return 0
 
+
 def _directional_score(raw_score: int, direction: str) -> int:
     return int(raw_score) if (direction or "").upper() == "BUY" else -int(raw_score)
+
 
 def score_higher_timeframe_alignment(direction: str, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> int:
     h1 = _directional_score(score_market_structure(df_h1), direction)
@@ -1951,8 +2250,10 @@ def score_higher_timeframe_alignment(direction: str, df_h1: pd.DataFrame, df_h4:
         return -2
     return 0
 
+
 def compute_final_score(score_components: dict) -> int:
     return int(sum(int(v or 0) for v in score_components.values()))
+
 
 def log_score_detail(score_components: dict, total: int, decision: str) -> None:
     if not DEBUG_MODE:
@@ -1973,6 +2274,7 @@ def log_score_detail(score_components: dict, total: int, decision: str) -> None:
             logger.debug(f"{label:<19}: {int(score_components[key]):+d}")
     logger.debug(f"TOTAL = {int(total):+d}")
     logger.debug(f"Decision = {decision}")
+
 
 def calculate_volatility_ratio(df: pd.DataFrame, pair: str) -> bool:
     atr = calculate_atr(df)
@@ -2000,6 +2302,7 @@ def detect_swing_points(df: pd.DataFrame, lookback: int = 5) -> tuple:
         if low == df["low"].iloc[i - lookback:i + lookback + 1].min() and df["close"].iloc[i] > df["open"].iloc[i]:
             swing_lows.append({"index": i, "time": df.index[i], "price": low})
     return swing_highs, swing_lows
+
 
 def detect_swing_points_advanced(df: pd.DataFrame, lookback: int = SWING_LOOKBACK) -> tuple:
     swing_highs = []
@@ -2030,6 +2333,7 @@ def get_min_gap_for_pair(pair: str) -> float:
         return 0.00015
     else:
         return 0.0002
+
 
 def detect_fvg_advanced(df: pd.DataFrame, max_lookback_hours: int = 36) -> List[Dict]:
     fvgs = []
@@ -2082,6 +2386,7 @@ def detect_fvg_advanced(df: pd.DataFrame, max_lookback_hours: int = 36) -> List[
                 })
     return fvgs
 
+
 def get_fvg_midpoint(fvg: dict) -> float:
     if not all(k in fvg for k in ["high_level", "low_level"]):
         return None
@@ -2091,6 +2396,7 @@ def get_fvg_midpoint(fvg: dict) -> float:
         return None
     return round((high + low) / 2, 5)
 
+
 def is_fvg_retest_valid(df: pd.DataFrame, fvg: dict, current_price: float, pair: str = "EUR_USD") -> bool:
     if "low_level" not in fvg or "high_level" not in fvg:
         return False
@@ -2098,6 +2404,7 @@ def is_fvg_retest_valid(df: pd.DataFrame, fvg: dict, current_price: float, pair:
     distance = abs(current_price - fvg_mid)
     max_dist_pips = get_dynamic_max_distance(df, pair, atr_multiplier=1.5)
     return price_to_pips(distance, pair) <= max_dist_pips
+
 
 def is_fvg_unmitigated(df: pd.DataFrame, fvg: dict) -> bool:
     after_data = df[df.index > fvg["time"]]
@@ -2108,6 +2415,7 @@ def is_fvg_unmitigated(df: pd.DataFrame, fvg: dict) -> bool:
     elif fvg["direction"] == "SELL":
         return after_data["high"].max() < fvg["high_level"]
     return False
+
 
 def detect_nested_fvg(df: pd.DataFrame, min_nesting: int = 2) -> list:
     fvgs = detect_fvg_advanced(df)
@@ -2257,6 +2565,7 @@ def price_to_pips(price_diff: float, pair: str) -> float:
         pip_size = 0.0001
     return abs(price_diff) / pip_size
 
+
 def get_pip_value_for_pair(pair: str) -> float:
     pair = pair.upper()
     if pair == "XAU_USD":
@@ -2272,18 +2581,19 @@ def get_pip_value_for_pair(pair: str) -> float:
 # V98.1 - FILTRES ET SCORING (repris de V97, inchangé)
 # ============================================================
 
+
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
     try:
         high = df['high'].values
         low = df['low'].values
         close = df['close'].values
-        
+
         tr = np.zeros(len(df))
         for i in range(1, len(df)):
-            tr[i] = max(high[i] - low[i], 
+            tr[i] = max(high[i] - low[i],
                        abs(high[i] - close[i-1]),
                        abs(low[i] - close[i-1]))
-        
+
         plus_dm = np.zeros(len(df))
         minus_dm = np.zeros(len(df))
         for i in range(1, len(df)):
@@ -2293,45 +2603,47 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
                 plus_dm[i] = up_move
             if down_move > up_move and down_move > 0:
                 minus_dm[i] = down_move
-        
+
         atr = talib.ATR(high, low, close, timeperiod=period)
         plus_di = 100 * talib.SMA(plus_dm, period) / atr
         minus_di = 100 * talib.SMA(minus_dm, period) / atr
-        
+
         dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
         adx = talib.SMA(dx, period)
-        
+
         return float(adx[-1]) if not np.isnan(adx[-1]) else 0.0
     except Exception:
         return 0.0
 
+
 def detect_breakout_candle(df: pd.DataFrame, lookback: int = 5) -> dict:
     if len(df) < lookback + 2:
         return {"type": None, "level": None, "confirmed": False}
-    
+
     last = df.iloc[-1]
-    
+
     recent_high = df['high'].iloc[-lookback-1:-1].max()
     recent_low = df['low'].iloc[-lookback-1:-1].min()
-    
+
     body = abs(last['close'] - last['open'])
     total_range = last['high'] - last['low']
     body_ratio = body / total_range if total_range > 0 else 0
-    
+
     is_strong_close = body_ratio > 0.45
-    
+
     if last['close'] > recent_high and last['close'] > last['open'] and is_strong_close:
         return {"type": "BUY", "level": recent_high, "confirmed": True}
-    
+
     if last['close'] < recent_low and last['close'] < last['open'] and is_strong_close:
         return {"type": "SELL", "level": recent_low, "confirmed": True}
-    
+
     if last['close'] > recent_high:
         return {"type": "BUY", "level": recent_high, "confirmed": False}
     if last['close'] < recent_low:
         return {"type": "SELL", "level": recent_low, "confirmed": False}
-    
+
     return {"type": None, "level": None, "confirmed": False}
+
 
 def calculate_momentum(df: pd.DataFrame, period: int = 5) -> float:
     if len(df) < period + 1:
@@ -2343,6 +2655,7 @@ def calculate_momentum(df: pd.DataFrame, period: int = 5) -> float:
     except Exception:
         return 0.0
 
+
 def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
     if len(df) < period + 1 or 'volume' not in df.columns:
         return 1.0
@@ -2352,6 +2665,7 @@ def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
         return (avg_volume / prev_avg_volume) if prev_avg_volume > 0 else 1.0
     except Exception:
         return 1.0
+
 
 def calculate_entry_quality_score(
     pair: str,
@@ -2366,7 +2680,7 @@ def calculate_entry_quality_score(
     scores = {}
     total = 0
     logs = []
-    
+
     entry_zone = abs(entry_level - current_price)
     entry_zone_pips = price_to_pips(entry_zone, pair)
     if entry_zone_pips <= 3:
@@ -2384,7 +2698,7 @@ def calculate_entry_quality_score(
     else:
         scores["distance_zone"] = 0
         logs.append(f"distance_zone: {entry_zone_pips:.1f}pips -> 0")
-    
+
     try:
         ema20 = df_m15['close'].ewm(span=20, adjust=False).mean().iloc[-1]
         ema_distance = abs(current_price - ema20)
@@ -2407,7 +2721,7 @@ def calculate_entry_quality_score(
     except Exception:
         scores["ema_proximity"] = 10
         logs.append("ema_proximity: error -> 10")
-    
+
     try:
         recent_high = df_m15['high'].iloc[-10:].max()
         recent_low = df_m15['low'].iloc[-10:].min()
@@ -2447,7 +2761,7 @@ def calculate_entry_quality_score(
     except Exception:
         scores["range_position"] = 10
         logs.append("range_position: error -> 10")
-    
+
     pullback_passed, _ = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if pullback_passed:
         scores["pullback_quality"] = 20
@@ -2485,7 +2799,7 @@ def calculate_entry_quality_score(
         else:
             scores["pullback_quality"] = 10
             logs.append("pullback_quality: données insuffisantes -> 10")
-    
+
     try:
         k, _ = calculate_stoch_rsi(df_m15['close'])
         if direction == "BUY":
@@ -2517,9 +2831,9 @@ def calculate_entry_quality_score(
     except Exception:
         scores["stoch_position"] = 10
         logs.append("stoch_position: error -> 10")
-    
+
     total = sum(scores.values())
-    
+
     details = {
         "distance_zone": scores["distance_zone"],
         "ema_proximity": scores["ema_proximity"],
@@ -2530,22 +2844,23 @@ def calculate_entry_quality_score(
         "passed": total >= EQS_MIN_THRESHOLD,
         "logs": logs
     }
-    
+
     return details
+
 
 def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple:
     if len(df) < lookback * 2 + 2:
         return False, "Données insuffisantes"
-    
+
     direction = direction.upper()
     swing_highs, swing_lows = detect_swing_points(df, lookback=3)
-    
+
     if len(swing_highs) < 2 or len(swing_lows) < 2:
         return False, "Pas assez de swing points"
-    
+
     last_highs = sorted(swing_highs, key=lambda x: x['index'])[-2:]
     last_lows = sorted(swing_lows, key=lambda x: x['index'])[-2:]
-    
+
     if direction == "BUY":
         hh = last_highs[-1]['price'] > last_highs[-2]['price']
         hl = last_lows[-1]['price'] > last_lows[-2]['price']
@@ -2555,7 +2870,7 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
             return True, "Structure partiellement haussière"
         else:
             return False, f"Structure non haussière (HH={hh}, HL={hl})"
-    
+
     elif direction == "SELL":
         lh = last_highs[-1]['price'] < last_highs[-2]['price']
         ll = last_lows[-1]['price'] < last_lows[-2]['price']
@@ -2565,20 +2880,21 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
             return True, "Structure partiellement baissière"
         else:
             return False, f"Structure non baissière (LH={lh}, LL={ll})"
-    
+
     return False, f"Direction {direction} invalide"
+
 
 def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, current_price: float, pair: str) -> tuple:
     direction = direction.upper()
     pip_value = get_pip_value_for_pair(pair)
     min_pullback_pips = PULLBACK_MIN_PIPS_BY_PAIR.get(pair, PULLBACK_MIN_PIPS_BY_PAIR["DEFAULT"])
     min_pullback_price = min_pullback_pips * pip_value
-    
+
     if len(df) < 8:
         return False, "Données insuffisantes pour pullback"
-    
+
     recent = df.iloc[-8:]
-    
+
     if direction == "BUY":
         recent_high = recent['high'].max()
         pullback_depth = recent_high - current_price
@@ -2587,7 +2903,7 @@ def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, curren
             return True, f"Pullback OK ({pullback_pips:.1f} pips >= {min_pullback_pips})"
         else:
             return False, f"Pullback insuffisant ({pullback_pips:.1f} pips < {min_pullback_pips})"
-    
+
     elif direction == "SELL":
         recent_low = recent['low'].min()
         pullback_depth = current_price - recent_low
@@ -2596,31 +2912,33 @@ def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, curren
             return True, f"Pullback OK ({pullback_pips:.1f} pips >= {min_pullback_pips})"
         else:
             return False, f"Pullback insuffisant ({pullback_pips:.1f} pips < {min_pullback_pips})"
-    
+
     return False, f"Direction {direction} invalide"
+
 
 def filter_min_volatility(df: pd.DataFrame, pair: str) -> tuple:
     if len(df) < ATR_PERIOD:
         return False, "Données insuffisantes pour ATR"
-    
+
     atr_price = calculate_atr(df, period=ATR_PERIOD)
     atr_pips = price_to_pips(atr_price, pair)
-    
+
     min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
-    
+
     logger.info(f"[ATR_AUDIT] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
-    
+
     if atr_pips < min_atr_pips:
         return False, f"ATR = {atr_pips:.1f} pips < seuil {min_atr_pips} pips (brut: {atr_price:.6f})"
-    
+
     return True, f"ATR = {atr_pips:.1f} pips >= seuil {min_atr_pips} pips (brut: {atr_price:.6f})"
+
 
 def filter_close_confirmation(df: pd.DataFrame, direction: str) -> tuple:
     if len(df) < 2:
         return False, "Données insuffisantes"
-    
+
     last = df.iloc[-1]
-    
+
     if direction == "BUY":
         if last['close'] > last['open']:
             return True, "Bougie M15 confirmée (close > open)"
@@ -2631,8 +2949,9 @@ def filter_close_confirmation(df: pd.DataFrame, direction: str) -> tuple:
             return True, "Bougie M15 confirmée (close < open)"
         else:
             return False, "Bougie M15 non confirmée pour SELL (close > open)"
-    
+
     return False, f"Direction {direction} invalide"
+
 
 def filter_momentum_exhaustion(
     pair: str,
@@ -2744,7 +3063,7 @@ def filter_momentum_exhaustion(
 # GESTION DES ORDRES
 # =============================
 def calculate_sl_tp(entry_price: float, atr: float, direction: str, pair: str,
-                    entry_type: str = "FVG_RETEST", fvg_data: dict = None, 
+                    entry_type: str = "FVG_RETEST", fvg_data: dict = None,
                     breaker_level: float = None) -> tuple:
     try:
         if None in [entry_price, atr, direction, pair]:
@@ -2781,6 +3100,7 @@ def calculate_sl_tp(entry_price: float, atr: float, direction: str, pair: str,
         logger.error(f"Erreur SL/TP: {e}")
         return None, None
 
+
 def send_telegram_alert(pair: str, direction: str, entry_price: float,
                        stop_loss: float, take_profit: float, narrative: dict,
                        bias_analysis: dict, rsi: float, entry_type: str,
@@ -2810,14 +3130,14 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         rr_display = f"{dist_tp / dist_sl:.2f}" if dist_sl > 0 else "N/A"
     except Exception:
         rr_display = "N/A"
-    
+
     eqs_info = f" | <b>EQS:</b> {eqs_score}/100" if eqs_score else ""
-    
+
     if confidence_score:
         score_info = (f"<b>Score:</b> {confidence_score}/{SCORING_CONFIG['MIN_CONFIDENCE_SCORE']}{eqs_info} | <b>Qualité:</b> {quality_label}\n<b>Win Rate estimé:</b> {win_rate}\n<b>R/R:</b> 1:{rr_display}\n")
     else:
         score_info = ""
-    
+
     confluence_tags = []
     if score_details.get("D1_Trend", "").startswith("+"):
         confluence_tags.append("D1")
@@ -2834,7 +3154,7 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     if score_details.get("Pullback_V98.1", "").startswith("+"):
         confluence_tags.append("PULLBACK")
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
-    
+
     message = f"""
 <b>FVG ORDERFLOW TRADING SIGNAL V98.1</b>
 <b>Paire:</b> {pair}
@@ -2880,6 +3200,7 @@ def get_session_quality_bonus(pair: str) -> tuple:
         else:
             return 0, "0 (Session neutre)"
 
+
 def get_d1_trend_bonus(df_d1, direction: str) -> tuple:
     if df_d1 is None or df_d1.empty or len(df_d1) < 52:
         return 0, "0 (D1 insuffisant)"
@@ -2901,6 +3222,7 @@ def get_d1_trend_bonus(df_d1, direction: str) -> tuple:
             return -2, "-2 (Contre tendance D1)"
     except Exception:
         return 0, "0 (Erreur D1)"
+
 
 def get_macd_h1_bonus(df_h1, direction: str) -> tuple:
     if df_h1 is None or df_h1.empty or len(df_h1) < 35:
@@ -2927,6 +3249,7 @@ def get_macd_h1_bonus(df_h1, direction: str) -> tuple:
     except Exception:
         return 0, "0 (Erreur MACD H1)"
 
+
 def get_rsi_divergence_bonus(df_h1, df_m15, direction: str) -> tuple:
     try:
         if direction == "BUY":
@@ -2943,6 +3266,7 @@ def get_rsi_divergence_bonus(df_h1, df_m15, direction: str) -> tuple:
         pass
     return 0, "0 (Pas de divergence RSI)"
 
+
 def estimate_win_rate(score: int, eqs: int, confluences: dict) -> str:
     if score >= 14 and eqs >= 75:
         base = 80
@@ -2952,7 +3276,7 @@ def estimate_win_rate(score: int, eqs: int, confluences: dict) -> str:
         base = 60
     else:
         base = 50
-    
+
     if confluences.get("d1_aligned"):
         base += 3
     if confluences.get("rsi_divergence"):
@@ -2967,8 +3291,9 @@ def estimate_win_rate(score: int, eqs: int, confluences: dict) -> str:
         base += 3
     if confluences.get("pullback_ok"):
         base += 2
-    
+
     return f"~{min(base, 92)}%"
+
 
 def get_signal_quality_label(score: int, eqs: int) -> str:
     if score >= 15 and eqs >= 75:
@@ -3014,19 +3339,19 @@ def calculate_signal_confidence(
     direction = (direction or "").upper()
     entry_level = entry.get("entry_level")
     entry_type = str(entry.get("type", "FVG_RETEST")).upper()
-    
+
     if entry_level is None or direction not in ["BUY", "SELL"]:
         return {"passed": False, "total_score": 0, "final_confidence": "LOW", "details": {"VETO": "Entrée/direction invalide"}}
-    
+
     entry_level = float(entry_level)
     atr_value = calculate_atr(df_m15)
     fvg_data = entry.get("fvg") if "fvg" in entry else None
-    
+
     stop_loss, take_profit = calculate_sl_tp(
         entry_price=entry_level, atr=atr_value, direction=direction,
         pair=pair, entry_type=entry_type, fvg_data=fvg_data,
     )
-    
+
     eqs_result = calculate_entry_quality_score(
         pair=pair,
         direction=direction,
@@ -3035,11 +3360,11 @@ def calculate_signal_confidence(
         current_price=current_price,
         atr=atr_value
     )
-    
+
     eqs_score = eqs_result["total"]
     eqs_passed = eqs_result["passed"]
     details["EQS_Details"] = eqs_result["logs"]
-    
+
     if not eqs_passed:
         rejection_logs.append(f"EQS = {eqs_score}/100 < seuil {EQS_MIN_THRESHOLD}")
         details["VETO"] = f"❌ EQS insuffisant: {eqs_score}/100 < {EQS_MIN_THRESHOLD}"
@@ -3055,9 +3380,9 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "rejection_logs": rejection_logs
         }
-    
+
     details["EQS"] = f"{eqs_score}/100"
-    
+
     vol_passed, vol_msg = filter_min_volatility(df_m15, pair)
     if not vol_passed:
         rejection_logs.append(vol_msg)
@@ -3075,7 +3400,7 @@ def calculate_signal_confidence(
             "rejection_logs": rejection_logs
         }
     details["Volatility"] = vol_msg
-    
+
     struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
     if not struct_passed:
         rejection_logs.append(struct_msg)
@@ -3098,7 +3423,7 @@ def calculate_signal_confidence(
     else:
         score_components["Structure"] += 2
         details["Structure_V98.1"] = f"+2 ({struct_msg})"
-    
+
     pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if not pullback_passed:
         rejection_logs.append(pullback_msg)
@@ -3117,14 +3442,14 @@ def calculate_signal_confidence(
         }
     score_components["Pullback"] += 2
     details["Pullback_V98.1"] = f"+2 ({pullback_msg})"
-    
+
     close_passed, close_msg = filter_close_confirmation(df_m15, direction)
     if close_passed:
         score_components["Secondary"] += 1
         details["Close_Confirm"] = f"+1 ({close_msg})"
     else:
         details["Close_Confirm"] = close_msg
-    
+
     momentum_passed, momentum_msg, momentum_penalties, penalty_total = filter_momentum_exhaustion(
         pair=pair,
         direction=direction,
@@ -3134,16 +3459,16 @@ def calculate_signal_confidence(
         current_price=current_price,
         entry_type=entry_type
     )
-    
+
     score_components["Momentum"] += penalty_total
     details["Momentum"] = f"{penalty_total:+d} ({momentum_msg})"
-    
+
     if not momentum_passed:
         score_components["Momentum"] -= 5
         details["Momentum"] += " | PASSAGE FORCÉ"
-    
+
     momentum_filter_info = {"passed": momentum_passed, "message": momentum_msg, "penalties": momentum_penalties}
-    
+
     if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
         score_components["ICT"] += 3
         details["Trend_H4"] = "+3 (Aligné)"
@@ -3153,7 +3478,7 @@ def calculate_signal_confidence(
     else:
         score_components["ICT"] -= 2
         details["Trend_H4"] = "-2 (H4 opposé)"
-    
+
     try:
         distance = abs(float(current_price) - entry_level)
         pip = get_pip_value_for_pair(pair)
@@ -3181,7 +3506,7 @@ def calculate_signal_confidence(
                     "rejection_logs": rejection_logs}
     except Exception as exc:
         details["Distance_Error"] = str(exc)
-    
+
     try:
         ema_score = max(-2, min(2, _directional_score(score_ema_trend(df_h1), direction)))
         structure_score = _directional_score(score_market_structure(df_h1), direction)
@@ -3193,7 +3518,7 @@ def calculate_signal_confidence(
         details["HTF_Alignment"] = f"{htf_score:+d} (alignement H1/H4)"
     except Exception as exc:
         details["Trend_H1_Error"] = str(exc)
-    
+
     if "LIQUIDITY" in entry_type:
         score_components["ICT"] += 2
         details["Setup_Type"] = "+2 Liquidity"
@@ -3209,7 +3534,7 @@ def calculate_signal_confidence(
     else:
         score_components["ICT"] += 1
         details["Setup_Type"] = f"+1 ({entry_type})"
-    
+
     try:
         dist_sl = abs(entry_level - stop_loss)
         dist_tp = abs(take_profit - entry_level)
@@ -3224,7 +3549,7 @@ def calculate_signal_confidence(
             details["RR"] = f"0 (faible {rr_ratio:.2f})"
     except Exception:
         pass
-    
+
     try:
         d1_bonus, d1_label = get_d1_trend_bonus(df_d1, direction)
         if d1_bonus > 0:
@@ -3234,7 +3559,7 @@ def calculate_signal_confidence(
             details["D1_Trend"] = d1_label
     except Exception:
         pass
-    
+
     try:
         macd_bonus, macd_label = get_macd_h1_bonus(df_h1, direction)
         if macd_bonus > 0:
@@ -3244,7 +3569,7 @@ def calculate_signal_confidence(
             details["MACD_H1"] = macd_label
     except Exception:
         pass
-    
+
     try:
         session_bonus, session_label = get_session_quality_bonus(pair)
         if session_bonus > 0:
@@ -3254,15 +3579,15 @@ def calculate_signal_confidence(
             details["Session"] = session_label
     except Exception:
         pass
-    
+
     score = compute_final_score(score_components)
     passed = score >= min_required
-    
+
     if not passed:
         rejection_logs.append(f"Score = {score} < seuil {min_required}")
-    
+
     final_confidence = "HIGH" if score >= min_required + 3 else "MEDIUM" if passed else "LOW"
-    
+
     confluences = {
         "d1_aligned": details.get("D1_Trend", "").startswith("+"),
         "rsi_divergence": False,
@@ -3272,12 +3597,12 @@ def calculate_signal_confidence(
         "structure_ok": score_components.get("Structure", 0) >= 1,
         "pullback_ok": score_components.get("Pullback", 0) >= 2,
     }
-    
+
     win_rate = estimate_win_rate(score, eqs_score, confluences)
     quality_label = get_signal_quality_label(score, eqs_score)
-    
+
     log_score_detail(score_components, score, "PASSED" if passed else "REJECTED")
-    
+
     # Récupération des métriques enrichies
     atr_pips = price_to_pips(atr_value, pair)
     adx = calculate_adx(df_h1)
@@ -3299,7 +3624,7 @@ def calculate_signal_confidence(
         session = "OTHER"
     h1_trend = score_ema_trend(df_h1)
     h4_trend = score_ema_trend(df_h4)
-    
+
     rr = 0
     try:
         dist_sl = abs(entry_level - stop_loss)
@@ -3307,7 +3632,7 @@ def calculate_signal_confidence(
         rr = dist_tp / dist_sl if dist_sl > 0 else 0
     except:
         pass
-    
+
     # Log DECISION enrichi
     decision_line = (
         f"[DECISION] {pair} | {direction} | {entry_type} | "
@@ -3319,9 +3644,9 @@ def calculate_signal_confidence(
     )
     if not passed and rejection_logs:
         decision_line += f" | REASON={rejection_logs[0][:60]}"
-    
+
     logger.info(decision_line)
-    
+
     metrics = {
         "eqs": eqs_score,
         "setup_type": entry_type,
@@ -3337,7 +3662,7 @@ def calculate_signal_confidence(
         "h1_trend": h1_trend,
         "h4_trend": h4_trend
     }
-    
+
     return {
         "total_score": score,
         "details": details,
@@ -3465,14 +3790,14 @@ def advanced_main_v981():
         return
     for pair in PAIR_LIST:
         _reset_log_dedup()
-        
+
         # ============================================================
         # CORRECTION 4 : PAS DE DOUBLE ENTRÉE
         # ============================================================
         if has_open_trade_v88(pair):
             logger.info(f"[INFO] {pair}: trade deja ouvert - scan ignore")
             continue
-        
+
         try:
             df_h4 = get_candles_with_retry(api, pair, GRANULARITY_H4, 300)
             df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
@@ -3481,36 +3806,36 @@ def advanced_main_v981():
             if any(df.empty for df in [df_h4, df_h1, df_m15]):
                 logger.warning(f"⚠️ Données manquantes pour {pair}, analyse ignorée")
                 continue
-            
+
             atr_price = calculate_atr(df_m15, period=ATR_PERIOD)
             atr_pips = price_to_pips(atr_price, pair)
             min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
             logger.info(f"[ATR_DIAG] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
-            
+
             current_price = float(df_m15["close"].iloc[-1])
             bias_analysis = determine_advanced_bias(df_h4)
             bias = bias_analysis.get("bias", "NEUTRAL")
             min_score = MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
-            
+
             if DEBUG_MODE:
                 adx = calculate_adx(df_h1)
                 momentum = calculate_momentum(df_m15)
                 logger.debug(f"📊 {pair} | ADX={adx:.1f} | MOM={momentum:.2f}% | ATR_pips={atr_pips:.1f}")
-            
+
             if bias == "NEUTRAL":
                 buy_setups = detect_setups_aligned_with_bias(df_m15, df_h1, "BUY", pair, df_h4)
                 sell_setups = detect_setups_aligned_with_bias(df_m15, df_h1, "SELL", pair, df_h4)
                 setups = buy_setups + sell_setups
             else:
                 setups = detect_setups_aligned_with_bias(df_m15, df_h1, bias, pair, df_h4)
-            
+
             if DEBUG_MODE:
                 logger.debug(f"📋 {pair}: {len(setups)} setups détectés (biais: {bias})")
-            
+
             scored_entries = []
             rejected_reasons = defaultdict(int)
             rejected_details = []
-            
+
             for entry in setups:
                 direction = entry.get("direction", "").upper()
                 entry_type = entry.get("type", "UNKNOWN")
@@ -3529,10 +3854,10 @@ def advanced_main_v981():
                 )
                 score = confidence_result.get("total_score", 0)
                 eqs = confidence_result.get("eqs_score", 0)
-                
+
                 if DEBUG_MODE:
                     logger.debug(f"📊 {pair} {direction} | Score: {score} | EQS: {eqs}/100 | Passed: {confidence_result.get('passed', False)}")
-                
+
                 if confidence_result.get("passed", False):
                     scored_entries.append({"entry": entry, "confidence": confidence_result})
                     metrics = confidence_result.get("metrics", {})
@@ -3544,14 +3869,14 @@ def advanced_main_v981():
                     if rejection_logs:
                         rejected_details.append(f"{pair} {direction}: " + " | ".join(rejection_logs))
                     stats.record_signal(pair, False, reason, entry_level, 0, 0, score, direction)
-            
+
             if rejected_details:
                 logger.info(f"[REJECT_DETAILS] {pair} - {len(rejected_details)} rejets détaillés")
                 for detail in rejected_details[:5]:
                     logger.info(f"  {detail}")
                 if len(rejected_details) > 5:
                     logger.info(f"  ... et {len(rejected_details)-5} autres")
-            
+
             finalists = strict_keep_best_per_direction(scored_entries)
             log_line = (
                 f"{pair:10} | Biais: {bias:6} | Setups: {len(setups):3} | "
@@ -3561,7 +3886,7 @@ def advanced_main_v981():
                 reasons = ", ".join([f"{k}:{v}" for k, v in list(rejected_reasons.items())[:3] if v > 0])
                 log_line += f" | Rejets: {reasons}"
             logger.info(log_line)
-            
+
             nb_envoyes = 0
             for item in finalists:
                 entry = item["entry"]
@@ -3573,12 +3898,12 @@ def advanced_main_v981():
                 zone_start = float(zone_start)
                 zone_end = float(zone_end)
                 entry_level_key = round(entry_level, 5)
-                
+
                 if is_signal_sent_recently(pair, direction, entry_level_key, zone_start, zone_end):
                     if DEBUG_MODE:
                         logger.debug(f"❌ {pair} {direction} déjà envoyé")
                     continue
-                
+
                 stop_loss, take_profit = calculate_sl_tp(
                     entry_price=entry_level,
                     atr=confidence_result["atr_value"],
@@ -3587,14 +3912,14 @@ def advanced_main_v981():
                     entry_type=entry_type,
                     breaker_level=None
                 )
-                
+
                 score = confidence_result.get("total_score", 0)
                 eqs = confidence_result.get("eqs_score", 0)
                 quality = confidence_result.get("quality_label", "B")
                 metrics = confidence_result.get("metrics", {})
-                
+
                 logger.info(f"📊 TRADE {pair} {direction} {entry_type} @{entry_level:.5f} | Score: {score} | EQS: {eqs}/100 | Qualité: {quality}")
-                
+
                 entry_metrics = {
                     "atr": metrics.get("atr", 0),
                     "adx": metrics.get("adx", 0),
@@ -3610,13 +3935,13 @@ def advanced_main_v981():
                     "h1_trend": metrics.get("h1_trend", 0),
                     "h4_trend": metrics.get("h4_trend", 0)
                 }
-                
+
                 if DEMO_MODE:
                     logger.info(f"🔬 DEMO: {pair} {direction} @ {entry_level:.5f} (SL: {stop_loss}, TP: {take_profit})")
                     stats.record_signal(pair, True, "demo_mode", entry_level, stop_loss, take_profit, score, direction, entry_metrics)
                     nb_envoyes += 1
                     continue
-                
+
                 trade_id = execute_oanda_trade_v981(
                     pair=pair,
                     direction=direction,
@@ -3629,7 +3954,7 @@ def advanced_main_v981():
                     setup_type=entry_type,
                     metrics=entry_metrics
                 )
-                
+
                 if trade_id:
                     logger.info(
                         f"[DECISION_EXECUTED] {pair} | {direction} | {entry_type} | "
@@ -3637,7 +3962,7 @@ def advanced_main_v981():
                         f"ENTRY={entry_level:.5f} | SL={stop_loss:.5f} | TP={take_profit:.5f} | "
                         f"TRADE_ID={trade_id} | ACTION=EXECUTED"
                     )
-                    
+
                     enriched_bias = dict(bias_analysis) if bias_analysis else {}
                     enriched_bias["win_rate"] = confidence_result.get("win_rate", "~55%")
                     enriched_bias["quality_label"] = quality
@@ -3653,10 +3978,10 @@ def advanced_main_v981():
                     mark_signal_sent(pair, direction, entry_level_key, zone_start, zone_end)
                     stats.record_signal(pair, True, "trade_opened", entry_level, stop_loss, take_profit, score, direction, entry_metrics)
                     nb_envoyes += 1
-            
+
             if nb_envoyes > 0:
                 logger.info(f"✅ {pair}: {nb_envoyes} trades envoyés")
-                
+
         except Exception as e:
             logger.error(f"💥 Erreur sur {pair} : {str(e)}")
             logger.error(traceback.format_exc())
@@ -3664,12 +3989,18 @@ def advanced_main_v981():
     stats.log_summary()
 
 # ============================================================
-# V98.1 - BREAK EVEN CORRIGÉ
+# V98.1 - BREAK EVEN CORRIGÉ AVEC SUIVI STAGNANT
 # ============================================================
 def check_breakeven_v981():
     try:
+        # Vérifier si on est en maintenance
+        if is_maintenance_suspended():
+            logger.debug("⏳ OANDA en maintenance - BE suspendu")
+            return
+
         open_trades = get_open_trades_v88()
         logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil: {BREAKEVEN_TRIGGER_R}R)")
+
         for t in open_trades:
             trade_id = str(t.get("id"))
             pair = t.get("instrument")
@@ -3707,6 +4038,12 @@ def check_breakeven_v981():
                 logger.debug(f"[BE] Trade {trade_id} risque invalide")
                 continue
             r = profit / risk
+
+            # ============================================================
+            # CORRECTION 8 : SUIVI DES TRADES STAGNANTS
+            # ============================================================
+            check_stagnant_trades(trade_id, pair, direction, entry, r)
+
             logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f}")
             if r >= BREAKEVEN_TRIGGER_R:
                 logger.info(f"[BE] 🎯 Condition R>={BREAKEVEN_TRIGGER_R} atteinte pour {trade_id}")
@@ -3759,8 +4096,10 @@ STRICT_MAX_DISTANCE_PIPS = {
     "NAS100_USD": 50.0, "DEFAULT": 15.0,
 }
 
+
 def strict_price_distance(pair: str, pips: float) -> float:
     return float(pips) * get_pip_value_for_pair(pair)
+
 
 def strict_entry_type_allowed(entry_type: str) -> bool:
     et = (entry_type or "").upper().strip()
@@ -3776,6 +4115,7 @@ def strict_entry_type_allowed(entry_type: str) -> bool:
     if any(k in et for k in blocked_keywords):
         return False
     return False
+
 
 def strict_stoch_veto(direction: str, df_h1: pd.DataFrame, df_m15: pd.DataFrame) -> tuple:
     try:
@@ -3798,12 +4138,14 @@ def strict_stoch_veto(direction: str, df_h1: pd.DataFrame, df_m15: pd.DataFrame)
     except Exception:
         return True, "StochRSI indisponible"
 
+
 def strict_trend_veto(direction: str, current_price: float, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> tuple:
     try:
         ema50_h1 = df_h1["close"].ewm(span=50, adjust=False).mean().iloc[-1]
         return True, f"EMA50 H1 scorée sans veto"
     except Exception:
         return True, "EMA50 H1 indisponible"
+
 
 def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tuple:
     entry_level = entry.get("entry_level")
@@ -3832,6 +4174,7 @@ def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tupl
         return True, f"distance acceptable={distance:.5f}"
     return False, f"trop loin distance={distance:.5f}"
 
+
 def strict_keep_best_per_direction(scored_entries: list) -> list:
     best = {}
     for item in scored_entries:
@@ -3856,6 +4199,7 @@ def strict_keep_best_per_direction(scored_entries: list) -> list:
             item["key_score"] = key_score
             best[direction] = item
     return sorted(best.values(), key=lambda x: x["key_score"], reverse=True)
+
 
 def strict_direction_permission_v77(direction: str, bias: str, current_price: float, df_h1: pd.DataFrame, df_m15: pd.DataFrame, entry_type: str) -> tuple:
     try:
@@ -3884,11 +4228,13 @@ def strict_direction_permission_v77(direction: str, bias: str, current_price: fl
     except Exception:
         return False, "permission direction indisponible"
 
+
 def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     if not entries:
         return []
     pip = get_pip_value_for_pair(pair)
     precision_step = max(pip * 0.5, 1e-9)
+
     def priority(entry: dict) -> tuple:
         et = str(entry.get("type", "")).upper()
         score = 0
@@ -3907,6 +4253,7 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
         except Exception:
             lvl = 0.0
         return (score, -abs(lvl))
+
     seen = {}
     for entry in entries:
         try:
@@ -3936,6 +4283,8 @@ def diagnostic_startup_v981():
     logger.info(f"[DIAG] SUIVI DES CLÔTURES : tentative API + fallback")
     logger.info(f"[DIAG] ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS")
     logger.info(f"[DIAG] APPELS OANDA CORRIGÉS")
+    logger.info(f"[DIAG] GESTION DE MAINTENANCE OANDA ACTIVÉE")
+    logger.info(f"[DIAG] SUIVI DES TRADES STAGNANTS ACTIVÉ")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -3954,7 +4303,7 @@ def diagnostic_startup_v981():
     logger.info("=" * 60)
 
 # ============================================================
-# V98.1 - BOUCLE PRINCIPALE
+# V98.1 - BOUCLE PRINCIPALE AVEC GESTION DE MAINTENANCE
 # ============================================================
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V98.1 (API OANDA corrigée)")
@@ -3973,34 +4322,51 @@ if __name__ == "__main__":
     logger.info("  ✅ Confirmation du SL après modification")
     logger.info("  ✅ Confirmation du trailing stop après création")
     logger.info("  ✅ Pas de double entrée (continue)")
+    logger.info("  ✅ Détection et gestion de la maintenance OANDA")
+    logger.info("  ✅ Suspension automatique des appels API")
+    logger.info("  ✅ Suivi des trades stagnants")
     logger.info("")
-    
+
     diagnostic_startup_v981()
-    
+
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
     if DEBUG_MODE:
         logger.info("🔍 MODE DEBUG ACTIVÉ")
-    
+
     last_signal_scan = time.time()
     SIGNAL_SCAN_INTERVAL = 900
-    
+    FAST_LOOP_INTERVAL = 30
+    maintenance_mode = False
+
     while True:
         try:
             now = time.time()
-            
+
+            # Vérifier si on est en maintenance
+            if is_maintenance_suspended():
+                if not maintenance_mode:
+                    maintenance_mode = True
+                    logger.warning("🔧 BOT EN MODE MAINTENANCE - appels suspendus")
+                time.sleep(10)
+                continue
+
+            if maintenance_mode:
+                maintenance_mode = False
+                logger.info("🔧 FIN DU MODE MAINTENANCE - reprise normale")
+
             clear_scan_cache_v88()
             current_open_count = open_trade_count_v88()
             logger.info(f"[SCAN] Trades ouverts: {current_open_count}/{MAX_TRADES_TOTAL}")
-            
+
             check_closed_trades()
-            
+
             check_breakeven_v981()
-            
+
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
                 logger.info(f"⏰ Scan des signaux V98.1")
                 last_signal_scan = now
-                
+
                 now_dt = datetime.utcnow()
                 if not is_market_open_utc_v88(now_dt):
                     logger.info("Marché fermé.")
@@ -4008,13 +4374,21 @@ if __name__ == "__main__":
                     logger.info(f"Limite trades atteinte")
                 else:
                     advanced_main_v981()
-            
-            time.sleep(30)
+
+            time.sleep(FAST_LOOP_INTERVAL)
 
         except KeyboardInterrupt:
             logger.info("🛑 Arrêt demandé")
             break
         except Exception as e:
+            # Vérifier si c'est une erreur de maintenance
+            if is_oanda_in_maintenance(e):
+                logger.warning(f"🔧 Maintenance OANDA détectée: {e}")
+                MAINTENANCE_DETECTED = True
+                MAINTENANCE_SUSPEND_TIME = time.time() + MAINTENANCE_RETRY_INTERVAL
+                time.sleep(10)
+                continue
+
             logger.error(f"💥 Erreur critique: {e}")
             traceback.print_exc()
             time.sleep(30)
