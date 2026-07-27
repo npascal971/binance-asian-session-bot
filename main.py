@@ -4319,7 +4319,7 @@ def diagnostic_startup_v981():
     logger.info("=" * 60)
 
 # ============================================================
-# V98.1 - BOUCLE PRINCIPALE AVEC GESTION DE MAINTENANCE
+# V98.1 - BOUCLE PRINCIPALE AVEC GESTION DE MAINTENANCE - CORRIGÉE
 # ============================================================
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V98.1 (API OANDA corrigée)")
@@ -4401,7 +4401,9 @@ if __name__ == "__main__":
             # Vérifier si c'est une erreur de maintenance
             if is_oanda_in_maintenance(e):
                 logger.warning(f"🔧 Maintenance OANDA détectée: {e}")
-                # Correction : utiliser les variables globales correctement
+                # ============================================================
+                # CORRECTION : DECLARATION GLOBAL AVANT ASSIGNATION
+                # ============================================================
                 global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
                 MAINTENANCE_DETECTED = True
                 MAINTENANCE_SUSPEND_TIME = time.time() + MAINTENANCE_RETRY_INTERVAL
