@@ -4402,14 +4402,14 @@ if __name__ == "__main__":
             if is_oanda_in_maintenance(e):
                 logger.warning(f"🔧 Maintenance OANDA détectée: {e}")
                 # ============================================================
-                # CORRECTION : DECLARATION GLOBAL AVANT ASSIGNATION
+                # CORRECTION : Utiliser handle_api_error au lieu de global
                 # ============================================================
-                global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
-                MAINTENANCE_DETECTED = True
-                MAINTENANCE_SUSPEND_TIME = time.time() + MAINTENANCE_RETRY_INTERVAL
-                time.sleep(10)
+                handle_api_error(e)
+                # Attendre un peu avant de continuer
+                time.sleep(5)
                 continue
 
             logger.error(f"💥 Erreur critique: {e}")
             traceback.print_exc()
+            time.sleep(30)
             time.sleep(30)
