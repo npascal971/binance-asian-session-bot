@@ -64,7 +64,7 @@ BREAKEVEN_EARLY_R = float(os.getenv("BREAKEVEN_EARLY_R", "0.35"))  # Seuil rédu
 TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.6"))
 TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "5.0"))
 
-ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "20.0"))
+ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "23.0"))
 MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
 VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 
@@ -81,10 +81,10 @@ MIN_ATR_PIPS_BY_PAIR = {
 }
 
 PULLBACK_MIN_PIPS_BY_PAIR = {
-    "EUR_USD": 2.0,
+    "EUR_USD": 2.5,
     "GBP_USD": 3.0,
-    "USD_CAD": 3.0,
-    "AUD_USD": 2.0,
+    "USD_CAD": 3.5,
+    "AUD_USD": 2.5,
     "AUD_CAD": 3.0,
     "XAU_USD": 15.0,
     "USD_JPY": 4.0,
