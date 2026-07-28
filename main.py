@@ -10,6 +10,12 @@
 # 6. ✅ Break Even adaptatif en contexte favorable (0.35R)
 # 7. ✅ Trailing stop adaptatif basé sur l'ATR
 # 8. ✅ Sortie anticipée sur retournement d'indicateurs
+# 
+# CORRECTIONS SUPPLEMENTAIRES (V98.3) :
+# 9. ✅ Logs détaillés des réponses OANDA pour diagnostic
+# 10. ✅ Verrouillage par paire pour éviter les doublons
+# 11. ✅ Amélioration de la confirmation des ordres
+# 12. ✅ Gestion granulaire des erreurs V20Error
 # ============================================================
 
 import os
@@ -50,7 +56,7 @@ MIN_CONFIDENCE_SCORE_BY_PAIR = {
 }
 
 BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.6"))
-BREAKEVEN_EARLY_R = float(os.getenv("BREAKEVEN_EARLY_R", "0.35"))  # Seuil réduit en contexte favorable
+BREAKEVEN_EARLY_R = float(os.getenv("BREAKEVEN_EARLY_R", "0.35"))
 TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.6"))
 TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "5.0"))
 
@@ -91,6 +97,12 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
     "GBP_JPY": 6.0,
     "DEFAULT": 2.0
 }
+
+# ============================================================
+# VERROUILLAGE PAR PAIRE (CORRECTION V98.3)
+# ============================================================
+last_execution_attempt = {}
+EXECUTION_COOLDOWN_SECONDS = 60  # 60 secondes d'attente entre deux tentatives sur la même paire
 
 # ============================================================
 # ÉTAT GLOBAL DE LA MAINTENANCE
@@ -1353,13 +1365,23 @@ MAX_UNITS_BY_PAIR = {
 MAX_MARGIN_USAGE_PER_TRADE_PERCENT = float(os.getenv("MAX_MARGIN_USAGE_PER_TRADE_PERCENT", "5.0"))
 
 # ============================================================
-# V98.2 - EXÉCUTION D'ORDRE AVEC CONFIRMATION ET FORÇAGE CACHE
+# V98.3 - EXÉCUTION D'ORDRE AVEC LOGS DÉTAILLÉS ET VERROUILLAGE
 # ============================================================
 def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop_loss: float,
                               take_profit: float, score: int, entry_type: str,
                               eqs: int, setup_type: str, metrics: dict) -> str | None:
-    """V98.2 : Exécution d'ordre avec formatage correct, CONFIRMATION et FORÇAGE CACHE"""
-    logger.info(f"[ORDER] V98.2 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    """V98.3 : Exécution d'ordre avec logs détaillés, verrouillage et confirmation robuste"""
+    
+    # === VERROUILLAGE PAR PAIRE ===
+    global last_execution_attempt
+    pair_upper = pair.upper()
+    now = time.time()
+    if pair_upper in last_execution_attempt and now - last_execution_attempt[pair_upper] < EXECUTION_COOLDOWN_SECONDS:
+        logger.warning(f"[ORDER] ⏳ Dernier essai pour {pair_upper} il y a {now - last_execution_attempt[pair_upper]:.1f}s < {EXECUTION_COOLDOWN_SECONDS}s, on attend.")
+        return None
+    last_execution_attempt[pair_upper] = now
+    
+    logger.info(f"[ORDER] V98.3 EXECUTION START {pair} {direction} type={entry_type} score={score}")
 
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
@@ -1433,7 +1455,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V98.2 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    logger.info(f"[ORDER] SIGNAL V98.3 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
 
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
@@ -1442,36 +1464,77 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
     try:
         api = v88_client()
         r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+        
+        # === LOG DE LA REQUETE ===
+        import json
+        logger.info(f"[ORDER] 📤 REQUETE OANDA pour {pair}: {json.dumps(order_data, indent=2)}")
+        
         resp = api.request(r)
+        
+        # === LOG DE LA REPONSE BRUTE ===
+        logger.info(f"[ORDER] 📥 REPONSE OANDA pour {pair}: {json.dumps(resp, indent=2)}")
 
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
-            logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject.get('rejectReason', 'unknown')}")
+            reject_reason = reject.get('rejectReason', 'unknown')
+            logger.error(f"[ORDER] ❌ ORDRE REJETÉ {pair}: {reject_reason}")
+            logger.error(f"[ORDER] 📋 Détails du rejet: {json.dumps(reject, indent=2)}")
+            return None
+        
+        # Vérifier si l'ordre a été accepté
+        if not resp.get("orderCreateTransaction"):
+            logger.error(f"[ORDER] ❌ Pas de orderCreateTransaction dans la réponse pour {pair}")
             return None
 
         # ============================================================
         # CORRECTION 3 : ATTENTE DE CONFIRMATION AVEC FORÇAGE CACHE
         # ============================================================
-        time.sleep(1)
+        time.sleep(1.5)  # Attendre un peu plus pour la propagation
 
         trade_id = None
-        for attempt in range(5):
+        for attempt in range(8):  # Plus de tentatives
             # Forcer le refresh du cache à chaque tentative
             open_trades = get_open_trades_v88(skip_maintenance_check=True, force_refresh=True)
+            
+            # Recherche plus robuste du trade
             for t in open_trades:
                 if t.get("instrument") == pair:
                     t_entry = float(t.get("price", 0))
-                    if abs(t_entry - entry_price) < 0.0001:
+                    t_direction = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
+                    
+                    # Tolérance de prix plus large
+                    price_tolerance = max(0.0001, pip_value * 5)
+                    if (abs(t_entry - entry_price) < price_tolerance or abs(t_entry - stop_loss) < price_tolerance * 2) and t_direction == direction:
                         trade_id = t.get("id")
+                        logger.info(f"[ORDER] ✅ Trade trouvé par prix: {trade_id} (entrée={t_entry:.5f}, attendu={entry_price:.5f}, tolérance={price_tolerance:.5f})")
                         break
+                    
+                    # Si on trouve le trade par son SL
+                    t_sl = get_stop_loss_v88(t)
+                    if t_sl > 0 and abs(t_sl - stop_loss) < price_tolerance * 2:
+                        trade_id = t.get("id")
+                        logger.info(f"[ORDER] ✅ Trade trouvé par SL: {trade_id} (SL={t_sl:.5f}, attendu={stop_loss:.5f})")
+                        break
+            
             if trade_id:
                 break
-            logger.warning(f"[ORDER] Confirmation tentative {attempt+1}/5 pour {pair}...")
-            time.sleep(0.5)
+            logger.warning(f"[ORDER] ⏳ Confirmation tentative {attempt+1}/8 pour {pair}...")
+            time.sleep(0.8)  # Attendre un peu plus entre les tentatives
 
         if not trade_id:
-            logger.error(f"[ORDER] ORDRE NON CONFIRMÉ {pair}")
-            return None
+            # Dernier recours : chercher dans la transaction
+            oft = resp.get("orderFillTransaction", {})
+            if oft.get("tradeOpened"):
+                trade_id = oft["tradeOpened"].get("tradeID")
+                if trade_id:
+                    logger.info(f"[ORDER] ✅ Trade ID récupéré depuis orderFillTransaction: {trade_id}")
+            
+            # Si toujours rien, on liste tous les trades ouverts pour debug
+            if not trade_id:
+                logger.error(f"[ORDER] ❌ ORDRE NON CONFIRMÉ {pair}")
+                open_trades_after = get_open_trades_v88(skip_maintenance_check=True, force_refresh=True)
+                logger.error(f"[ORDER] 📋 Trades ouverts après échec: {[(t.get('id'), t.get('instrument'), t.get('price')) for t in open_trades_after]}")
+                return None
 
         logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
 
@@ -1488,8 +1551,18 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
         }
         return str(trade_id)
 
+    except oandapyV20.exceptions.V20Error as e:
+        # === LOG DETAILLE DE L'ERREUR V20 ===
+        logger.error(f"[ORDER] ❌ V20Error pour {pair}: {e}")
+        logger.error(f"[ORDER] 📋 Attributs de l'erreur: {e.__dict__ if hasattr(e, '__dict__') else 'N/A'}")
+        if hasattr(e, 'response'):
+            logger.error(f"[ORDER] 📋 Response: {e.response}")
+        if is_oanda_in_maintenance(e):
+            handle_api_error(e)
+        return None
+
     except Exception as exc:
-        logger.exception(f"[ORDER] Erreur ordre OANDA {pair}: {exc}")
+        logger.exception(f"[ORDER] 💥 Erreur ordre OANDA {pair}: {exc}")
         if is_oanda_in_maintenance(exc):
             handle_api_error(exc)
         return None
@@ -3270,7 +3343,7 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
 
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V98.2</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V98.3</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -3893,7 +3966,7 @@ def advanced_main_v981():
     try:
         api = v88_client()
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V98.2 - Seuil: {EQS_MIN_THRESHOLD}/100")
+        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V98.3 - Seuil: {EQS_MIN_THRESHOLD}/100")
         logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R) / {BREAKEVEN_EARLY_R}R (contexte favorable)")
         logger.info("✅ AUDIT ATR ACTIVÉ (valeur brute + conversion en pips)")
         logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
@@ -3903,6 +3976,7 @@ def advanced_main_v981():
         logger.info("✅ DISTANCE SL MINIMUM (10 pips)")
         logger.info("✅ FILTRE SPREAD ÉLEVÉ (pénalité EQS)")
         logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
+        logger.info(f"✅ VERROUILLAGE PAR PAIRE: {EXECUTION_COOLDOWN_SECONDS}s")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -4411,7 +4485,7 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
 # ============================================================
 def diagnostic_startup_v981():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V98.2")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V98.3")
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
     logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BREAKEVEN_EARLY_R} (contexte favorable)")
@@ -4430,6 +4504,7 @@ def diagnostic_startup_v981():
     logger.info(f"[DIAG] DISTANCE SL MINIMUM (10 pips) ACTIVÉE")
     logger.info(f"[DIAG] FILTRE SPREAD ÉLEVÉ ACTIVÉ")
     logger.info(f"[DIAG] MAX TRADES = {MAX_TRADES_TOTAL}")
+    logger.info(f"[DIAG] VERROUILLAGE PAR PAIRE: {EXECUTION_COOLDOWN_SECONDS}s")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -4451,7 +4526,7 @@ def diagnostic_startup_v981():
 # BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V98.2 (SORTIES AMÉLIORÉES)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V98.3 (LOGS AMÉLIORÉS)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R)")
@@ -4463,7 +4538,12 @@ if __name__ == "__main__":
     logger.info("📊 MÉTRIQUES ENRICHIES : ATR, ADX, RSI, Momentum, Heure, Jour, Session, Spread, Volatilité, Tendances H1/H4")
     logger.info("🔧 APPELS OANDA CORRIGÉS : formatage, retry, gestion d'erreur")
     logger.info("")
-    logger.info("🔧 CORRECTIONS V98.2 APPLIQUÉES :")
+    logger.info("🔧 CORRECTIONS V98.3 APPLIQUÉES :")
+    logger.info("  ✅ Logs détaillés des réponses OANDA (requête + réponse brute)")
+    logger.info("  ✅ Verrouillage par paire (60s entre deux tentatives)")
+    logger.info("  ✅ Confirmation améliorée (8 tentatives, tolérance de prix élargie)")
+    logger.info("  ✅ Recherche du trade par SL en cas d'échec")
+    logger.info("  ✅ Logs détaillés des erreurs V20Error")
     logger.info("  ✅ Confirmation des ordres avec retry et FORÇAGE CACHE")
     logger.info("  ✅ Confirmation du SL après modification")
     logger.info("  ✅ Confirmation du trailing stop après création")
@@ -4518,7 +4598,7 @@ if __name__ == "__main__":
             check_breakeven_v981()
 
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V98.2")
+                logger.info(f"⏰ Scan des signaux V98.3")
                 last_signal_scan = now
 
                 now_dt = datetime.utcnow()
