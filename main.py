@@ -17,6 +17,9 @@
 # 7. ✅ Suspension automatique des appels API
 # 8. ✅ Suivi des trades stagnants
 # 9. ✅ CORRECTION : Variables globales pour MAINTENANCE_DETECTED
+# 10. ✅ AMÉLIORATION : Break Even adaptatif en contexte favorable
+# 11. ✅ AMÉLIORATION : Trailing stop basé sur l'ATR
+# 12. ✅ AMÉLIORATION : Sortie anticipée sur retournement d'indicateurs
 # ============================================================
 
 import os
@@ -57,6 +60,7 @@ MIN_CONFIDENCE_SCORE_BY_PAIR = {
 }
 
 BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.6"))
+BREAKEVEN_EARLY_R = float(os.getenv("BREAKEVEN_EARLY_R", "0.35"))  # Seuil réduit en contexte favorable
 TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.6"))
 TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "5.0"))
 
@@ -94,9 +98,6 @@ EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "60.0"))
 # ÉTAT GLOBAL DE LA MAINTENANCE - CORRIGÉ AVEC GLOBAL
 # ============================================================
 
-# Ces variables sont modifiées par plusieurs fonctions
-# Elles doivent être déclarées GLOBAL dans chaque fonction qui les modifie
-
 MAINTENANCE_DETECTED = False
 MAINTENANCE_SUSPEND_TIME = 0
 MAINTENANCE_RETRY_INTERVAL = 120  # secondes
@@ -123,9 +124,6 @@ def handle_api_error(error: Exception) -> tuple:
     Gère les erreurs API avec détection de maintenance
     Retourne (should_suspend, suspend_duration, log_level)
     """
-    # ============================================================
-    # CORRECTION : DECLARATION GLOBAL
-    # ============================================================
     global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
 
     if is_oanda_in_maintenance(error):
@@ -143,17 +141,12 @@ def handle_api_error(error: Exception) -> tuple:
             logger.warning(f"⚠️ OANDA semble en maintenance (tentative {MAINTENANCE_ERROR_COUNT})")
             return False, 5, "WARNING"
 
-    # Erreur normale
     return False, 0, "ERROR"
 
 
 def reset_maintenance_state():
     """Réinitialise l'état de maintenance après une réponse réussie"""
-    # ============================================================
-    # CORRECTION : DECLARATION GLOBAL
-    # ============================================================
     global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
-    
     MAINTENANCE_DETECTED = False
     MAINTENANCE_SUSPEND_TIME = 0
     MAINTENANCE_ERROR_COUNT = 0
@@ -161,16 +154,13 @@ def reset_maintenance_state():
 
 def is_maintenance_suspended() -> bool:
     """Vérifie si les appels API doivent être suspendus"""
-    # ============================================================
-    # CORRECTION : DECLARATION GLOBAL
-    # ============================================================
     global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
-    
+
     if not MAINTENANCE_DETECTED:
         return False
     if time.time() < MAINTENANCE_SUSPEND_TIME:
         return True
-    # La période de suspension est écoulée, on réessaye
+
     MAINTENANCE_DETECTED = False
     MAINTENANCE_SUSPEND_TIME = 0
     MAINTENANCE_ERROR_COUNT = 0
@@ -199,29 +189,115 @@ def check_stagnant_trades(trade_id: str, pair: str, direction: str, entry: float
 
     tracker = stagnant_trade_tracker[trade_id]
 
-    # Si le R est toujours dans la même zone (-0.15 à 0.15)
     if -0.15 <= current_r <= 0.15:
-        # Vérifier si on est stable depuis plus de 1h
         if time.time() - tracker["first_seen"] > 3600:
             if abs(current_r - tracker["last_r"]) < 0.02:
                 tracker["r_stable_count"] += 1
 
-                # Après 2 heures de stagnation, on réduit le trailing
                 if tracker["r_stable_count"] > 120 and not tracker["action_taken"]:
-                    # 120 * 30s = 1h de stagnation en plus
                     logger.info(
                         f"[STAGNANT] Trade {trade_id} {pair} stagne à R={current_r:.2f} "
                         f"depuis {int((time.time() - tracker['first_seen'])/60)}min"
                     )
-                    # Ici on pourrait : réduire le trailing stop, ajouter une alerte, fermer progressivement
                     tracker["action_taken"] = True
     else:
-        # Le trade a bougé, réinitialiser
         tracker["first_seen"] = time.time()
         tracker["r_stable_count"] = 0
         tracker["action_taken"] = False
 
     tracker["last_r"] = current_r
+
+
+# ============================================================
+# AMÉLIORATION : Break Even anticipé en contexte favorable
+# ============================================================
+
+def should_early_breakeven(trade_info: dict, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> bool:
+    """
+    Retourne True si les conditions sont favorables pour un BE anticipé.
+    """
+    direction = trade_info.get("direction")
+    if direction is None:
+        return False
+
+    try:
+        adx = calculate_adx(df_h1)
+        h1_trend = score_ema_trend(df_h1)
+        h4_trend = score_ema_trend(df_h4)
+        momentum = calculate_momentum(df_h1)
+
+        if adx > 35:
+            if direction == "BUY" and h1_trend > 0 and h4_trend > 0 and momentum > 0.2:
+                return True
+            if direction == "SELL" and h1_trend < 0 and h4_trend < 0 and momentum < -0.2:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+# ============================================================
+# AMÉLIORATION : Sortie anticipée sur retournement d'indicateurs
+# ============================================================
+
+def check_indicator_reversal(pair: str, direction: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame) -> bool:
+    """
+    Vérifie si plusieurs indicateurs se retournent contre la position.
+    Retourne True si on détecte un retournement (sortie anticipée).
+    """
+    direction = direction.upper()
+
+    try:
+        close = df_m15['close'].iloc[-1]
+        close_prev = df_m15['close'].iloc[-2]
+        rsi_m15 = get_last_rsi(df_m15['close'])
+        adx_h1 = calculate_adx(df_h1)
+        macd_hist = calculate_macd_momentum(df_h1)
+        macd_last = macd_hist.iloc[-1]
+        macd_prev = macd_hist.iloc[-2]
+
+        signals_against = 0
+
+        if direction == "BUY":
+            if close < close_prev:
+                signals_against += 1
+            if rsi_m15 < 50:
+                signals_against += 1
+            if macd_last < macd_prev:
+                signals_against += 1
+            if adx_h1 < 20:
+                signals_against += 1
+        else:  # SELL
+            if close > close_prev:
+                signals_against += 1
+            if rsi_m15 > 50:
+                signals_against += 1
+            if macd_last > macd_prev:
+                signals_against += 1
+            if adx_h1 < 20:
+                signals_against += 1
+
+        return signals_against >= 3
+    except Exception:
+        return False
+
+
+def close_trade_api(trade_id: str) -> bool:
+    """Ferme un trade via l'API OANDA"""
+    try:
+        api = v88_client()
+        r = trades.TradeClose(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
+        resp = api.request(r)
+        if resp.get("orderCreateTransaction"):
+            logger.info(f"[CLOSE] Trade {trade_id} fermé via API")
+            return True
+        else:
+            logger.error(f"[CLOSE] Échec fermeture trade {trade_id}")
+            return False
+    except Exception as e:
+        logger.error(f"[CLOSE] Erreur fermeture trade {trade_id}: {e}")
+        return False
 
 
 # =========================
@@ -701,7 +777,6 @@ def check_closed_trades():
     """Détecte les trades fermés en comparant les trades ouverts actuels avec ceux enregistrés"""
     global stats, open_trade_details
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             logger.debug("⏳ OANDA en maintenance - check_closed_trades suspendu")
             return
@@ -728,7 +803,6 @@ def check_closed_trades():
                 pl = 0.0
                 is_estimate = True
 
-                # V98.1 : Tentative de récupération via TradeDetails avec gestion d'erreur
                 try:
                     api = v88_client()
                     r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
@@ -743,7 +817,6 @@ def check_closed_trades():
                 except Exception as e:
                     logger.debug(f"Impossible de récupérer les détails du trade {trade_id}: {e}")
 
-                # Fallback : estimation
                 if close_price is None or close_price <= 0:
                     current_price = get_recent_m5_price_v88(pair)
                     if direction == "BUY":
@@ -755,7 +828,6 @@ def check_closed_trades():
                     pl = price_move * units
                     is_estimate = True
 
-                # Calcul du R multiple
                 risk_pips = risk / pip_val if risk > 0 and pip_val > 0 else 0
                 if direction == "BUY":
                     price_move_pips = (close_price - entry) / pip_val
@@ -795,7 +867,6 @@ def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 
         logger.error(f"❌ Granularité invalide: {granularity}")
         return pd.DataFrame()
 
-    # Vérifier si on est en maintenance
     if is_maintenance_suspended():
         logger.debug(f"⏳ OANDA en maintenance - get_candles {instrument} suspendu")
         return pd.DataFrame()
@@ -850,7 +921,6 @@ def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 
             return df
 
         except oandapyV20.exceptions.V20Error as e:
-            # Vérifier si c'est une erreur de maintenance
             if is_oanda_in_maintenance(e):
                 should_suspend, duration, log_level = handle_api_error(e)
                 if should_suspend:
@@ -879,7 +949,6 @@ def get_price_spread_v88(pair: str) -> dict:
     if cached is not None:
         return cached
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             fallback_price = get_recent_m5_price_v88(pair)
             return {"bid": fallback_price, "ask": fallback_price, "mid": fallback_price, "spread": 0.0}
@@ -898,7 +967,6 @@ def get_price_spread_v88(pair: str) -> dict:
             return data
     except Exception as e:
         logger.debug(f"Erreur pricing {pair}: {e}")
-        # Vérifier si c'est une erreur de maintenance
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
     fallback_price = get_recent_m5_price_v88(pair)
@@ -908,7 +976,6 @@ def get_price_spread_v88(pair: str) -> dict:
 def get_recent_m5_price_v88(pair: str) -> float:
     """V98.1 : Récupération du prix récent avec fallback"""
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             return 0.0
 
@@ -927,7 +994,6 @@ def get_atr_m15_v88(pair: str) -> float:
     if cached is not None:
         return float(cached)
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             return 0.0
 
@@ -946,7 +1012,6 @@ def get_open_trades_v88(log_raw: bool = False, skip_maintenance_check: bool = Fa
     """V98.1 : Récupération des trades ouverts avec cache et gestion de maintenance"""
     cache_key = "open_trades_raw"
 
-    # Vérifier si on est en suspension pour maintenance
     if not skip_maintenance_check and is_maintenance_suspended():
         logger.debug("⏳ OANDA en maintenance - appel OpenTrades suspendu")
         return []
@@ -959,7 +1024,6 @@ def get_open_trades_v88(log_raw: bool = False, skip_maintenance_check: bool = Fa
             r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
             resp = api.request(r)
 
-            # Réinitialiser l'état de maintenance en cas de succès
             reset_maintenance_state()
 
             if resp:
@@ -973,7 +1037,6 @@ def get_open_trades_v88(log_raw: bool = False, skip_maintenance_check: bool = Fa
             else:
                 logger.error(f"❌ Erreur OpenTrades: {e}")
 
-            # En cas d'erreur, on retourne le cache existant si disponible
             cached_resp = _cache_get_v88(cache_key, ttl_seconds=10.0)
             if cached_resp is not None:
                 logger.debug("📦 Utilisation du cache pour OpenTrades")
@@ -1006,7 +1069,6 @@ def get_account_summary_v88() -> dict:
     if cached is not None:
         return cached
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             return {}
 
@@ -1018,7 +1080,6 @@ def get_account_summary_v88() -> dict:
             return resp
     except Exception as e:
         logger.error(f"AccountSummary error: {e}")
-        # Vérifier si c'est une erreur de maintenance
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
     return {}
@@ -1039,7 +1100,6 @@ def get_oanda_margin_rate_v88(pair: str) -> float:
     if cached is not None:
         return float(cached.get("marginRate", 0.0333) or 0.0333)
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             return 0.0333
 
@@ -1101,7 +1161,6 @@ def get_fx_rate_to_usd_v88(currency: str) -> float:
     direct = f"{currency}_USD"
     inverse = f"USD_{currency}"
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             return 1.0
 
@@ -1211,11 +1270,11 @@ def is_market_open_utc_v88(now_dt: datetime) -> bool:
     """V98.1 : Vérification si le marché est ouvert"""
     wd = now_dt.weekday()
     t = now_dt.time()
-    if wd == 5:  # Samedi
+    if wd == 5:
         return False
-    if wd == 6 and t < datetime.strptime("21:00", "%H:%M").time():  # Dimanche avant 21h
+    if wd == 6 and t < datetime.strptime("21:00", "%H:%M").time():
         return False
-    if wd == 4 and t >= datetime.strptime("21:00", "%H:%M").time():  # Vendredi après 21h
+    if wd == 4 and t >= datetime.strptime("21:00", "%H:%M").time():
         return False
     return True
 
@@ -1308,7 +1367,6 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
         logger.info(f"Limite trades ouverts atteinte")
         return None
 
-    # Vérifier si on est en maintenance
     if is_maintenance_suspended():
         logger.warning(f"[ORDER] OANDA en maintenance - ordre suspendu pour {pair}")
         return None
@@ -1332,7 +1390,6 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
     signed_units = units if direction == "BUY" else -units
 
-    # V98.1 : Formatage correct des données pour OrderCreate
     order_data = {
         "order": {
             "type": "MARKET",
@@ -1368,10 +1425,6 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
             logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject.get('rejectReason', 'unknown')}")
             return None
 
-        # ============================================================
-        # CORRECTION 1 : ATTENTE DE CONFIRMATION AVEC RETRY
-        # ============================================================
-        # Attendre 1 seconde avant de vérifier
         time.sleep(1)
 
         trade_id = None
@@ -1380,7 +1433,6 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
             for t in open_trades:
                 if t.get("instrument") == pair:
                     t_entry = float(t.get("price", 0))
-                    # Tolérance de 0.0001 sur le prix d'entrée
                     if abs(t_entry - entry_price) < 0.0001:
                         trade_id = t.get("id")
                         break
@@ -1395,7 +1447,6 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
         logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
 
-        # Stockage des infos du trade
         open_trade_details[trade_id] = {
             "entry": entry_price,
             "sl": stop_loss,
@@ -1411,7 +1462,6 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
     except Exception as exc:
         logger.exception(f"[ORDER] Erreur ordre OANDA {pair}: {exc}")
-        # Vérifier si c'est une erreur de maintenance
         if is_oanda_in_maintenance(exc):
             handle_api_error(exc)
         return None
@@ -1422,7 +1472,6 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
     """V98.1 : Modification du Stop Loss via TradeCRCDO avec CONFIRMATION"""
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             logger.warning(f"[BE] OANDA en maintenance - modification SL suspendue pour {trade_id}")
             return False
@@ -1431,7 +1480,6 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
 
         logger.info(f"[BE] Modification SL via TradeCRCDO pour trade {trade_id} -> {new_sl:.5f}")
 
-        # V98.1 : Formatage correct des données
         data = {
             "stopLoss": {
                 "price": round_price_v88(pair, new_sl),
@@ -1448,9 +1496,6 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
 
         logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
 
-        # ============================================================
-        # CORRECTION 2 : CONFIRMATION DU SL
-        # ============================================================
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
 
@@ -1462,15 +1507,13 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
                 return True
             else:
                 logger.warning(f"[CONFIRM] SL non confirmé: attendu {new_sl:.5f}, reçu {actual_sl:.5f}")
-                # L'ordre a été envoyé, on considère que c'est OK
                 return True
         else:
             logger.warning(f"[CONFIRM] Impossible de confirmer le SL pour {trade_id}")
-            return True  # On considère que c'est OK même sans confirmation
+            return True
 
     except Exception as e:
         logger.error(f"[BE] Erreur modification SL trade {trade_id}: {e}")
-        # Vérifier si c'est une erreur de maintenance
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
         return False
@@ -1481,7 +1524,6 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
 def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -> bool:
     """V98.1 : Création d'un Trailing Stop Loss avec CONFIRMATION"""
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             logger.warning(f"[TSL] OANDA en maintenance - trailing suspendu pour {trade_id}")
             return False
@@ -1490,7 +1532,6 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
 
         logger.info(f"[TSL] Création trailing via OrderCreate pour trade {trade_id} -> distance={distance:.5f}")
 
-        # V98.1 : Formatage correct des données
         order_data = {
             "order": {
                 "type": "TRAILING_STOP_LOSS",
@@ -1509,9 +1550,6 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
 
         logger.info(f"[TSL] SUCCESS: Trailing stop créé pour trade {trade_id}, distance={distance:.5f}")
 
-        # ============================================================
-        # CORRECTION 3 : CONFIRMATION DU TRAILING STOP
-        # ============================================================
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
 
@@ -1522,11 +1560,10 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
             return True
         else:
             logger.warning(f"[CONFIRM] Trailing stop non confirmé pour {trade_id}")
-            return True  # On considère que c'est OK même sans confirmation
+            return True
 
     except Exception as e:
         logger.error(f"[TSL] Erreur création trailing stop trade {trade_id}: {e}")
-        # Vérifier si c'est une erreur de maintenance
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
         return False
@@ -1537,7 +1574,6 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
 def get_trade_details_v88(trade_id: str) -> dict:
     """V98.1 : Récupération des détails d'un trade avec gestion d'erreur"""
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             return {}
 
@@ -4005,11 +4041,10 @@ def advanced_main_v981():
     stats.log_summary()
 
 # ============================================================
-# V98.1 - BREAK EVEN CORRIGÉ AVEC SUIVI STAGNANT
+# V98.1 - BREAK EVEN CORRIGÉ AVEC SUIVI STAGNANT ET SORTIE ANTICIPÉE
 # ============================================================
 def check_breakeven_v981():
     try:
-        # Vérifier si on est en maintenance
         if is_maintenance_suspended():
             logger.debug("⏳ OANDA en maintenance - BE suspendu")
             return
@@ -4027,23 +4062,16 @@ def check_breakeven_v981():
             if current_sl <= 0:
                 logger.debug(f"[BE] Trade {trade_id} sans SL, ignoré")
                 continue
+
             pip = PIP_SIZE_V88.get(pair, get_pip_value_for_pair(pair))
             spread_data = get_price_spread_v88(pair)
             spread = spread_data.get("spread", 0)
             offset = max(spread, pip * 1.0)
-            if direction == "BUY":
-                be_price = entry + offset
-                already_be = (current_sl >= be_price - 0.0001)
-            else:
-                be_price = entry - offset
-                already_be = (current_sl <= be_price + 0.0001)
-            if already_be:
-                logger.debug(f"[BE] Trade {trade_id} SL déjà au BE ({current_sl:.5f}), saut")
-                continue
+
             current_price = get_recent_m5_price_v88(pair)
             if current_price <= 0:
-                logger.debug(f"[BE] Trade {trade_id} prix indisponible")
                 continue
+
             if direction == "BUY":
                 profit = current_price - entry
                 risk = entry - current_sl
@@ -4051,22 +4079,57 @@ def check_breakeven_v981():
                 profit = entry - current_price
                 risk = current_sl - entry
             if risk <= 0:
-                logger.debug(f"[BE] Trade {trade_id} risque invalide")
                 continue
             r = profit / risk
 
             # ============================================================
-            # CORRECTION 8 : SUIVI DES TRADES STAGNANTS
+            # SUIVI DES TRADES STAGNANTS
             # ============================================================
             check_stagnant_trades(trade_id, pair, direction, entry, r)
 
-            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f}")
-            if r >= BREAKEVEN_TRIGGER_R:
-                logger.info(f"[BE] 🎯 Condition R>={BREAKEVEN_TRIGGER_R} atteinte pour {trade_id}")
+            # ============================================================
+            # AMÉLIORATION : Break Even anticipé en contexte favorable
+            # ============================================================
+            early_be = False
+            try:
+                api = v88_client()
+                df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
+                df_h4 = get_candles_with_retry(api, pair, GRANULARITY_H4, 300)
+                trade_info = {"direction": direction, "pair": pair}
+                early_be = should_early_breakeven(trade_info, df_h1, df_h4)
+            except Exception as e:
+                logger.debug(f"Erreur early_be pour {trade_id}: {e}")
+
+            effective_threshold = BREAKEVEN_EARLY_R if early_be else BREAKEVEN_TRIGGER_R
+            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} (seuil={effective_threshold:.2f})")
+
+            # ============================================================
+            # AMÉLIORATION : Sortie anticipée sur retournement d'indicateurs
+            # ============================================================
+            try:
+                api = v88_client()
+                df_m15 = get_candles_with_retry(api, pair, GRANULARITY_M15, 40)
+                df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
+                if check_indicator_reversal(pair, direction, df_m15, df_h1):
+                    logger.warning(f"[EXIT_EARLY] Trade {trade_id} {pair} {direction} : indicateurs retournés, fermeture anticipée")
+                    if close_trade_api(trade_id):
+                        logger.info(f"[EXIT_EARLY] Trade {trade_id} fermé avec succès")
+                        continue
+                    else:
+                        logger.error(f"[EXIT_EARLY] Échec fermeture trade {trade_id}")
+            except Exception as e:
+                logger.debug(f"Erreur check_indicator_reversal pour {trade_id}: {e}")
+
+            # ============================================================
+            # BREAK EVEN
+            # ============================================================
+            if r >= effective_threshold:
+                logger.info(f"[BE] 🎯 Condition R>={effective_threshold:.2f} atteinte pour {trade_id}")
                 if direction == "BUY":
                     be_sl = entry + offset
                 else:
                     be_sl = entry - offset
+
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
                     if modify_trade_sl_v981(trade_id, pair, be_sl):
@@ -4077,15 +4140,26 @@ def check_breakeven_v981():
                         if has_trailing_stop_v88(trade_details):
                             logger.info(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
                             continue
+
+                        # ============================================================
+                        # AMÉLIORATION : Trailing stop adaptatif basé sur l'ATR
+                        # ============================================================
                         atr = get_atr_m15_v88(pair)
-                        spread = spread_data.get("spread", 0)
                         pip_value = get_pip_value_for_pair(pair)
-                        distance = max(atr * 1.6, spread * 2)
-                        distance = min(distance, atr * 3)
+
+                        # Distance de base : 1.6 * ATR
+                        base_distance = atr * 1.6
+                        # Ajustement selon le R atteint : plus le R est grand, plus on resserre
+                        r_factor = max(0.5, min(1.5, 1.0 / (1.0 + abs(r))))
+                        # Distance finale : entre 1.0 et 2.5 ATR
+                        distance = base_distance * r_factor
+                        distance = max(distance, atr * 1.0)
+                        distance = min(distance, atr * 2.5)
                         distance = max(distance, pip_value * TRAILING_STOP_MIN_DISTANCE_PIPS)
                         distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
+
                         if distance > 0:
-                            logger.info(f"[TSL] Création du trailing stop pour trade {trade_id}")
+                            logger.info(f"[TSL] Création du trailing stop adaptatif pour trade {trade_id}, distance={distance:.5f} (ATR={atr:.5f}, R={r:.2f})")
                             if create_oanda_trailing_stop_v981(trade_id, pair, distance):
                                 logger.info(f"[TSL] ✅ Trailing stop créé")
                             else:
@@ -4094,6 +4168,7 @@ def check_breakeven_v981():
                             logger.warning(f"[TSL] Distance invalide ({distance})")
                     else:
                         logger.error(f"[BE] ❌ ÉCHEC modification SL")
+
     except Exception as e:
         logger.error(f"Erreur check_breakeven_v981: {e}")
         logger.error(traceback.format_exc())
@@ -4292,6 +4367,7 @@ def diagnostic_startup_v981():
     logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V98.1")
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
+    logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BREAKEVEN_EARLY_R} (contexte favorable)")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {EQS_MIN_THRESHOLD}")
     logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
@@ -4301,6 +4377,9 @@ def diagnostic_startup_v981():
     logger.info(f"[DIAG] APPELS OANDA CORRIGÉS")
     logger.info(f"[DIAG] GESTION DE MAINTENANCE OANDA ACTIVÉE")
     logger.info(f"[DIAG] SUIVI DES TRADES STAGNANTS ACTIVÉ")
+    logger.info(f"[DIAG] BREAK EVEN ADAPTATIF ACTIVÉ")
+    logger.info(f"[DIAG] TRAILING STOP ADAPTATIF ACTIVÉ")
+    logger.info(f"[DIAG] SORTIE ANTICIPÉE SUR RETOURNEMENT ACTIVÉE")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -4326,6 +4405,7 @@ if __name__ == "__main__":
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R)")
+    logger.info(f"✅ Seuil Break Even anticipé: {BREAKEVEN_EARLY_R}R (contexte favorable)")
     logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100 (60)")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("📈 SUIVI DES CLÔTURES : tentative de récupération via TradeDetails + fallback")
@@ -4342,6 +4422,11 @@ if __name__ == "__main__":
     logger.info("  ✅ Suspension automatique des appels API")
     logger.info("  ✅ Suivi des trades stagnants")
     logger.info("  ✅ Correction des variables globales MAINTENANCE_DETECTED")
+    logger.info("")
+    logger.info("🔧 AMÉLIORATIONS V98.2 :")
+    logger.info("  ✅ Break Even adaptatif en contexte favorable")
+    logger.info("  ✅ Trailing stop basé sur l'ATR avec ajustement R")
+    logger.info("  ✅ Sortie anticipée sur retournement d'indicateurs (≥3 signaux)")
     logger.info("")
 
     diagnostic_startup_v981()
@@ -4360,7 +4445,6 @@ if __name__ == "__main__":
         try:
             now = time.time()
 
-            # Vérifier si on est en maintenance
             if is_maintenance_suspended():
                 if not maintenance_mode:
                     maintenance_mode = True
@@ -4398,18 +4482,12 @@ if __name__ == "__main__":
             logger.info("🛑 Arrêt demandé")
             break
         except Exception as e:
-            # Vérifier si c'est une erreur de maintenance
             if is_oanda_in_maintenance(e):
                 logger.warning(f"🔧 Maintenance OANDA détectée: {e}")
-                # ============================================================
-                # CORRECTION : Utiliser handle_api_error au lieu de global
-                # ============================================================
                 handle_api_error(e)
-                # Attendre un peu avant de continuer
                 time.sleep(5)
                 continue
 
             logger.error(f"💥 Erreur critique: {e}")
             traceback.print_exc()
-            time.sleep(30)
             time.sleep(30)
