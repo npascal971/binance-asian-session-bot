@@ -66,7 +66,7 @@ EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "75.0"))
 # ============================================================
 # CORRECTION 5 : RÉDUCTION DU NOMBRE MAX DE TRADES
 # ============================================================
-MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "3"))
+MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "10"))
 
 MIN_ATR_PIPS_BY_PAIR = {
     "EUR_USD": 2.5,
