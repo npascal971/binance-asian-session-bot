@@ -1,25 +1,15 @@
 # ============================================================
-# main(98.1).py - Version V98.1 "API OANDA corrigée"
+# main(98.2).py - Version V98.2 "SORTIES AMÉLIORÉES & CORRECTIONS"
 # 
-# Modifications V98.1 :
-# - Correction de tous les appels OANDA
-# - Gestion des erreurs API robuste
-# - Formatage correct des données pour chaque endpoint
-# - Fallback sur les trades ouverts pour TradeDetails
-#
-# CORRECTIONS APPLIQUÉES (V98.1.1) :
-# 1. ✅ Attente de confirmation des ordres avec retry (execute_oanda_trade_v981)
-# 2. ✅ Confirmation du SL après modification (modify_trade_sl_v981)
-# 3. ✅ Confirmation du trailing stop après création (create_oanda_trailing_stop_v981)
-# 4. ✅ Pas de double entrée (continue dans advanced_main_v981)
-# 5. ✅ Logs enrichis pour les rejets
-# 6. ✅ Détection et gestion de la maintenance OANDA
-# 7. ✅ Suspension automatique des appels API
-# 8. ✅ Suivi des trades stagnants
-# 9. ✅ CORRECTION : Variables globales pour MAINTENANCE_DETECTED
-# 10. ✅ AMÉLIORATION : Break Even adaptatif en contexte favorable
-# 11. ✅ AMÉLIORATION : Trailing stop basé sur l'ATR
-# 12. ✅ AMÉLIORATION : Sortie anticipée sur retournement d'indicateurs
+# CORRECTIONS APPLIQUÉES (V98.2) :
+# 1. ✅ Distance SL minimum (10 pips) pour éviter les rejets OANDA
+# 2. ✅ Filtre spread élevé (pénalité EQS si spread > 2 pips)
+# 3. ✅ Forçage du cache pour les confirmations d'ordres
+# 4. ✅ Augmentation du seuil EQS à 75 (au lieu de 60)
+# 5. ✅ Réduction du nombre max de trades à 3 (au lieu de 9)
+# 6. ✅ Break Even adaptatif en contexte favorable (0.35R)
+# 7. ✅ Trailing stop adaptatif basé sur l'ATR
+# 8. ✅ Sortie anticipée sur retournement d'indicateurs
 # ============================================================
 
 import os
@@ -42,7 +32,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V98.1
+# CONFIGURATION V98.2
 # =========================
 load_dotenv()
 
@@ -68,6 +58,16 @@ ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "23.0"))
 MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
 VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 
+# ============================================================
+# CORRECTION 4 : AUGMENTATION DU SEUIL EQS À 75
+# ============================================================
+EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "75.0"))
+
+# ============================================================
+# CORRECTION 5 : RÉDUCTION DU NOMBRE MAX DE TRADES
+# ============================================================
+MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "3"))
+
 MIN_ATR_PIPS_BY_PAIR = {
     "EUR_USD": 2.5,
     "GBP_USD": 4.0,
@@ -81,10 +81,10 @@ MIN_ATR_PIPS_BY_PAIR = {
 }
 
 PULLBACK_MIN_PIPS_BY_PAIR = {
-    "EUR_USD": 2.5,
+    "EUR_USD": 2.0,
     "GBP_USD": 3.0,
-    "USD_CAD": 3.5,
-    "AUD_USD": 2.5,
+    "USD_CAD": 3.0,
+    "AUD_USD": 2.0,
     "AUD_CAD": 3.0,
     "XAU_USD": 15.0,
     "USD_JPY": 4.0,
@@ -92,15 +92,13 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
     "DEFAULT": 2.0
 }
 
-EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "60.0"))
-
 # ============================================================
-# ÉTAT GLOBAL DE LA MAINTENANCE - CORRIGÉ AVEC GLOBAL
+# ÉTAT GLOBAL DE LA MAINTENANCE
 # ============================================================
 
 MAINTENANCE_DETECTED = False
 MAINTENANCE_SUSPEND_TIME = 0
-MAINTENANCE_RETRY_INTERVAL = 120  # secondes
+MAINTENANCE_RETRY_INTERVAL = 120
 MAINTENANCE_ERROR_COUNT = 0
 MAINTENANCE_MAX_ERRORS_BEFORE_SUSPEND = 3
 
@@ -120,10 +118,7 @@ def is_oanda_in_maintenance(error: Exception) -> bool:
 
 
 def handle_api_error(error: Exception) -> tuple:
-    """
-    Gère les erreurs API avec détection de maintenance
-    Retourne (should_suspend, suspend_duration, log_level)
-    """
+    """Gère les erreurs API avec détection de maintenance"""
     global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
 
     if is_oanda_in_maintenance(error):
@@ -145,7 +140,7 @@ def handle_api_error(error: Exception) -> tuple:
 
 
 def reset_maintenance_state():
-    """Réinitialise l'état de maintenance après une réponse réussie"""
+    """Réinitialise l'état de maintenance"""
     global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
     MAINTENANCE_DETECTED = False
     MAINTENANCE_SUSPEND_TIME = 0
@@ -176,7 +171,7 @@ stagnant_trade_tracker = {}
 
 
 def check_stagnant_trades(trade_id: str, pair: str, direction: str, entry: float, current_r: float):
-    """Surveille les trades qui stagnent et pourrait déclencher des actions"""
+    """Surveille les trades qui stagnent"""
     global stagnant_trade_tracker
 
     if trade_id not in stagnant_trade_tracker:
@@ -209,7 +204,7 @@ def check_stagnant_trades(trade_id: str, pair: str, direction: str, entry: float
 
 
 # ============================================================
-# AMÉLIORATION : Break Even anticipé en contexte favorable
+# BREAK EVEN ANTICIPÉ EN CONTEXTE FAVORABLE
 # ============================================================
 
 def should_early_breakeven(trade_info: dict, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> bool:
@@ -238,7 +233,7 @@ def should_early_breakeven(trade_info: dict, df_h1: pd.DataFrame, df_h4: pd.Data
 
 
 # ============================================================
-# AMÉLIORATION : Sortie anticipée sur retournement d'indicateurs
+# SORTIE ANTICIPÉE SUR RETOURNEMENT D'INDICATEURS
 # ============================================================
 
 def check_indicator_reversal(pair: str, direction: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame) -> bool:
@@ -481,7 +476,7 @@ SCORING_CONFIG = {
 }
 
 # =============================
-# STATISTIQUES ENRICHIES AVEC MÉTRIQUES ET ESPÉRANCE CORRIGÉE
+# STATISTIQUES ENRICHIES
 # =============================
 class TradingStats:
     def __init__(self):
@@ -768,7 +763,7 @@ class TradingStats:
 stats = TradingStats()
 
 # =========================
-# SUIVI DES CLÔTURES - VERSION CORRIGÉE
+# SUIVI DES CLÔTURES
 # =========================
 open_trade_details = {}
 
@@ -846,7 +841,7 @@ def check_closed_trades():
         logger.error(f"Erreur lors du check des trades fermés: {e}")
 
 # =============================
-# FONCTIONS OANDA CORRIGÉES AVEC GESTION DE MAINTENANCE
+# FONCTIONS OANDA
 # =============================
 
 
@@ -858,7 +853,7 @@ def v88_client():
 
 
 def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 500, retries: int = 3) -> pd.DataFrame:
-    """V98.1 : Récupération des bougies avec retry et gestion d'erreur améliorée + maintenance"""
+    """Récupération des bougies avec retry"""
     valid_granularities = ["S5", "S10", "S15", "S30",
                            "M1", "M2", "M4", "M5", "M10", "M15", "M30",
                            "H1", "H2", "H3", "H4", "H6", "H8", "H12",
@@ -944,7 +939,7 @@ def get_candles_with_retry(api, instrument: str, granularity: str, count: int = 
 
 
 def get_price_spread_v88(pair: str) -> dict:
-    """V98.1 : Récupération du spread avec gestion d'erreur"""
+    """Récupération du spread avec gestion d'erreur"""
     cached = _cache_get_v88(f"pricing:{pair}", ttl_seconds=2.0)
     if cached is not None:
         return cached
@@ -974,7 +969,7 @@ def get_price_spread_v88(pair: str) -> dict:
 
 
 def get_recent_m5_price_v88(pair: str) -> float:
-    """V98.1 : Récupération du prix récent avec fallback"""
+    """Récupération du prix récent avec fallback"""
     try:
         if is_maintenance_suspended():
             return 0.0
@@ -989,7 +984,7 @@ def get_recent_m5_price_v88(pair: str) -> float:
 
 
 def get_atr_m15_v88(pair: str) -> float:
-    """V98.1 : Récupération de l'ATR avec fallback"""
+    """Récupération de l'ATR avec fallback"""
     cached = _cache_get_v88(f"atr_m15:{pair}", ttl_seconds=60.0)
     if cached is not None:
         return float(cached)
@@ -1008,9 +1003,17 @@ def get_atr_m15_v88(pair: str) -> float:
         return 0.0
 
 
-def get_open_trades_v88(log_raw: bool = False, skip_maintenance_check: bool = False) -> list:
-    """V98.1 : Récupération des trades ouverts avec cache et gestion de maintenance"""
+# ============================================================
+# CORRECTION 3 : FORÇAGE DU CACHE POUR LES CONFIRMATIONS
+# ============================================================
+def get_open_trades_v88(log_raw: bool = False, skip_maintenance_check: bool = False, force_refresh: bool = False) -> list:
+    """Récupération des trades ouverts avec cache et force_refresh"""
     cache_key = "open_trades_raw"
+
+    # Si force_refresh, on vide le cache
+    if force_refresh:
+        _OANDA_CACHE_V88.pop(cache_key, None)
+        logger.debug("[CACHE] Force refresh - cache invalidé")
 
     if not skip_maintenance_check and is_maintenance_suspended():
         logger.debug("⏳ OANDA en maintenance - appel OpenTrades suspendu")
@@ -1064,7 +1067,7 @@ def get_open_trades_v88(log_raw: bool = False, skip_maintenance_check: bool = Fa
 
 
 def get_account_summary_v88() -> dict:
-    """V98.1 : Récupération du résumé de compte"""
+    """Récupération du résumé de compte"""
     cached = _cache_get_v88("account_summary")
     if cached is not None:
         return cached
@@ -1086,7 +1089,7 @@ def get_account_summary_v88() -> dict:
 
 
 def get_balance_v88() -> float:
-    """V98.1 : Récupération du solde"""
+    """Récupération du solde"""
     resp = get_account_summary_v88()
     try:
         return float(resp.get("account", {}).get("balance", 0))
@@ -1095,7 +1098,7 @@ def get_balance_v88() -> float:
 
 
 def get_oanda_margin_rate_v88(pair: str) -> float:
-    """V98.1 : Récupération du taux de marge"""
+    """Récupération du taux de marge"""
     cached = _cache_get_v88(f"instrument:{pair}", ttl_seconds=300.0)
     if cached is not None:
         return float(cached.get("marginRate", 0.0333) or 0.0333)
@@ -1118,7 +1121,7 @@ def get_oanda_margin_rate_v88(pair: str) -> float:
 
 
 def get_available_margin_v88(account_summary: dict | None = None) -> float:
-    """V98.1 : Récupération de la marge disponible"""
+    """Récupération de la marge disponible"""
     account_summary = account_summary or get_account_summary_v88()
     account = account_summary.get("account", {}) if isinstance(account_summary, dict) else {}
     for key in ("marginAvailable", "NAV", "balance"):
@@ -1132,7 +1135,7 @@ def get_available_margin_v88(account_summary: dict | None = None) -> float:
 
 
 def estimate_margin_used_v88(pair: str, units: int, entry_price: float) -> float:
-    """V98.1 : Estimation de la marge utilisée"""
+    """Estimation de la marge utilisée"""
     units = abs(int(units))
     margin_rate = get_oanda_margin_rate_v88(pair)
     try:
@@ -1152,7 +1155,7 @@ def estimate_margin_used_v88(pair: str, units: int, entry_price: float) -> float
 
 
 def get_fx_rate_to_usd_v88(currency: str) -> float:
-    """V98.1 : Récupération du taux de change vers USD"""
+    """Récupération du taux de change vers USD"""
     if currency == "USD":
         return 1.0
     cached = _cache_get_v88(f"fx_to_usd:{currency}", ttl_seconds=60.0)
@@ -1183,7 +1186,7 @@ def get_fx_rate_to_usd_v88(currency: str) -> float:
 
 
 def calculate_margin_v88(pair: str, units: int, entry_price: float, account_summary: dict | None = None) -> dict:
-    """V98.1 : Calcul de la marge"""
+    """Calcul de la marge"""
     margin_required = estimate_margin_used_v88(pair, units, entry_price)
     available = get_available_margin_v88(account_summary)
     return {
@@ -1197,7 +1200,7 @@ def calculate_margin_v88(pair: str, units: int, entry_price: float, account_summ
 
 
 def cap_units_absolute_v88(pair: str, units: int) -> int:
-    """V98.1 : Plafonnement absolu des unités"""
+    """Plafonnement absolu des unités"""
     max_units = MAX_UNITS_BY_PAIR.get(pair, MAX_UNITS_BY_PAIR["DEFAULT"])
     if units > max_units:
         logger.warning(f"ABS CAP {pair}: units {units} -> {max_units}")
@@ -1206,7 +1209,7 @@ def cap_units_absolute_v88(pair: str, units: int) -> int:
 
 
 def cap_units_by_margin_v88(pair: str, units: int, entry_price: float, balance: float) -> int:
-    """V98.1 : Plafonnement par marge"""
+    """Plafonnement par marge"""
     if units <= 0 or balance <= 0:
         return 0
     margin_info = calculate_margin_v88(pair, units, entry_price)
@@ -1224,7 +1227,7 @@ def cap_units_by_margin_v88(pair: str, units: int, entry_price: float, balance: 
 
 
 def calculate_units_v88(pair: str, entry: float, stop_loss: float, balance: float) -> float:
-    """V98.1 : Calcul des unités"""
+    """Calcul des unités"""
     try:
         balance = float(balance)
         entry = float(entry)
@@ -1256,18 +1259,18 @@ def calculate_units_v88(pair: str, entry: float, stop_loss: float, balance: floa
 
 
 def quote_currency_v88(pair: str) -> str:
-    """V98.1 : Récupération de la devise de cotation"""
+    """Récupération de la devise de cotation"""
     return pair.split("_")[1]
 
 
 def round_price_v88(pair: str, price: float) -> str:
-    """V98.1 : Arrondi du prix selon la paire"""
+    """Arrondi du prix selon la paire"""
     decimals = PRICE_DECIMALS_V88.get(pair, 5)
     return f"{float(price):.{decimals}f}"
 
 
 def is_market_open_utc_v88(now_dt: datetime) -> bool:
-    """V98.1 : Vérification si le marché est ouvert"""
+    """Vérification si le marché est ouvert"""
     wd = now_dt.weekday()
     t = now_dt.time()
     if wd == 5:
@@ -1311,7 +1314,6 @@ EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
 
 RISK_PERCENTAGE = float(os.getenv("RISK_PERCENTAGE", "1.0"))
 MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "1250"))
-MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "9"))
 ONE_TRADE_PER_PAIR = os.getenv("ONE_TRADE_PER_PAIR", "true").lower() == "true"
 
 PIP_SIZE_V88 = {
@@ -1351,20 +1353,20 @@ MAX_UNITS_BY_PAIR = {
 MAX_MARGIN_USAGE_PER_TRADE_PERCENT = float(os.getenv("MAX_MARGIN_USAGE_PER_TRADE_PERCENT", "5.0"))
 
 # ============================================================
-# V98.1 - EXÉCUTION D'ORDRE CORRIGÉE AVEC CONFIRMATION
+# V98.2 - EXÉCUTION D'ORDRE AVEC CONFIRMATION ET FORÇAGE CACHE
 # ============================================================
 def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop_loss: float,
                               take_profit: float, score: int, entry_type: str,
                               eqs: int, setup_type: str, metrics: dict) -> str | None:
-    """V98.1 : Exécution d'ordre avec formatage correct et CONFIRMATION"""
-    logger.info(f"[ORDER] V98.1 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    """V98.2 : Exécution d'ordre avec formatage correct, CONFIRMATION et FORÇAGE CACHE"""
+    logger.info(f"[ORDER] V98.2 EXECUTION START {pair} {direction} type={entry_type} score={score}")
 
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
         return None
 
     if open_trade_count_v88() >= MAX_TRADES_TOTAL:
-        logger.info(f"Limite trades ouverts atteinte")
+        logger.info(f"Limite trades ouverts atteinte ({MAX_TRADES_TOTAL})")
         return None
 
     if is_maintenance_suspended():
@@ -1375,6 +1377,28 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
     if balance <= 0:
         logger.error("Balance invalide")
         return None
+
+    # ============================================================
+    # CORRECTION 1 : DISTANCE SL MINIMUM (10 pips)
+    # ============================================================
+    pip_value = get_pip_value_for_pair(pair)
+    min_sl_distance = pip_value * 10  # 10 pips minimum
+    
+    # Vérifier que le SL n'est pas trop proche
+    risk = abs(entry_price - stop_loss)
+    if risk < min_sl_distance:
+        logger.warning(f"[ORDER] SL trop proche ({risk:.5f} < {min_sl_distance:.5f}) - ajustement")
+        if direction == "BUY":
+            stop_loss = entry_price - min_sl_distance
+        else:
+            stop_loss = entry_price + min_sl_distance
+        # Recalculer le TP pour maintenir le RR
+        risk = min_sl_distance
+        if direction == "BUY":
+            take_profit = entry_price + (risk * 2.0)
+        else:
+            take_profit = entry_price - (risk * 2.0)
+        logger.info(f"[ORDER] SL ajusté: {stop_loss:.5f}, TP: {take_profit:.5f}")
 
     units = calculate_units_v88(pair, entry_price, stop_loss, balance)
     if not units or float(units) <= 0:
@@ -1409,7 +1433,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V98.1 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    logger.info(f"[ORDER] SIGNAL V98.2 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
 
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
@@ -1425,11 +1449,15 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
             logger.error(f"[ORDER] ORDRE REJETÉ {pair}: {reject.get('rejectReason', 'unknown')}")
             return None
 
+        # ============================================================
+        # CORRECTION 3 : ATTENTE DE CONFIRMATION AVEC FORÇAGE CACHE
+        # ============================================================
         time.sleep(1)
 
         trade_id = None
         for attempt in range(5):
-            open_trades = get_open_trades_v88(skip_maintenance_check=True)
+            # Forcer le refresh du cache à chaque tentative
+            open_trades = get_open_trades_v88(skip_maintenance_check=True, force_refresh=True)
             for t in open_trades:
                 if t.get("instrument") == pair:
                     t_entry = float(t.get("price", 0))
@@ -1467,10 +1495,10 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
         return None
 
 # ============================================================
-# V98.1 - MODIFICATION SL CORRIGÉE AVEC CONFIRMATION
+# V98.2 - MODIFICATION SL AVEC CONFIRMATION
 # ============================================================
 def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
-    """V98.1 : Modification du Stop Loss via TradeCRCDO avec CONFIRMATION"""
+    """V98.2 : Modification du Stop Loss via TradeCRCDO avec CONFIRMATION"""
     try:
         if is_maintenance_suspended():
             logger.warning(f"[BE] OANDA en maintenance - modification SL suspendue pour {trade_id}")
@@ -1519,10 +1547,10 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
         return False
 
 # ============================================================
-# V98.1 - CRÉATION TRAILING STOP CORRIGÉE AVEC CONFIRMATION
+# V98.2 - CRÉATION TRAILING STOP AVEC CONFIRMATION
 # ============================================================
 def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -> bool:
-    """V98.1 : Création d'un Trailing Stop Loss avec CONFIRMATION"""
+    """V98.2 : Création d'un Trailing Stop Loss avec CONFIRMATION"""
     try:
         if is_maintenance_suspended():
             logger.warning(f"[TSL] OANDA en maintenance - trailing suspendu pour {trade_id}")
@@ -1569,10 +1597,10 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
         return False
 
 # ============================================================
-# V98.1 - FONCTIONS DE CONFIRMATION
+# FONCTIONS DE CONFIRMATION
 # ============================================================
 def get_trade_details_v88(trade_id: str) -> dict:
-    """V98.1 : Récupération des détails d'un trade avec gestion d'erreur"""
+    """Récupération des détails d'un trade avec gestion d'erreur"""
     try:
         if is_maintenance_suspended():
             return {}
@@ -1605,7 +1633,7 @@ def get_stop_loss_v88(trade: dict) -> float:
 
 
 def extract_trade_id_v89(response: dict) -> str | None:
-    """V98.1 : Extraction robuste du tradeID"""
+    """Extraction robuste du tradeID"""
     if not response:
         return None
 
@@ -1637,14 +1665,14 @@ def extract_trade_id_v89(response: dict) -> str | None:
 
 
 def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) -> str | None:
-    """V98.1 : Recherche d'un trade par instrument avec tolérance"""
+    """Recherche d'un trade par instrument avec tolérance"""
     pip_value = get_pip_value_for_pair(pair)
     atr = get_atr_m15_v88(pair)
     tolerance = max(5.0 * pip_value, 0.5 * atr, 0.0001)
     tolerance = round(tolerance, 6)
     logger.debug(f"[FALLBACK] Tolérance pour {pair}: {tolerance:.6f}")
 
-    open_trades = get_open_trades_v88(log_raw=True, skip_maintenance_check=True)
+    open_trades = get_open_trades_v88(log_raw=True, skip_maintenance_check=True, force_refresh=True)
     for t in open_trades:
         if t.get("instrument") != pair:
             continue
@@ -1658,19 +1686,19 @@ def find_trade_by_instrument_v89(pair: str, entry_price: float, direction: str) 
 
 
 def open_trade_count_v88() -> int:
-    """V98.1 : Nombre de trades ouverts"""
+    """Nombre de trades ouverts"""
     return len(get_open_trades_v88(log_raw=True))
 
 
 def has_open_trade_v88(pair: str) -> bool:
-    """V98.1 : Vérifie si un trade est ouvert sur une paire"""
+    """Vérifie si un trade est ouvert sur une paire"""
     for t in get_open_trades_v88():
         if t.get("instrument") == pair:
             return True
     return False
 
 # =============================
-# FONCTIONS UTILITAIRES (reprises de V97)
+# FONCTIONS UTILITAIRES
 # =============================
 def get_dynamic_max_distance(df: pd.DataFrame, pair: str, atr_multiplier: float = 1.5) -> float:
     if df is None or len(df) < 14:
@@ -1873,7 +1901,7 @@ def get_pair_settings(pair: str) -> dict:
     return PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
 # =============================
-# LOGGING (repris de V97)
+# LOGGING
 # =============================
 LOG_ASCII_SAFE = os.getenv("LOG_ASCII_SAFE", "true").lower() == "true"
 
@@ -2029,7 +2057,7 @@ for _noisy_logger_v82 in ("urllib3", "requests", "oandapyV20", "oandapy"):
 logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
 
 # =============================
-# GESTION DES SIGNAUX (repris de V97)
+# GESTION DES SIGNAUX
 # =============================
 sent_signals = {}
 recent_signals = {}
@@ -2062,7 +2090,7 @@ def mark_signal_sent(pair: str, direction: str, entry_level: float, zone_start: 
     logger.info(f"✅ Signal marqué comme envoyé : {key}")
 
 # =============================
-# INDICATEURS TECHNIQUES (repris de V97)
+# INDICATEURS TECHNIQUES
 # =============================
 
 
@@ -2630,7 +2658,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# V98.1 - FILTRES ET SCORING (repris de V97, inchangé)
+# V98.2 - FILTRES ET SCORING AVEC SPREAD PENALTY
 # ============================================================
 
 
@@ -2719,6 +2747,9 @@ def calculate_volume_momentum(df: pd.DataFrame, period: int = 3) -> float:
         return 1.0
 
 
+# ============================================================
+# CORRECTION 2 : FILTRE SPREAD ÉLEVÉ (PÉNALITÉ EQS)
+# ============================================================
 def calculate_entry_quality_score(
     pair: str,
     direction: str,
@@ -2884,6 +2915,22 @@ def calculate_entry_quality_score(
         scores["stoch_position"] = 10
         logs.append("stoch_position: error -> 10")
 
+    # ============================================================
+    # CORRECTION 2 : PÉNALITÉ POUR SPREAD ÉLEVÉ
+    # ============================================================
+    spread_data = get_price_spread_v88(pair)
+    spread = spread_data.get("spread", 0.0)
+    
+    if spread > pip_value * 2:
+        scores["spread_penalty"] = -10
+        logs.append(f"spread_penalty: {spread:.2f} > 2 pips -> -10")
+    elif spread > pip_value * 1.5:
+        scores["spread_penalty"] = -5
+        logs.append(f"spread_penalty: {spread:.2f} > 1.5 pips -> -5")
+    else:
+        scores["spread_penalty"] = 0
+        logs.append(f"spread_penalty: {spread:.2f} -> 0")
+
     total = sum(scores.values())
 
     details = {
@@ -2892,6 +2939,7 @@ def calculate_entry_quality_score(
         "range_position": scores["range_position"],
         "pullback_quality": scores["pullback_quality"],
         "stoch_position": scores["stoch_position"],
+        "spread_penalty": scores["spread_penalty"],
         "total": total,
         "passed": total >= EQS_MIN_THRESHOLD,
         "logs": logs
@@ -3144,6 +3192,20 @@ def calculate_sl_tp(entry_price: float, atr: float, direction: str, pair: str,
         risk = abs(entry_price - stop_loss)
         if risk == 0:
             return None, None
+        
+        # ============================================================
+        # CORRECTION 1 : DISTANCE SL MINIMUM (10 pips)
+        # ============================================================
+        pip_value = get_pip_value_for_pair(pair)
+        min_sl_distance = pip_value * 10
+        
+        if risk < min_sl_distance:
+            if direction == "BUY":
+                stop_loss = entry_price - min_sl_distance
+            else:
+                stop_loss = entry_price + min_sl_distance
+            risk = min_sl_distance
+        
         reward = abs(take_profit - entry_price)
         if reward / risk < 2.0:
             take_profit = entry_price + (risk * 2.0) if direction == "BUY" else entry_price - (risk * 2.0)
@@ -3208,7 +3270,7 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
 
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V98.1</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V98.2</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -3231,7 +3293,7 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
         logger.error(f"💥 Erreur réseau Telegram: {e}")
 
 # =============================
-# HELPERS SCORING (repris de V97)
+# HELPERS SCORING
 # =============================
 def get_session_quality_bonus(pair: str) -> tuple:
     hour = datetime.utcnow().hour
@@ -3359,7 +3421,7 @@ def get_signal_quality_label(score: int, eqs: int) -> str:
     return "B"
 
 # =============================
-# SYSTÈME DE SCORING AVEC LOGS DECISION ENRICHIS (repris de V97)
+# SYSTÈME DE SCORING
 # =============================
 
 def calculate_signal_confidence(
@@ -3735,7 +3797,8 @@ def calculate_signal_confidence(
         "metrics": metrics
     }
 
-# =============================# DÉTECTION BIAS-FIRST (repris de V97)
+# =============================
+# DÉTECTION BIAS-FIRST
 # =============================
 def detect_setups_aligned_with_bias(
     df_m15: pd.DataFrame,
@@ -3824,28 +3887,28 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # =============================
-# FONCTION PRINCIPALE AVEC MÉTRIQUES ENRICHIES ET PAS DE DOUBLE ENTRÉE
+# FONCTION PRINCIPALE AVEC MÉTRIQUES ENRICHIES
 # =============================
 def advanced_main_v981():
     try:
         api = v88_client()
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info("✅ ENTRY QUALITY SCORE (EQS) V98.1 - Seuil: 60/100")
-        logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R")
+        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V98.2 - Seuil: {EQS_MIN_THRESHOLD}/100")
+        logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R) / {BREAKEVEN_EARLY_R}R (contexte favorable)")
         logger.info("✅ AUDIT ATR ACTIVÉ (valeur brute + conversion en pips)")
         logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
         logger.info("✅ SUIVI DES CLÔTURES AMÉLIORÉ (fallback + tentative API)")
         logger.info("✅ ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS")
         logger.info("✅ APPELS OANDA CORRIGÉS (formatage, retry, gestion d'erreur)")
+        logger.info("✅ DISTANCE SL MINIMUM (10 pips)")
+        logger.info("✅ FILTRE SPREAD ÉLEVÉ (pénalité EQS)")
+        logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
     for pair in PAIR_LIST:
         _reset_log_dedup()
 
-        # ============================================================
-        # CORRECTION 4 : PAS DE DOUBLE ENTRÉE
-        # ============================================================
         if has_open_trade_v88(pair):
             logger.info(f"[INFO] {pair}: trade deja ouvert - scan ignore")
             continue
@@ -4041,7 +4104,7 @@ def advanced_main_v981():
     stats.log_summary()
 
 # ============================================================
-# V98.1 - BREAK EVEN CORRIGÉ AVEC SUIVI STAGNANT ET SORTIE ANTICIPÉE
+# BREAK EVEN AVEC SUIVI STAGNANT ET SORTIE ANTICIPÉE
 # ============================================================
 def check_breakeven_v981():
     try:
@@ -4082,14 +4145,8 @@ def check_breakeven_v981():
                 continue
             r = profit / risk
 
-            # ============================================================
-            # SUIVI DES TRADES STAGNANTS
-            # ============================================================
             check_stagnant_trades(trade_id, pair, direction, entry, r)
 
-            # ============================================================
-            # AMÉLIORATION : Break Even anticipé en contexte favorable
-            # ============================================================
             early_be = False
             try:
                 api = v88_client()
@@ -4103,9 +4160,7 @@ def check_breakeven_v981():
             effective_threshold = BREAKEVEN_EARLY_R if early_be else BREAKEVEN_TRIGGER_R
             logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} (seuil={effective_threshold:.2f})")
 
-            # ============================================================
-            # AMÉLIORATION : Sortie anticipée sur retournement d'indicateurs
-            # ============================================================
+            # Sortie anticipée sur retournement
             try:
                 api = v88_client()
                 df_m15 = get_candles_with_retry(api, pair, GRANULARITY_M15, 40)
@@ -4120,9 +4175,7 @@ def check_breakeven_v981():
             except Exception as e:
                 logger.debug(f"Erreur check_indicator_reversal pour {trade_id}: {e}")
 
-            # ============================================================
-            # BREAK EVEN
-            # ============================================================
+            # Break Even
             if r >= effective_threshold:
                 logger.info(f"[BE] 🎯 Condition R>={effective_threshold:.2f} atteinte pour {trade_id}")
                 if direction == "BUY":
@@ -4141,17 +4194,11 @@ def check_breakeven_v981():
                             logger.info(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
                             continue
 
-                        # ============================================================
-                        # AMÉLIORATION : Trailing stop adaptatif basé sur l'ATR
-                        # ============================================================
                         atr = get_atr_m15_v88(pair)
                         pip_value = get_pip_value_for_pair(pair)
 
-                        # Distance de base : 1.6 * ATR
                         base_distance = atr * 1.6
-                        # Ajustement selon le R atteint : plus le R est grand, plus on resserre
                         r_factor = max(0.5, min(1.5, 1.0 / (1.0 + abs(r))))
-                        # Distance finale : entre 1.0 et 2.5 ATR
                         distance = base_distance * r_factor
                         distance = max(distance, atr * 1.0)
                         distance = min(distance, atr * 2.5)
@@ -4174,7 +4221,7 @@ def check_breakeven_v981():
         logger.error(traceback.format_exc())
 
 # ============================================================
-# V98.1 - STRICT FILTERS (repris)
+# STRICT FILTERS
 # ============================================================
 STRICT_ALLOWED_ENTRY_TYPES = {
     "FVG_RETEST_PERFECT", "FVG_RETEST", "BISI", "BREAKER",
@@ -4360,11 +4407,11 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# V98.1 - DIAGNOSTIC DE DÉMARRAGE
+# DIAGNOSTIC DE DÉMARRAGE
 # ============================================================
 def diagnostic_startup_v981():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V98.1")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V98.2")
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R}")
     logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BREAKEVEN_EARLY_R} (contexte favorable)")
@@ -4380,6 +4427,9 @@ def diagnostic_startup_v981():
     logger.info(f"[DIAG] BREAK EVEN ADAPTATIF ACTIVÉ")
     logger.info(f"[DIAG] TRAILING STOP ADAPTATIF ACTIVÉ")
     logger.info(f"[DIAG] SORTIE ANTICIPÉE SUR RETOURNEMENT ACTIVÉE")
+    logger.info(f"[DIAG] DISTANCE SL MINIMUM (10 pips) ACTIVÉE")
+    logger.info(f"[DIAG] FILTRE SPREAD ÉLEVÉ ACTIVÉ")
+    logger.info(f"[DIAG] MAX TRADES = {MAX_TRADES_TOTAL}")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -4398,23 +4448,23 @@ def diagnostic_startup_v981():
     logger.info("=" * 60)
 
 # ============================================================
-# V98.1 - BOUCLE PRINCIPALE AVEC GESTION DE MAINTENANCE - CORRIGÉE
+# BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V98.1 (API OANDA corrigée)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V98.2 (SORTIES AMÉLIORÉES)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R (0.6R)")
     logger.info(f"✅ Seuil Break Even anticipé: {BREAKEVEN_EARLY_R}R (contexte favorable)")
-    logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100 (60)")
+    logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("📈 SUIVI DES CLÔTURES : tentative de récupération via TradeDetails + fallback")
     logger.info("📊 ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS (wins+losses+breakevens)")
     logger.info("📊 MÉTRIQUES ENRICHIES : ATR, ADX, RSI, Momentum, Heure, Jour, Session, Spread, Volatilité, Tendances H1/H4")
     logger.info("🔧 APPELS OANDA CORRIGÉS : formatage, retry, gestion d'erreur")
     logger.info("")
-    logger.info("🔧 CORRECTIONS V98.1.1 APPLIQUÉES :")
-    logger.info("  ✅ Confirmation des ordres avec retry")
+    logger.info("🔧 CORRECTIONS V98.2 APPLIQUÉES :")
+    logger.info("  ✅ Confirmation des ordres avec retry et FORÇAGE CACHE")
     logger.info("  ✅ Confirmation du SL après modification")
     logger.info("  ✅ Confirmation du trailing stop après création")
     logger.info("  ✅ Pas de double entrée (continue)")
@@ -4422,11 +4472,14 @@ if __name__ == "__main__":
     logger.info("  ✅ Suspension automatique des appels API")
     logger.info("  ✅ Suivi des trades stagnants")
     logger.info("  ✅ Correction des variables globales MAINTENANCE_DETECTED")
-    logger.info("")
-    logger.info("🔧 AMÉLIORATIONS V98.2 :")
+    logger.info("  ✅ Distance SL MINIMUM (10 pips) - évite les rejets OANDA")
+    logger.info("  ✅ Filtre SPREAD ÉLEVÉ (pénalité EQS)")
+    logger.info("  ✅ Forçage du CACHE pour les confirmations d'ordres")
+    logger.info("  ✅ Augmentation du seuil EQS à 75")
+    logger.info("  ✅ Réduction du nombre max de trades à 3")
     logger.info("  ✅ Break Even adaptatif en contexte favorable")
-    logger.info("  ✅ Trailing stop basé sur l'ATR avec ajustement R")
-    logger.info("  ✅ Sortie anticipée sur retournement d'indicateurs (≥3 signaux)")
+    logger.info("  ✅ Trailing stop adaptatif basé sur l'ATR")
+    logger.info("  ✅ Sortie anticipée sur retournement d'indicateurs")
     logger.info("")
 
     diagnostic_startup_v981()
@@ -4465,14 +4518,14 @@ if __name__ == "__main__":
             check_breakeven_v981()
 
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V98.1")
+                logger.info(f"⏰ Scan des signaux V98.2")
                 last_signal_scan = now
 
                 now_dt = datetime.utcnow()
                 if not is_market_open_utc_v88(now_dt):
                     logger.info("Marché fermé.")
                 elif current_open_count >= MAX_TRADES_TOTAL:
-                    logger.info(f"Limite trades atteinte")
+                    logger.info(f"Limite trades atteinte ({MAX_TRADES_TOTAL})")
                 else:
                     advanced_main_v981()
 
