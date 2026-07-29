@@ -50,7 +50,18 @@ BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "XAU_USD": 9,
     "DEFAULT": 8
 }
-
+# V90 - Pullback minimum (en pips) pour confirmer un retracement
+PULLBACK_MIN_PIPS_BY_PAIR = {
+    "EUR_USD": 5.0,
+    "GBP_USD": 6.0,
+    "USD_CAD": 5.0,
+    "AUD_USD": 5.0,
+    "AUD_CAD": 5.0,
+    "XAU_USD": 30.0,
+    "USD_JPY": 8.0,
+    "GBP_JPY": 10.0,
+    "DEFAULT": 5.0
+}
 BASE_BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))
 BASE_BREAKEVEN_EARLY_R = float(os.getenv("BREAKEVEN_EARLY_R", "0.5"))
 BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.8"))
