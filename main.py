@@ -62,7 +62,17 @@ BASE_VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
 BASE_EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "75.0"))
 
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "10"))
-
+MIN_ATR_PIPS_BY_PAIR = {
+    "EUR_USD": 15.0,
+    "GBP_USD": 18.0,
+    "USD_CAD": 15.0,
+    "AUD_USD": 15.0,
+    "AUD_CAD": 15.0,
+    "XAU_USD": 80.0,
+    "USD_JPY": 20.0,
+    "GBP_JPY": 25.0,
+    "DEFAULT": 15.0
+}
 # ============================================================
 # CONFIGURATION ADAPTATIVE (V101 - renforcée)
 # ============================================================
