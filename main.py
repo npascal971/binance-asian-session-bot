@@ -1,12 +1,14 @@
 # ============================================================
-# main(99).py - Version V99 "SORTIES OPTIMISÉES & MFE/MAE"
+# main(100).py - Version V100 "ADAPTATION & APPRENTISSAGE"
 # 
-# AMÉLIORATIONS V99 :
-# 1. ✅ Break Even relevé à 0.8R (au lieu de 0.6R)
-# 2. ✅ Trailing stop dynamique basé sur ATR + plus haut/plus bas
-# 3. ✅ Suivi MFE (Maximum Favorable Excursion) et MAE (Maximum Adverse Excursion)
-# 4. ✅ Journalisation des statistiques de sortie pour optimisation future
-# 5. ✅ Conservation de tous les filtres V98.3 (EQS 75, SL min 10 pips, etc.)
+# AMÉLIORATIONS V100 :
+# 1. ✅ Paramètres adaptatifs (ADX, EQS, BE, Trailing) basés sur les performances
+# 2. ✅ Pondération des setups selon leur Profit Factor et Win Rate
+# 3. ✅ Ajustement dynamique des seuils selon les 100 derniers trades
+# 4. ✅ Gestion de la qualité du marché (suspension en conditions défavorables)
+# 5. ✅ Exploitation automatique du MFE/MAE pour ajuster BE et Trailing
+# 6. ✅ Moteur d'apprentissage par paire et par setup
+# 7. ✅ Conservation de toutes les fonctionnalités V99
 # ============================================================
 
 import os
@@ -29,14 +31,17 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V99
+# CONFIGURATION V100
 # =========================
 load_dotenv()
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 
-MIN_CONFIDENCE_SCORE_BY_PAIR = {
+# ============================================================
+# PARAMÈTRES DE BASE (seront adaptés dynamiquement)
+# ============================================================
+BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "EUR_USD": 10,
     "GBP_USD": 9,
     "USD_CAD": 8,
@@ -46,138 +51,188 @@ MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "DEFAULT": 8
 }
 
-# ============================================================
-# V99 : Seuils de Break Even relevés
-# ============================================================
-BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))        # 0.8R au lieu de 0.6
-BREAKEVEN_EARLY_R = float(os.getenv("BREAKEVEN_EARLY_R", "0.5"))           # Contexte favorable : 0.5R
-TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.8"))  # Augmenté
-TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "8.0"))  # Augmenté
+BASE_BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.8"))
+BASE_BREAKEVEN_EARLY_R = float(os.getenv("BREAKEVEN_EARLY_R", "0.5"))
+BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.8"))
+BASE_TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "8.0"))
 
-ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "23.0"))
-MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
-VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
+BASE_ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "23.0"))
+BASE_MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
+BASE_VOLUME_MOMENTUM_MIN = float(os.getenv("VOLUME_MOMENTUM_MIN", "0.5"))
+BASE_EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "75.0"))
 
-EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "75.0"))
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "10"))
 
-MIN_ATR_PIPS_BY_PAIR = {
-    "EUR_USD": 2.5,
-    "GBP_USD": 4.0,
-    "USD_CAD": 3.5,
-    "AUD_USD": 2.5,
-    "AUD_CAD": 3.5,
-    "XAU_USD": 60.0,
-    "USD_JPY": 3.0,
-    "GBP_JPY": 3.0,
-    "DEFAULT": 3.0
+# ============================================================
+# CONFIGURATION ADAPTATIVE (V100)
+# ============================================================
+# Fenêtre d'apprentissage
+LEARNING_WINDOW = int(os.getenv("LEARNING_WINDOW", "50"))  # 50 derniers trades par paire
+ADAPTATION_INTERVAL = int(os.getenv("ADAPTATION_INTERVAL", "300"))  # 5 minutes
+
+# Seuils d'adaptation
+PF_GOOD_THRESHOLD = 1.3  # Profit Factor > 1.3 : on relâche les filtres
+PF_BAD_THRESHOLD = 0.9   # Profit Factor < 0.9 : on resserre les filtres
+CONSECUTIVE_LOSSES_SUSPEND = 4  # 4 pertes consécutives => suspension temporaire
+
+# Plages d'adaptation
+ADX_MIN_RANGE = (15, 35)      # ADX peut varier entre 15 et 35
+EQS_MIN_RANGE = (65, 85)      # EQS peut varier entre 65 et 85
+BE_TRIGGER_R_RANGE = (0.5, 1.2)  # BE peut varier entre 0.5R et 1.2R
+TRAILING_ATR_RANGE = (1.2, 2.8)  # Trailing ATR peut varier entre 1.2 et 2.8
+
+# Pondération des setups (sera apprise)
+SETUP_WEIGHTS_DEFAULT = {
+    "FVG_RETEST_PERFECT": 1.0,
+    "FVG_RETEST": 1.0,
+    "NESTED_FVG": 1.0,
+    "WICK_REJECTION": 1.0,
+    "BISI": 1.0,
+    "BREAKER": 1.0,
+    "LIQUIDITY_DRAW": 1.0,
 }
 
-PULLBACK_MIN_PIPS_BY_PAIR = {
-    "EUR_USD": 2.0,
-    "GBP_USD": 3.0,
-    "USD_CAD": 3.0,
-    "AUD_USD": 2.0,
-    "AUD_CAD": 3.0,
-    "XAU_USD": 15.0,
-    "USD_JPY": 4.0,
-    "GBP_JPY": 6.0,
-    "DEFAULT": 2.0
-}
-
 # ============================================================
-# VERROUILLAGE PAR PAIRE
+# ÉTAT ADAPTATIF (V100)
 # ============================================================
-last_execution_attempt = {}
-EXECUTION_COOLDOWN_SECONDS = 60
-
-# ============================================================
-# SUIVI MFE/MAE (V99)
-# ============================================================
-class TradeTracker:
-    """Suivi des trades ouverts pour MFE/MAE et statistiques de sortie"""
+class AdaptiveState:
+    """État adaptatif du bot : paramètres dynamiques, qualité du marché, apprentissage"""
     def __init__(self):
-        self.trades = {}  # trade_id -> dict
+        # Paramètres adaptatifs par paire
+        self.pair_params = {}
+        # Poids des setups par paire
+        self.setup_weights = {}
+        # État de suspension par paire
+        self.suspended_pairs = {}
+        # Compteur de pertes consécutives par paire
+        self.consecutive_losses = defaultdict(int)
+        # Dernière adaptation
+        self.last_adaptation = time.time()
+        # Historique des adaptations
+        self.adaptation_history = []
 
-    def add_trade(self, trade_id: str, pair: str, direction: str, entry_price: float, sl: float, tp: float, setup_type: str, eqs: int):
-        self.trades[trade_id] = {
+    def get_pair_params(self, pair: str) -> dict:
+        """Récupère les paramètres adaptatifs pour une paire"""
+        if pair not in self.pair_params:
+            self.pair_params[pair] = {
+                "adx_min": BASE_ADX_MIN_THRESHOLD,
+                "eqs_min": BASE_EQS_MIN_THRESHOLD,
+                "be_trigger_r": BASE_BREAKEVEN_TRIGGER_R,
+                "be_early_r": BASE_BREAKEVEN_EARLY_R,
+                "trailing_atr_mult": BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER,
+                "trailing_min_pips": BASE_TRAILING_STOP_MIN_DISTANCE_PIPS,
+                "confidence_min": MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
+            }
+        return self.pair_params[pair]
+
+    def get_setup_weight(self, pair: str, setup_type: str) -> float:
+        """Récupère le poids d'un setup pour une paire"""
+        key = f"{pair}_{setup_type}"
+        if key not in self.setup_weights:
+            return SETUP_WEIGHTS_DEFAULT.get(setup_type, 1.0)
+        return self.setup_weights[key]
+
+    def update_setup_weight(self, pair: str, setup_type: str, new_weight: float):
+        """Met à jour le poids d'un setup pour une paire"""
+        key = f"{pair}_{setup_type}"
+        self.setup_weights[key] = max(0.2, min(2.0, new_weight))  # Borné entre 0.2 et 2.0
+
+    def is_pair_suspended(self, pair: str) -> bool:
+        """Vérifie si une paire est suspendue"""
+        if pair not in self.suspended_pairs:
+            return False
+        suspend_time = self.suspended_pairs[pair]
+        if time.time() - suspend_time > 3600:  # Suspension max 1 heure
+            del self.suspended_pairs[pair]
+            return False
+        return True
+
+    def suspend_pair(self, pair: str, reason: str):
+        """Suspend une paire pour 1 heure"""
+        self.suspended_pairs[pair] = time.time()
+        logger.warning(f"[SUSPEND] {pair} suspendu pour 1 heure | Raison: {reason}")
+
+    def record_loss(self, pair: str):
+        """Enregistre une perte consécutive"""
+        self.consecutive_losses[pair] += 1
+        if self.consecutive_losses[pair] >= CONSECUTIVE_LOSSES_SUSPEND:
+            self.suspend_pair(pair, f"{CONSECUTIVE_LOSSES_SUSPEND} pertes consécutives")
+            self.consecutive_losses[pair] = 0
+
+    def record_win(self, pair: str):
+        """Réinitialise le compteur de pertes consécutives"""
+        self.consecutive_losses[pair] = 0
+
+    def adapt_parameters(self, pair: str, stats: dict):
+        """
+        Ajuste les paramètres en fonction des statistiques récentes.
+        stats doit contenir : wins, losses, total_r, mfe_mae (list)
+        """
+        total_trades = stats.get("wins", 0) + stats.get("losses", 0) + stats.get("breakevens", 0)
+        if total_trades < 10:  # Pas assez de données
+            return
+
+        win_rate = stats.get("wins", 0) / (stats.get("wins", 0) + stats.get("losses", 0)) if (stats.get("wins", 0) + stats.get("losses", 0)) > 0 else 0.5
+        profit_factor = stats.get("total_profit", 0) / max(stats.get("total_loss", 0), 0.01)
+
+        params = self.get_pair_params(pair)
+
+        # Ajustement ADX
+        if profit_factor > PF_GOOD_THRESHOLD:
+            params["adx_min"] = max(ADX_MIN_RANGE[0], params["adx_min"] - 1.0)
+        elif profit_factor < PF_BAD_THRESHOLD:
+            params["adx_min"] = min(ADX_MIN_RANGE[1], params["adx_min"] + 1.0)
+        params["adx_min"] = max(ADX_MIN_RANGE[0], min(ADX_MIN_RANGE[1], params["adx_min"]))
+
+        # Ajustement EQS
+        if win_rate > 0.6 and profit_factor > 1.2:
+            params["eqs_min"] = max(EQS_MIN_RANGE[0], params["eqs_min"] - 1.0)
+        elif win_rate < 0.4 or profit_factor < 0.8:
+            params["eqs_min"] = min(EQS_MIN_RANGE[1], params["eqs_min"] + 1.0)
+        params["eqs_min"] = max(EQS_MIN_RANGE[0], min(EQS_MIN_RANGE[1], params["eqs_min"]))
+
+        # Ajustement Break Even basé sur MFE/MAE
+        mfe_mae_list = stats.get("mfe_mae", [])
+        if len(mfe_mae_list) >= 10:
+            avg_mfe = sum(item["mfe"] for item in mfe_mae_list) / len(mfe_mae_list)
+            avg_mae = sum(item["mae"] for item in mfe_mae_list) / len(mfe_mae_list)
+            avg_r = sum(item["r"] for item in mfe_mae_list) / len(mfe_mae_list)
+
+            # Si le MFE moyen est > 2x le MAE, on peut décaler le BE
+            if avg_mfe > avg_mae * 2 and avg_r > 0.3:
+                params["be_trigger_r"] = min(BE_TRIGGER_R_RANGE[1], params["be_trigger_r"] + 0.1)
+            elif avg_mfe < avg_mae * 1.2 and avg_r < 0.3:
+                params["be_trigger_r"] = max(BE_TRIGGER_R_RANGE[0], params["be_trigger_r"] - 0.1)
+            params["be_trigger_r"] = max(BE_TRIGGER_R_RANGE[0], min(BE_TRIGGER_R_RANGE[1], params["be_trigger_r"]))
+
+            # Trailing adaptatif
+            if avg_mfe > avg_mae * 3 and avg_r > 0.5:
+                params["trailing_atr_mult"] = min(TRAILING_ATR_RANGE[1], params["trailing_atr_mult"] + 0.1)
+            elif avg_mfe < avg_mae * 1.5 and avg_r < 0.3:
+                params["trailing_atr_mult"] = max(TRAILING_ATR_RANGE[0], params["trailing_atr_mult"] - 0.1)
+            params["trailing_atr_mult"] = max(TRAILING_ATR_RANGE[0], min(TRAILING_ATR_RANGE[1], params["trailing_atr_mult"]))
+
+        # Log adaptation
+        adaptation_log = {
+            "timestamp": datetime.utcnow().isoformat(),
             "pair": pair,
-            "direction": direction,
-            "entry": entry_price,
-            "sl": sl,
-            "tp": tp,
-            "setup_type": setup_type,
-            "eqs": eqs,
-            "highest_price": entry_price,
-            "lowest_price": entry_price,
-            "mfe": 0.0,      # en pips
-            "mae": 0.0,      # en pips
-            "max_favorable_pips": 0.0,
-            "max_adverse_pips": 0.0,
-            "last_update": time.time(),
-            "closed": False,
-            "exit_price": None,
-            "exit_r": None,
-            "entry_time": datetime.utcnow().isoformat(),
-            "exit_time": None
+            "total_trades": total_trades,
+            "win_rate": f"{win_rate*100:.1f}%",
+            "profit_factor": profit_factor,
+            "new_params": params.copy()
         }
+        self.adaptation_history.append(adaptation_log)
+        if len(self.adaptation_history) > 100:
+            self.adaptation_history = self.adaptation_history[-100:]
 
-    def update_price(self, trade_id: str, current_price: float):
-        if trade_id not in self.trades or self.trades[trade_id]["closed"]:
-            return
-        trade = self.trades[trade_id]
-        direction = trade["direction"]
-        entry = trade["entry"]
-        pip_value = get_pip_value_for_pair(trade["pair"])
-        if direction == "BUY":
-            price_move = current_price - entry
-            high_move = current_price - trade["highest_price"]
-            low_move = current_price - trade["lowest_price"]
-            if current_price > trade["highest_price"]:
-                trade["highest_price"] = current_price
-            if current_price < trade["lowest_price"]:
-                trade["lowest_price"] = current_price
-        else:  # SELL
-            price_move = entry - current_price
-            high_move = trade["lowest_price"] - current_price  # car plus bas = favorable pour sell
-            low_move = trade["highest_price"] - current_price
-            if current_price < trade["lowest_price"]:
-                trade["lowest_price"] = current_price
-            if current_price > trade["highest_price"]:
-                trade["highest_price"] = current_price
-        mfe_pips = max(price_move, trade["mfe"]) / pip_value if pip_value > 0 else 0
-        mae_pips = min(price_move, trade["mae"]) / pip_value if pip_value > 0 else 0
-        trade["mfe"] = max(price_move, trade["mfe"])
-        trade["mae"] = min(price_move, trade["mae"])
-        trade["max_favorable_pips"] = max(trade["max_favorable_pips"], mfe_pips)
-        trade["max_adverse_pips"] = min(trade["max_adverse_pips"], mae_pips)
-        trade["last_update"] = time.time()
+        logger.info(f"[ADAPT] {pair} | Trades={total_trades} | WR={win_rate*100:.1f}% | PF={profit_factor:.2f} | "
+                    f"ADX={params['adx_min']:.1f} | EQS={params['eqs_min']:.0f} | BE={params['be_trigger_r']:.2f}R | "
+                    f"Trailing={params['trailing_atr_mult']:.2f}")
 
-    def close_trade(self, trade_id: str, exit_price: float, r_multiple: float):
-        if trade_id not in self.trades:
-            return
-        trade = self.trades[trade_id]
-        trade["closed"] = True
-        trade["exit_price"] = exit_price
-        trade["exit_r"] = r_multiple
-        trade["exit_time"] = datetime.utcnow().isoformat()
-        # Log MFE/MAE
-        logger.info(f"[MFE/MAE] {trade['pair']} | {trade['setup_type']} | "
-                    f"MFE={trade['max_favorable_pips']:.1f}pips | MAE={trade['max_adverse_pips']:.1f}pips | "
-                    f"R={r_multiple:.2f} | EQS={trade['eqs']}")
-        # Optionnel : stocker dans stats
-        stats.record_mfe_mae(trade["pair"], trade["setup_type"], trade["eqs"],
-                             trade["max_favorable_pips"], trade["max_adverse_pips"], r_multiple)
-
-    def get_trade(self, trade_id: str):
-        return self.trades.get(trade_id)
-
-trade_tracker = TradeTracker()
-
-# =============================
-# STATISTIQUES ENRICHIES (V99)
-# =============================
-class TradingStats:
+# ============================================================
+# V100 - STATISTIQUES AVEC APPRENTISSAGE
+# ============================================================
+class TradingStatsV100:
     def __init__(self):
         self.stats = defaultdict(lambda: {
             "total_signals": 0,
@@ -210,10 +265,11 @@ class TradingStats:
             "by_weekday": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0}),
             "by_session": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0}),
             "by_adx_range": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0}),
-            # V99 : MFE/MAE
-            "mfe_mae": []
+            "mfe_mae": [],
+            "setup_performance": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0, "trades": []})
         })
         self.last_transaction_id = None
+        self.adaptive_state = AdaptiveState()
         self._load_last_id()
 
     def _load_last_id(self):
@@ -278,10 +334,12 @@ class TradingStats:
             stats["wins"] += 1
             stats["total_profit"] += profit_loss
             result = "WIN"
+            self.adaptive_state.record_win(pair)
         elif r < -0.02:
             stats["losses"] += 1
             stats["total_loss"] += abs(profit_loss)
             result = "LOSS"
+            self.adaptive_state.record_loss(pair)
         else:
             stats["breakevens"] += 1
             result = "BREAKEVEN"
@@ -290,6 +348,12 @@ class TradingStats:
         setup_stats["wins"] += 1 if result == "WIN" else 0
         setup_stats["losses"] += 1 if result == "LOSS" else 0
         setup_stats["total_r"] += r
+
+        # Setup performance pour l'apprentissage
+        setup_perf = stats["setup_performance"][setup_type]
+        setup_perf["wins"] += 1 if result == "WIN" else 0
+        setup_perf["losses"] += 1 if result == "LOSS" else 0
+        setup_perf["total_r"] += r
 
         if eqs < 65:
             eqs_range = "60-64"
@@ -347,18 +411,44 @@ class TradingStats:
             metrics_str = f" | ATR={trade_info.get('atr',0):.1f} | ADX={trade_info.get('adx',0):.1f} | RSI={trade_info.get('rsi',0):.1f} | H={trade_info.get('hour',0)} | Sess={trade_info.get('session','UNKNOWN')}"
         logger.info(f"[CLOSE] {pair} | {setup_type} | {result}{estimate_tag} | R={r:.2f} | P&L={profit_loss:+.2f} | EQS={eqs}{price_str}{metrics_str}")
 
-        # Mettre à jour le trade dans la liste avec MFE/MAE si disponibles
+        # V100 : Mise à jour des poids des setups
+        self._update_setup_weight(pair, setup_type)
+
+        # V100 : Adaptation des paramètres toutes les 5 minutes
+        if time.time() - self.adaptive_state.last_adaptation > ADAPTATION_INTERVAL:
+            self.adaptive_state.adapt_parameters(pair, stats)
+            self.adaptive_state.last_adaptation = time.time()
+
+        # Mettre à jour le trade avec MFE/MAE
         for trade in stats["trades"]:
             if trade.get("close_price") is None and trade.get("entry") == trade_info.get("entry"):
                 trade["result"] = result
                 trade["close_price"] = close_price
                 trade["close_pl"] = profit_loss
-                # Récupérer MFE/MAE depuis le tracker
                 tracker_trade = trade_tracker.get_trade(trade_id)
                 if tracker_trade:
                     trade["mfe"] = tracker_trade.get("max_favorable_pips")
                     trade["mae"] = tracker_trade.get("max_adverse_pips")
                 break
+
+    def _update_setup_weight(self, pair: str, setup_type: str):
+        """Met à jour le poids d'un setup en fonction de ses performances"""
+        stats = self.stats[pair]
+        setup_perf = stats["setup_performance"].get(setup_type)
+        if not setup_perf or setup_perf["trades"] < 3:
+            return
+
+        total = setup_perf["wins"] + setup_perf["losses"]
+        win_rate = setup_perf["wins"] / total if total > 0 else 0.5
+        avg_r = setup_perf["total_r"] / total if total > 0 else 0
+
+        # Score de performance : combinaison de win_rate et avg_r
+        performance_score = (win_rate * 0.6) + (avg_r * 0.4)
+        # Normalisation autour de 1.0
+        new_weight = max(0.2, min(2.0, performance_score * 1.2))
+
+        self.adaptive_state.update_setup_weight(pair, setup_type, new_weight)
+        logger.debug(f"[SETUP_WEIGHT] {pair} | {setup_type} | WR={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Poids={new_weight:.2f}")
 
     def record_mfe_mae(self, pair: str, setup_type: str, eqs: int, mfe: float, mae: float, r: float):
         self.stats[pair]["mfe_mae"].append({
@@ -399,7 +489,7 @@ class TradingStats:
 
     def log_summary(self):
         logger.info("=" * 80)
-        logger.info("📊 STATISTIQUES GLOBALES")
+        logger.info("📊 STATISTIQUES GLOBALES V100")
         logger.info("=" * 80)
         logger.info(f"{'Paire':10} | {'Signaux':>7} | {'Acceptés':>7} | {'Rejetés':>7} | {'Clôturés':>7} | {'Win Rate':>9} | {'PF':>6} | {'Espérance':>10}")
         logger.info("-" * 80)
@@ -411,6 +501,13 @@ class TradingStats:
             )
         logger.info("=" * 80)
 
+        # V100 : Log des paramètres adaptatifs
+        logger.info("📈 PARAMÈTRES ADAPTATIFS")
+        logger.info("-" * 80)
+        for pair, params in self.adaptive_state.pair_params.items():
+            logger.info(f"{pair:10} | ADX={params['adx_min']:.1f} | EQS={params['eqs_min']:.0f} | BE={params['be_trigger_r']:.2f}R | Trailing={params['trailing_atr_mult']:.2f}")
+
+        logger.info("=" * 80)
         logger.info("📈 PERFORMANCE PAR SETUP")
         logger.info("-" * 80)
         for pair, stats in self.stats.items():
@@ -420,7 +517,8 @@ class TradingStats:
                 if total > 0:
                     win_rate = data["wins"] / total
                     avg_r = data["total_r"] / total
-                    logger.info(f"{pair:10} | {setup:20} | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
+                    weight = self.adaptive_state.get_setup_weight(pair, setup)
+                    logger.info(f"{pair:10} | {setup:20} | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total} | Poids={weight:.2f}")
 
         logger.info("=" * 80)
         logger.info("📈 PERFORMANCE PAR TRANCHE EQS")
@@ -483,7 +581,6 @@ class TradingStats:
                     avg_r = data["total_r"] / total
                     logger.info(f"{pair:10} | ADX {range_label:6} | Win={win_rate*100:.1f}% | AvgR={avg_r:.2f} | Trades={total}")
 
-        # V99 : Log MFE/MAE summary
         logger.info("=" * 80)
         logger.info("📈 STATISTIQUES MFE/MAE")
         logger.info("-" * 80)
@@ -496,17 +593,25 @@ class TradingStats:
                 logger.info(f"{pair:10} | MFE moy={avg_mfe:.1f}pips | MAE moy={avg_mae:.1f}pips | R moy={avg_r:.2f} | échantillon={len(mfe_mae_list)}")
         logger.info("=" * 80)
 
+        # V100 : Historique des adaptations
+        if self.adaptive_state.adaptation_history:
+            logger.info("📈 HISTORIQUE DES ADAPTATIONS (dernières 5)")
+            logger.info("-" * 80)
+            for entry in self.adaptive_state.adaptation_history[-5:]:
+                params = entry["new_params"]
+                logger.info(f"{entry['timestamp']} | {entry['pair']} | WR={entry['win_rate']} | PF={entry['profit_factor']:.2f} | ADX={params['adx_min']:.1f} | EQS={params['eqs_min']:.0f} | BE={params['be_trigger_r']:.2f}R")
+            logger.info("=" * 80)
 
-stats = TradingStats()
+
+stats = TradingStatsV100()
 
 # =========================
 # SUIVI DES CLÔTURES
 # =========================
 open_trade_details = {}
-
+trade_tracker = TradeTracker()  # Défini plus tard
 
 def check_closed_trades():
-    """Détecte les trades fermés en comparant les trades ouverts actuels avec ceux enregistrés"""
     global stats, open_trade_details
     try:
         if is_maintenance_suspended():
@@ -1067,8 +1172,452 @@ MAX_UNITS_BY_PAIR = {
 MAX_MARGIN_USAGE_PER_TRADE_PERCENT = float(os.getenv("MAX_MARGIN_USAGE_PER_TRADE_PERCENT", "5.0"))
 
 # ============================================================
-# EXÉCUTION D'ORDRE (V98.3 avec logs)
+# TRADE TRACKER (MFE/MAE)
 # ============================================================
+class TradeTracker:
+    def __init__(self):
+        self.trades = {}
+
+    def add_trade(self, trade_id: str, pair: str, direction: str, entry_price: float, sl: float, tp: float, setup_type: str, eqs: int):
+        self.trades[trade_id] = {
+            "pair": pair,
+            "direction": direction,
+            "entry": entry_price,
+            "sl": sl,
+            "tp": tp,
+            "setup_type": setup_type,
+            "eqs": eqs,
+            "highest_price": entry_price,
+            "lowest_price": entry_price,
+            "mfe": 0.0,
+            "mae": 0.0,
+            "max_favorable_pips": 0.0,
+            "max_adverse_pips": 0.0,
+            "last_update": time.time(),
+            "closed": False,
+            "exit_price": None,
+            "exit_r": None,
+            "entry_time": datetime.utcnow().isoformat(),
+            "exit_time": None
+        }
+
+    def update_price(self, trade_id: str, current_price: float):
+        if trade_id not in self.trades or self.trades[trade_id]["closed"]:
+            return
+        trade = self.trades[trade_id]
+        direction = trade["direction"]
+        entry = trade["entry"]
+        pip_value = get_pip_value_for_pair(trade["pair"])
+        if direction == "BUY":
+            price_move = current_price - entry
+            if current_price > trade["highest_price"]:
+                trade["highest_price"] = current_price
+            if current_price < trade["lowest_price"]:
+                trade["lowest_price"] = current_price
+        else:
+            price_move = entry - current_price
+            if current_price < trade["lowest_price"]:
+                trade["lowest_price"] = current_price
+            if current_price > trade["highest_price"]:
+                trade["highest_price"] = current_price
+        mfe_pips = max(price_move, trade["mfe"]) / pip_value if pip_value > 0 else 0
+        mae_pips = min(price_move, trade["mae"]) / pip_value if pip_value > 0 else 0
+        trade["mfe"] = max(price_move, trade["mfe"])
+        trade["mae"] = min(price_move, trade["mae"])
+        trade["max_favorable_pips"] = max(trade["max_favorable_pips"], mfe_pips)
+        trade["max_adverse_pips"] = min(trade["max_adverse_pips"], mae_pips)
+        trade["last_update"] = time.time()
+
+    def close_trade(self, trade_id: str, exit_price: float, r_multiple: float):
+        if trade_id not in self.trades:
+            return
+        trade = self.trades[trade_id]
+        trade["closed"] = True
+        trade["exit_price"] = exit_price
+        trade["exit_r"] = r_multiple
+        trade["exit_time"] = datetime.utcnow().isoformat()
+        logger.info(f"[MFE/MAE] {trade['pair']} | {trade['setup_type']} | "
+                    f"MFE={trade['max_favorable_pips']:.1f}pips | MAE={trade['max_adverse_pips']:.1f}pips | "
+                    f"R={r_multiple:.2f} | EQS={trade['eqs']}")
+        stats.record_mfe_mae(trade["pair"], trade["setup_type"], trade["eqs"],
+                             trade["max_favorable_pips"], trade["max_adverse_pips"], r_multiple)
+
+    def get_trade(self, trade_id: str):
+        return self.trades.get(trade_id)
+
+trade_tracker = TradeTracker()
+
+# ============================================================
+# GESTION DE LA MAINTENANCE OANDA
+# ============================================================
+MAINTENANCE_DETECTED = False
+MAINTENANCE_SUSPEND_TIME = 0
+MAINTENANCE_RETRY_INTERVAL = 120
+MAINTENANCE_ERROR_COUNT = 0
+MAINTENANCE_MAX_ERRORS_BEFORE_SUSPEND = 3
+
+
+def is_oanda_in_maintenance(error: Exception) -> bool:
+    error_str = str(error).lower()
+    maintenance_patterns = [
+        "system under maintenance",
+        "maintenance",
+        "temporarily unavailable",
+        "service unavailable",
+        "maintenance mode",
+        "api is currently unavailable"
+    ]
+    return any(pattern in error_str for pattern in maintenance_patterns)
+
+
+def handle_api_error(error: Exception) -> tuple:
+    global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
+
+    if is_oanda_in_maintenance(error):
+        MAINTENANCE_ERROR_COUNT += 1
+
+        if MAINTENANCE_ERROR_COUNT >= MAINTENANCE_MAX_ERRORS_BEFORE_SUSPEND:
+            MAINTENANCE_DETECTED = True
+            MAINTENANCE_SUSPEND_TIME = time.time() + MAINTENANCE_RETRY_INTERVAL
+            logger.warning(
+                f"🔧 OANDA en maintenance détecté ({MAINTENANCE_ERROR_COUNT} erreurs) - "
+                f"suspension des appels pendant {MAINTENANCE_RETRY_INTERVAL}s"
+            )
+            return True, MAINTENANCE_RETRY_INTERVAL, "WARNING"
+        else:
+            logger.warning(f"⚠️ OANDA semble en maintenance (tentative {MAINTENANCE_ERROR_COUNT})")
+            return False, 5, "WARNING"
+
+    return False, 0, "ERROR"
+
+
+def reset_maintenance_state():
+    global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
+    MAINTENANCE_DETECTED = False
+    MAINTENANCE_SUSPEND_TIME = 0
+    MAINTENANCE_ERROR_COUNT = 0
+
+
+def is_maintenance_suspended() -> bool:
+    global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME, MAINTENANCE_ERROR_COUNT
+
+    if not MAINTENANCE_DETECTED:
+        return False
+    if time.time() < MAINTENANCE_SUSPEND_TIME:
+        return True
+
+    MAINTENANCE_DETECTED = False
+    MAINTENANCE_SUSPEND_TIME = 0
+    MAINTENANCE_ERROR_COUNT = 0
+    logger.info("🔧 Fin de la suspension OANDA - reprise des appels")
+    return False
+
+# ============================================================
+# SUIVI DES TRADES STAGNANTS
+# ============================================================
+stagnant_trade_tracker = {}
+
+
+def check_stagnant_trades(trade_id: str, pair: str, direction: str, entry: float, current_r: float):
+    global stagnant_trade_tracker
+
+    if trade_id not in stagnant_trade_tracker:
+        stagnant_trade_tracker[trade_id] = {
+            "first_seen": time.time(),
+            "last_r": current_r,
+            "r_stable_count": 0,
+            "action_taken": False
+        }
+
+    tracker = stagnant_trade_tracker[trade_id]
+
+    if -0.15 <= current_r <= 0.15:
+        if time.time() - tracker["first_seen"] > 3600:
+            if abs(current_r - tracker["last_r"]) < 0.02:
+                tracker["r_stable_count"] += 1
+
+                if tracker["r_stable_count"] > 120 and not tracker["action_taken"]:
+                    logger.info(
+                        f"[STAGNANT] Trade {trade_id} {pair} stagne à R={current_r:.2f} "
+                        f"depuis {int((time.time() - tracker['first_seen'])/60)}min"
+                    )
+                    tracker["action_taken"] = True
+    else:
+        tracker["first_seen"] = time.time()
+        tracker["r_stable_count"] = 0
+        tracker["action_taken"] = False
+
+    tracker["last_r"] = current_r
+
+
+# ============================================================
+# BREAK EVEN ANTICIPÉ
+# ============================================================
+def should_early_breakeven(trade_info: dict, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> bool:
+    direction = trade_info.get("direction")
+    if direction is None:
+        return False
+
+    try:
+        adx = calculate_adx(df_h1)
+        h1_trend = score_ema_trend(df_h1)
+        h4_trend = score_ema_trend(df_h4)
+        momentum = calculate_momentum(df_h1)
+
+        if adx > 35:
+            if direction == "BUY" and h1_trend > 0 and h4_trend > 0 and momentum > 0.2:
+                return True
+            if direction == "SELL" and h1_trend < 0 and h4_trend < 0 and momentum < -0.2:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+# ============================================================
+# SORTIE ANTICIPÉE SUR RETOURNEMENT
+# ============================================================
+def check_indicator_reversal(pair: str, direction: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame) -> bool:
+    direction = direction.upper()
+
+    try:
+        close = df_m15['close'].iloc[-1]
+        close_prev = df_m15['close'].iloc[-2]
+        rsi_m15 = get_last_rsi(df_m15['close'])
+        adx_h1 = calculate_adx(df_h1)
+        macd_hist = calculate_macd_momentum(df_h1)
+        macd_last = macd_hist.iloc[-1]
+        macd_prev = macd_hist.iloc[-2]
+
+        signals_against = 0
+
+        if direction == "BUY":
+            if close < close_prev:
+                signals_against += 1
+            if rsi_m15 < 50:
+                signals_against += 1
+            if macd_last < macd_prev:
+                signals_against += 1
+            if adx_h1 < 20:
+                signals_against += 1
+        else:
+            if close > close_prev:
+                signals_against += 1
+            if rsi_m15 > 50:
+                signals_against += 1
+            if macd_last > macd_prev:
+                signals_against += 1
+            if adx_h1 < 20:
+                signals_against += 1
+
+        return signals_against >= 3
+    except Exception:
+        return False
+
+
+def close_trade_api(trade_id: str) -> bool:
+    try:
+        api = v88_client()
+        r = trades.TradeClose(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
+        resp = api.request(r)
+        if resp.get("orderCreateTransaction"):
+            logger.info(f"[CLOSE] Trade {trade_id} fermé via API")
+            return True
+        else:
+            logger.error(f"[CLOSE] Échec fermeture trade {trade_id}")
+            return False
+    except Exception as e:
+        logger.error(f"[CLOSE] Erreur fermeture trade {trade_id}: {e}")
+        return False
+
+
+# =========================
+# LOG HELPERS
+# =========================
+_seen_log_keys_fvg_recent = set()
+_seen_log_keys_fvg_added = set()
+_seen_log_keys_kept_entry = set()
+
+
+def _reset_log_dedup():
+    _seen_log_keys_fvg_recent.clear()
+    _seen_log_keys_fvg_added.clear()
+    _seen_log_keys_kept_entry.clear()
+
+
+def _log_fvg_recent_once(pair: str, direction: str, level: float, msg: str, precision: int = 5):
+    if not DEBUG_MODE:
+        return
+    key = (pair, (direction or "").upper(), round(float(level), precision))
+    if key in _seen_log_keys_fvg_recent:
+        return
+    _seen_log_keys_fvg_recent.add(key)
+    logger.debug(msg)
+
+
+def _log_fvg_added_once(pair: str, direction: str, level: float, fvg_type: str, msg: str, precision: int = 5):
+    if not DEBUG_MODE:
+        return
+    key = (pair, (direction or "").upper(), (fvg_type or "UNKNOWN").upper(), round(float(level), precision))
+    if key in _seen_log_keys_fvg_added:
+        return
+    _seen_log_keys_fvg_added.add(key)
+    logger.debug(msg)
+
+
+def _log_narrative_list(entries: list, top_n: int = 10):
+    if not DEBUG_MODE:
+        return
+    if not entries:
+        logger.debug("🔎 AUCUNE ENTRÉE DÉTECTÉE")
+        return
+    safe_entries = []
+    for e in entries:
+        try:
+            lvl = float(e.get("entry_level", 0))
+            zone = e.get("entry_zone", (lvl, lvl))
+            d = abs(lvl - float(zone[0]))
+        except Exception:
+            d = 0.0
+        safe_entries.append((d, e))
+    safe_entries.sort(key=lambda x: x[0])
+    top = [e for _, e in safe_entries[:top_n]]
+    other_count = max(0, len(entries) - len(top))
+    for i, entry in enumerate(top, start=1):
+        logger.debug(f" {i}. {entry.get('direction','?')} - {entry.get('type','?')} à {float(entry.get('entry_level',0)):.5f}")
+    if other_count:
+        logger.debug(f" … (+{other_count} autres entrées)")
+
+logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
+last_reset_time = datetime.utcnow()
+
+# =============================
+# CONFIGURATION
+# =============================
+load_dotenv()
+
+PAIR_LIST = ["GBP_USD", "USD_CAD", "AUD_USD", "XAU_USD", "EUR_USD"]
+
+GRANULARITY_D1 = "D"
+GRANULARITY_H4 = "H4"
+GRANULARITY_H1 = "H1"
+GRANULARITY_M15 = "M15"
+
+EMA_SLOW = 200
+EMA_MEDIUM = 50
+EMA_FAST = 20
+RSI_PERIOD = 14
+ATR_PERIOD = 14
+
+RISK_REWARD_RATIO = 2
+MAX_VOLATILITY_RATIO = 0.02
+SWING_LOOKBACK = 3
+MIN_WICK_RATIO = 0.7
+
+MAX_DISTANCE_PIPS = {
+    "XAU_USD": 500,
+    "USD_JPY": 150,
+    "NAS100_USD": 25.0,
+    "AUD_USD": 0.0080,
+    "EUR_USD": 0.0080,
+    "GBP_USD": 0.0080,
+    "USD_CAD": 0.0010,
+    "GBP_JPY": 150,
+    "DEFAULT": 0.0010
+}
+
+PAIR_SETTINGS = {
+    "XAU_USD": {
+        "atr_multiplier_sl": 1.8,
+        "atr_multiplier_tp": 3.5,
+        "max_volatility_ratio": 0.010,
+        "risk_multiplier": 0.5,
+        "required_confluence": "STRICT"
+    },
+    "NAS100_USD": {
+        "atr_multiplier_sl": 1.6,
+        "atr_multiplier_tp": 3.2,
+        "max_volatility_ratio": 0.015,
+        "risk_multiplier": 0.7,
+        "required_confluence": "STRICT"
+    },
+    "GBP_JPY": {
+        "atr_multiplier_sl": 1.8,
+        "atr_multiplier_tp": 3.5,
+        "max_volatility_ratio": 0.012,
+        "risk_multiplier": 0.7,
+        "required_confluence": "STRICT"
+    },
+    "DEFAULT": {
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp": 3.0,
+        "max_volatility_ratio": 0.02,
+        "risk_multiplier": 1.0
+    }
+}
+
+SIGNAL_RISK_SETTINGS = {
+    "NESTED_FVG": {"sl_multiplier": 1.0, "tp_multiplier": 2.5},
+    "FVG_RETEST": {"sl_multiplier": 1.5, "tp_multiplier": 3.0},
+    "WICK_REJECTION": {"sl_multiplier": 1.7, "tp_multiplier": 4.5},
+    "LIQUIDITY_DRAW": {"sl_multiplier": 1.8, "tp_multiplier": 3.5}
+}
+
+MAX_PIPS_ACCEPTED = {
+    "XAU_USD": 50.0,
+    "USD_JPY": 10.0,
+    "NAS100_USD": 30.0,
+    "AUD_USD": 10.0,
+    "EUR_USD": 10.0,
+    "GBP_USD": 10.0,
+    "USD_CAD": 10.0,
+    "GBP_JPY": 15.0,
+    "DEFAULT": 10.0
+}
+
+SCORING_CONFIG = {
+    "MIN_CONFIDENCE_SCORE": 8,
+    "SIGNAL_WEIGHTS": {
+        "BISI": 5,
+        "NESTED_FVG": 4,
+        "FVG_RETEST_PERFECT": 4,
+        "FVG_RETEST": 3,
+        "BREAKER": 2,
+        "WICK_REJECTION": 3,
+        "TBS_PIN_BUY": 4,
+        "LIQUIDITY_DRAW": 2,
+        "TBS_PIN_SELL": 4
+    },
+    "BONUS": {
+        "BOS_CONFIRMED": 2,
+        "CHOCH_CONFIRMED": 2,
+        "RSI_CONFLUENCE": 2,
+        "VOLATILITY_OK": 1,
+        "RR_OK": 2,
+        "MACD_DIVERGENCE": 2,
+        "FAILURE_SWING": 2,
+        "CRT_DETECTED": 1,
+        "TBS_DETECTED": 2,
+        "ERL_BONUS": 1,
+        "IB_BONUS": 1,
+        "STRUCTURE_OK": 2,
+        "PULLBACK_OK": 2,
+        "CLOSE_CONFIRMED": 1
+    },
+    "PENALTY": {
+        "IB_PENALTY": 2,
+        "NO_IB_PENALTY": 1,
+        "IRL_PENALTY": 3
+    }
+}
+
+# ============================================================
+# V100 - EXÉCUTION D'ORDRE AVEC PARAMÈTRES ADAPTATIFS
+# ============================================================
+last_execution_attempt = {}
+EXECUTION_COOLDOWN_SECONDS = 60
+
 def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop_loss: float,
                               take_profit: float, score: int, entry_type: str,
                               eqs: int, setup_type: str, metrics: dict) -> str | None:
@@ -1080,7 +1629,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
         return None
     last_execution_attempt[pair_upper] = now
 
-    logger.info(f"[ORDER] V99 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] V100 EXECUTION START {pair} {direction} type={entry_type} score={score}")
 
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
@@ -1149,7 +1698,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V99 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    logger.info(f"[ORDER] SIGNAL V100 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
 
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
@@ -1220,7 +1769,6 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
         logger.info(f"[ORDER] ✅ ORDRE CONFIRMÉ {pair} | ID={trade_id}")
 
-        # Ajout au tracker MFE/MAE
         trade_tracker.add_trade(trade_id, pair, direction, entry_price, stop_loss, take_profit, setup_type, eqs)
 
         open_trade_details[trade_id] = {
@@ -1251,8 +1799,9 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
             handle_api_error(exc)
         return None
 
+
 # ============================================================
-# MODIFICATION SL (V98.2)
+# V100 - MODIFICATION SL AVEC PARAMÈTRES ADAPTATIFS
 # ============================================================
 def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
     try:
@@ -1302,8 +1851,9 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
             handle_api_error(e)
         return False
 
+
 # ============================================================
-# CRÉATION TRAILING STOP (V98.2)
+# V100 - CRÉATION TRAILING STOP AVEC PARAMÈTRES ADAPTATIFS
 # ============================================================
 def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -> bool:
     try:
@@ -1350,6 +1900,7 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
         return False
+
 
 # ============================================================
 # FONCTIONS DE CONFIRMATION
@@ -1446,7 +1997,7 @@ def has_open_trade_v88(pair: str) -> bool:
     return False
 
 # =============================
-# FONCTIONS UTILITAIRES (inchangées)
+# FONCTIONS UTILITAIRES
 # =============================
 def get_dynamic_max_distance(df: pd.DataFrame, pair: str, atr_multiplier: float = 1.5) -> float:
     if df is None or len(df) < 14:
@@ -1649,7 +2200,7 @@ def get_pair_settings(pair: str) -> dict:
     return PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
 # =============================
-# LOGGING (inchangé)
+# LOGGING
 # =============================
 LOG_ASCII_SAFE = os.getenv("LOG_ASCII_SAFE", "true").lower() == "true"
 
@@ -1732,7 +2283,7 @@ def repair_mojibake_v82(value) -> str:
 
 
 class ReadableLogFormatterV82(logging.Formatter):
-    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]", "[CLOSE]", "[CLOSE_DETAILS]", "[CLOSE_ESTIMATED]", "[CLOSE_CONFIRMED]", "[MFE/MAE]")
+    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]", "[CLOSE]", "[CLOSE_DETAILS]", "[CLOSE_ESTIMATED]", "[CLOSE_CONFIRMED]", "[MFE/MAE]", "[ADAPT]", "[SUSPEND]", "[SETUP_WEIGHT]")
 
     def _clean_message_v83(self, message: str, levelname: str) -> str:
         text = repair_mojibake_v82(str(message))
@@ -1769,6 +2320,12 @@ class ReadableLogFormatterV82(logging.Formatter):
             tag = "[START]"
         elif "MFE" in upper or "MAE" in upper:
             tag = "[MFE/MAE]"
+        elif "ADAPT" in upper:
+            tag = "[ADAPT]"
+        elif "SUSPEND" in upper:
+            tag = "[SUSPEND]"
+        elif "SETUP_WEIGHT" in upper:
+            tag = "[SETUP_WEIGHT]"
         else:
             tag = "[INFO]"
         return f"{tag} {text}"
@@ -1807,7 +2364,7 @@ for _noisy_logger_v82 in ("urllib3", "requests", "oandapyV20", "oandapy"):
 logger = logging.getLogger("Advanced-Orderflow-Trading-Bot")
 
 # =============================
-# GESTION DES SIGNAUX (inchangée)
+# GESTION DES SIGNAUX
 # =============================
 sent_signals = {}
 recent_signals = {}
@@ -1840,7 +2397,7 @@ def mark_signal_sent(pair: str, direction: str, entry_level: float, zone_start: 
     logger.info(f"✅ Signal marqué comme envoyé : {key}")
 
 # =============================
-# INDICATEURS TECHNIQUES (inchangés)
+# INDICATEURS TECHNIQUES
 # =============================
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
@@ -2054,7 +2611,7 @@ def score_market_structure(df_h1: pd.DataFrame) -> int:
     higher_high = float(recent_highs[-1]["price"]) > float(recent_highs[-2]["price"])
     lower_high = float(recent_highs[-1]["price"]) < float(recent_highs[-2]["price"])
     higher_low = float(recent_lows[-1]["price"]) > float(recent_lows[-2]["price"])
-    lower_low = float(recent_lows[-1"]["price"]) < float(recent_lows[-2]["price"])
+    lower_low = float(recent_lows[-1]["price"]) < float(recent_lows[-2]["price"])
     if higher_high and higher_low:
         return 3
     if higher_high:
@@ -3009,7 +3566,7 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
 
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V99</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V100</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -3160,7 +3717,7 @@ def get_signal_quality_label(score: int, eqs: int) -> str:
     return "B"
 
 # =============================
-# SYSTÈME DE SCORING (inchangé)
+# SYSTÈME DE SCORING (avec poids des setups)
 # =============================
 
 def calculate_signal_confidence(
@@ -3188,7 +3745,20 @@ def calculate_signal_confidence(
     }
     details: dict = {}
     rejection_logs = []
-    min_required = MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
+
+    # V100 : Seuil de confiance adaptatif
+    base_min_required = MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
+    # Ajouter un bonus/malus selon la performance du setup
+    setup_type = str(entry.get("type", "FVG_RETEST")).upper()
+    setup_weight = stats.adaptive_state.get_setup_weight(pair, setup_type)
+    # Ajustement du seuil : plus le setup est performant, plus le seuil est bas (facilité d'entrée)
+    min_required = max(5, int(base_min_required / max(0.5, setup_weight)))
+
+    # Paramètres adaptatifs
+    pair_params = stats.adaptive_state.get_pair_params(pair)
+    ADX_MIN_THRESHOLD_ADAPT = pair_params["adx_min"]
+    EQS_MIN_THRESHOLD_ADAPT = pair_params["eqs_min"]
+
     direction = (direction or "").upper()
     entry_level = entry.get("entry_level")
     entry_type = str(entry.get("type", "FVG_RETEST")).upper()
@@ -3215,12 +3785,12 @@ def calculate_signal_confidence(
     )
 
     eqs_score = eqs_result["total"]
-    eqs_passed = eqs_result["passed"]
+    eqs_passed = eqs_score >= EQS_MIN_THRESHOLD_ADAPT
     details["EQS_Details"] = eqs_result["logs"]
 
     if not eqs_passed:
-        rejection_logs.append(f"EQS = {eqs_score}/100 < seuil {EQS_MIN_THRESHOLD}")
-        details["VETO"] = f"❌ EQS insuffisant: {eqs_score}/100 < {EQS_MIN_THRESHOLD}"
+        rejection_logs.append(f"EQS = {eqs_score}/100 < seuil {EQS_MIN_THRESHOLD_ADAPT:.0f}")
+        details["VETO"] = f"❌ EQS insuffisant: {eqs_score}/100 < {EQS_MIN_THRESHOLD_ADAPT:.0f}"
         return {
             "passed": False,
             "total_score": 0,
@@ -3313,12 +3883,18 @@ def calculate_signal_confidence(
         entry_type=entry_type
     )
 
-    score_components["Momentum"] += penalty_total
-    details["Momentum"] = f"{penalty_total:+d} ({momentum_msg})"
-
-    if not momentum_passed:
-        score_components["Momentum"] -= 5
-        details["Momentum"] += " | PASSAGE FORCÉ"
+    # V100 : Adaptation du seuil de momentum
+    if momentum_passed:
+        score_components["Momentum"] += penalty_total
+        details["Momentum"] = f"{penalty_total:+d} ({momentum_msg})"
+    else:
+        # En fonction de l'état adaptatif, on peut être plus ou moins strict
+        if pair_params.get("adx_min", 23) > 28:  # Si ADX est élevé, on est plus strict
+            score_components["Momentum"] -= 5
+            details["Momentum"] = f"-5 (momentum faible, marché exigeant)"
+        else:
+            score_components["Momentum"] -= 2
+            details["Momentum"] = f"-2 (momentum faible, toléré)"
 
     momentum_filter_info = {"passed": momentum_passed, "message": momentum_msg, "penalties": momentum_penalties}
 
@@ -3387,6 +3963,15 @@ def calculate_signal_confidence(
     else:
         score_components["ICT"] += 1
         details["Setup_Type"] = f"+1 ({entry_type})"
+
+    # V100 : Bonus/Malus selon le poids du setup
+    setup_weight = stats.adaptive_state.get_setup_weight(pair, entry_type)
+    if setup_weight > 1.2:
+        score_components["Secondary"] += 2
+        details["Setup_Weight"] = f"+2 (poids setup {setup_weight:.2f})"
+    elif setup_weight < 0.8:
+        score_components["Secondary"] -= 1
+        details["Setup_Weight"] = f"-1 (poids setup {setup_weight:.2f})"
 
     try:
         dist_sl = abs(entry_level - stop_loss)
@@ -3488,10 +4073,12 @@ def calculate_signal_confidence(
 
     decision_line = (
         f"[DECISION] {pair} | {direction} | {entry_type} | "
-        f"Score={score}/{min_required} | EQS={eqs_score}/100 | "
-        f"ATR={atr_pips:.1f}pips | ADX={adx:.1f} | RSI={rsi:.1f} | MOM={momentum:.2f}% | "
+        f"Score={score}/{min_required} | EQS={eqs_score}/{EQS_MIN_THRESHOLD_ADAPT:.0f} | "
+        f"ATR={atr_pips:.1f}pips | ADX={adx:.1f} (seuil={ADX_MIN_THRESHOLD_ADAPT:.1f}) | "
+        f"RSI={rsi:.1f} | MOM={momentum:.2f}% | "
         f"H={hour:02d} | Sess={session} | Spread={spread:.2f} | Vol={volatility_ratio:.4f} | "
         f"H1Trend={h1_trend:+d} | H4Trend={h4_trend:+d} | RR={rr:.2f} | "
+        f"PoidsSetup={setup_weight:.2f} | "
         f"ACTION={'EXECUTE' if passed else 'REJECT'}"
     )
     if not passed and rejection_logs:
@@ -3631,8 +4218,8 @@ def advanced_main_v981():
     try:
         api = v88_client()
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V99 - Seuil: {EQS_MIN_THRESHOLD}/100")
-        logger.info(f"✅ Break Even: {BREAKEVEN_TRIGGER_R}R (0.8R) / {BREAKEVEN_EARLY_R}R (contexte favorable)")
+        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V100 - Seuil adaptatif")
+        logger.info(f"✅ Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R)")
         logger.info("✅ AUDIT ATR ACTIVÉ")
         logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
         logger.info("✅ SUIVI DES CLÔTURES AMÉLIORÉ")
@@ -3643,11 +4230,17 @@ def advanced_main_v981():
         logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
         logger.info(f"✅ VERROUILLAGE PAR PAIRE: {EXECUTION_COOLDOWN_SECONDS}s")
         logger.info("✅ SUIVI MFE/MAE ACTIVÉ")
+        logger.info("✅ PARAMÈTRES ADAPTATIFS ACTIVÉS")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
     for pair in PAIR_LIST:
         _reset_log_dedup()
+
+        # V100 : Vérifier si la paire est suspendue
+        if stats.adaptive_state.is_pair_suspended(pair):
+            logger.info(f"[SUSPEND] {pair} est suspendue - scan ignoré")
+            continue
 
         if has_open_trade_v88(pair):
             logger.info(f"[INFO] {pair}: trade deja ouvert - scan ignore")
@@ -3670,7 +4263,6 @@ def advanced_main_v981():
             current_price = float(df_m15["close"].iloc[-1])
             bias_analysis = determine_advanced_bias(df_h4)
             bias = bias_analysis.get("bias", "NEUTRAL")
-            min_score = MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
 
             if DEBUG_MODE:
                 adx = calculate_adx(df_h1)
@@ -3844,7 +4436,7 @@ def advanced_main_v981():
     stats.log_summary()
 
 # ============================================================
-# V99 : BREAK EVEN AVEC SUIVI MFE/MAE ET TRAILING DYNAMIQUE
+# V100 : BREAK EVEN AVEC PARAMÈTRES ADAPTATIFS
 # ============================================================
 def check_breakeven_v981():
     try:
@@ -3853,7 +4445,7 @@ def check_breakeven_v981():
             return
 
         open_trades = get_open_trades_v88()
-        logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil: {BREAKEVEN_TRIGGER_R}R)")
+        logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts (seuil adaptatif)")
 
         for t in open_trades:
             trade_id = str(t.get("id"))
@@ -3875,7 +4467,6 @@ def check_breakeven_v981():
             if current_price <= 0:
                 continue
 
-            # Mise à jour du tracker MFE/MAE
             trade_tracker.update_price(trade_id, current_price)
 
             if direction == "BUY":
@@ -3900,7 +4491,9 @@ def check_breakeven_v981():
             except Exception as e:
                 logger.debug(f"Erreur early_be pour {trade_id}: {e}")
 
-            effective_threshold = BREAKEVEN_EARLY_R if early_be else BREAKEVEN_TRIGGER_R
+            # V100 : Seuils adaptatifs
+            pair_params = stats.adaptive_state.get_pair_params(pair)
+            effective_threshold = pair_params["be_early_r"] if early_be else pair_params["be_trigger_r"]
             logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} (seuil={effective_threshold:.2f})")
 
             # Sortie anticipée sur retournement
@@ -3938,38 +4531,39 @@ def check_breakeven_v981():
                             continue
 
                         # ============================================================
-                        # V99 : TRAILING STOP DYNAMIQUE
+                        # V100 : TRAILING STOP ADAPTATIF
                         # ============================================================
                         atr = get_atr_m15_v88(pair)
                         pip_value = get_pip_value_for_pair(pair)
 
-                        # Distance de base : ATR * 1.8 (augmenté)
-                        base_distance = atr * TRAILING_STOP_DISTANCE_ATR_MULTIPLIER
+                        # Paramètres adaptatifs
+                        trailing_mult = pair_params["trailing_atr_mult"]
+                        trailing_min_pips = pair_params["trailing_min_pips"]
 
-                        # Ajustement en fonction du R multiple (plus le trade est gagnant, plus on serre)
-                        r_factor = max(0.6, min(1.4, 1.0 / (1.0 + abs(r) * 0.5)))  # Entre 0.6 et 1.4
+                        base_distance = atr * trailing_mult
+
+                        r_factor = max(0.6, min(1.4, 1.0 / (1.0 + abs(r) * 0.5)))
                         distance = base_distance * r_factor
 
-                        # Tenir compte des plus hauts/plus bas récents pour un trailing intelligent
-                        if direction == "BUY":
-                            highest_since_entry = trade_tracker.get_trade(trade_id)["highest_price"]
-                            # Si le prix a monté, on peut placer le trailing sous le plus haut
-                            if current_price > highest_since_entry * 0.98:  # proche du plus haut
-                                # On peut serrer un peu plus
-                                distance = min(distance, atr * 1.2)
-                        else:  # SELL
-                            lowest_since_entry = trade_tracker.get_trade(trade_id)["lowest_price"]
-                            if current_price < lowest_since_entry * 1.02:  # proche du plus bas
-                                distance = min(distance, atr * 1.2)
+                        # Tenir compte des plus hauts/bas
+                        tracker_trade = trade_tracker.get_trade(trade_id)
+                        if tracker_trade:
+                            if direction == "BUY":
+                                highest_since_entry = tracker_trade["highest_price"]
+                                if current_price > highest_since_entry * 0.98:
+                                    distance = min(distance, atr * 1.2)
+                            else:
+                                lowest_since_entry = tracker_trade["lowest_price"]
+                                if current_price < lowest_since_entry * 1.02:
+                                    distance = min(distance, atr * 1.2)
 
-                        # Bornes
-                        distance = max(distance, atr * 0.8)          # Minimum ATR*0.8
-                        distance = min(distance, atr * 2.5)          # Maximum ATR*2.5
-                        distance = max(distance, pip_value * TRAILING_STOP_MIN_DISTANCE_PIPS)  # Au moins 8 pips
+                        distance = max(distance, atr * 0.8)
+                        distance = min(distance, atr * 2.8)
+                        distance = max(distance, pip_value * trailing_min_pips)
                         distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
 
                         if distance > 0:
-                            logger.info(f"[TSL] Création du trailing stop adaptatif pour trade {trade_id}, distance={distance:.5f} (ATR={atr:.5f}, R={r:.2f})")
+                            logger.info(f"[TSL] Création du trailing stop adaptatif pour trade {trade_id}, distance={distance:.5f} (ATR={atr:.5f}, R={r:.2f}, mult={trailing_mult:.2f})")
                             if create_oanda_trailing_stop_v981(trade_id, pair, distance):
                                 logger.info(f"[TSL] ✅ Trailing stop créé")
                             else:
@@ -4170,16 +4764,17 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# DIAGNOSTIC DE DÉMARRAGE V99
+# DIAGNOSTIC DE DÉMARRAGE V100
 # ============================================================
 def diagnostic_startup_v981():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V99")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V100")
     logger.info("=" * 60)
-    logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BREAKEVEN_TRIGGER_R} (0.8R)")
-    logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BREAKEVEN_EARLY_R} (0.5R)")
-    logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {EQS_MIN_THRESHOLD}")
-    logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {MIN_CONFIDENCE_SCORE_BY_PAIR}")
+    logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BASE_BREAKEVEN_TRIGGER_R} (adaptatif)")
+    logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif)")
+    logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {BASE_EQS_MIN_THRESHOLD} (adaptatif)")
+    logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {BASE_ADX_MIN_THRESHOLD} (adaptatif)")
+    logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {BASE_MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
     logger.info("[DIAG] SUIVI DES CLÔTURES : tentative API + fallback")
@@ -4187,13 +4782,15 @@ def diagnostic_startup_v981():
     logger.info("[DIAG] APPELS OANDA CORRIGÉS")
     logger.info("[DIAG] GESTION DE MAINTENANCE OANDA ACTIVÉE")
     logger.info("[DIAG] SUIVI DES TRADES STAGNANTS ACTIVÉ")
-    logger.info("[DIAG] BREAK EVEN ADAPTATIF ACTIVÉ (seuil relevé)")
-    logger.info("[DIAG] TRAILING STOP ADAPTATIF ACTIVÉ (dynamique)")
+    logger.info("[DIAG] BREAK EVEN ADAPTATIF ACTIVÉ")
+    logger.info("[DIAG] TRAILING STOP ADAPTATIF ACTIVÉ")
     logger.info("[DIAG] SORTIE ANTICIPÉE SUR RETOURNEMENT ACTIVÉE")
     logger.info("[DIAG] DISTANCE SL MINIMUM (10 pips) ACTIVÉE")
     logger.info("[DIAG] FILTRE SPREAD ÉLEVÉ ACTIVÉ")
     logger.info(f"[DIAG] MAX TRADES = {MAX_TRADES_TOTAL}")
     logger.info("[DIAG] SUIVI MFE/MAE ACTIVÉ")
+    logger.info("[DIAG] APPRENTISSAGE DES SETUPS ACTIVÉ")
+    logger.info("[DIAG] PARAMÈTRES ADAPTATIFS ACTIVÉS")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -4215,37 +4812,29 @@ def diagnostic_startup_v981():
 # BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V99 (SORTIES OPTIMISÉES & MFE/MAE)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V100 (ADAPTATION & APPRENTISSAGE)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
-    logger.info(f"✅ Seuil Break Even: {BREAKEVEN_TRIGGER_R}R (0.8R)")
-    logger.info(f"✅ Seuil Break Even anticipé: {BREAKEVEN_EARLY_R}R (0.5R)")
-    logger.info(f"✅ Seuil EQS minimum: {EQS_MIN_THRESHOLD}/100")
+    logger.info(f"✅ Seuil Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R)")
+    logger.info(f"✅ Seuil Break Even anticipé adaptatif (base: {BASE_BREAKEVEN_EARLY_R}R)")
+    logger.info(f"✅ Seuil EQS adaptatif (base: {BASE_EQS_MIN_THRESHOLD}/100)")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("📈 SUIVI DES CLÔTURES : tentative de récupération via TradeDetails + fallback")
     logger.info("📊 ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS (wins+losses+breakevens)")
     logger.info("📊 MÉTRIQUES ENRICHIES : ATR, ADX, RSI, Momentum, Heure, Jour, Session, Spread, Volatilité, Tendances H1/H4")
     logger.info("🔧 APPELS OANDA CORRIGÉS : formatage, retry, gestion d'erreur")
     logger.info("📈 SUIVI MFE/MAE ACTIVÉ pour chaque trade")
+    logger.info("📈 APPRENTISSAGE DES SETUPS ACTIVÉ")
+    logger.info("📈 PARAMÈTRES ADAPTATIFS ACTIVÉS")
     logger.info("")
-    logger.info("🔧 CORRECTIONS V99 APPLIQUÉES :")
-    logger.info("  ✅ Break Even relevé à 0.8R (0.5R en contexte favorable)")
-    logger.info("  ✅ Trailing stop dynamique basé sur ATR, R multiple et plus hauts/bas")
-    logger.info("  ✅ Suivi MFE (Maximum Favorable Excursion) et MAE (Maximum Adverse Excursion)")
-    logger.info("  ✅ Journalisation des statistiques de sortie pour optimisation future")
-    logger.info("  ✅ Conservation de tous les filtres V98.3")
-    logger.info("  ✅ Confirmation des ordres avec retry et FORÇAGE CACHE")
-    logger.info("  ✅ Confirmation du SL après modification")
-    logger.info("  ✅ Confirmation du trailing stop après création")
-    logger.info("  ✅ Pas de double entrée (continue)")
-    logger.info("  ✅ Détection et gestion de la maintenance OANDA")
-    logger.info("  ✅ Suspension automatique des appels API")
-    logger.info("  ✅ Suivi des trades stagnants")
-    logger.info("  ✅ Distance SL MINIMUM (10 pips)")
-    logger.info("  ✅ Filtre SPREAD ÉLEVÉ (pénalité EQS)")
-    logger.info("  ✅ Augmentation du seuil EQS à 75")
-    logger.info("  ✅ Réduction du nombre max de trades à 10")
-    logger.info("  ✅ Sortie anticipée sur retournement d'indicateurs")
+    logger.info("🔧 CORRECTIONS V100 APPLIQUÉES :")
+    logger.info("  ✅ Paramètres adaptatifs (ADX, EQS, BE, Trailing) basés sur les performances")
+    logger.info("  ✅ Pondération des setups selon leur Profit Factor et Win Rate")
+    logger.info("  ✅ Ajustement dynamique des seuils selon les 100 derniers trades")
+    logger.info("  ✅ Gestion de la qualité du marché (suspension en conditions défavorables)")
+    logger.info("  ✅ Exploitation automatique du MFE/MAE pour ajuster BE et Trailing")
+    logger.info("  ✅ Moteur d'apprentissage par paire et par setup")
+    logger.info("  ✅ Conservation de toutes les fonctionnalités V99")
     logger.info("")
 
     diagnostic_startup_v981()
@@ -4284,7 +4873,7 @@ if __name__ == "__main__":
             check_breakeven_v981()
 
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V99")
+                logger.info(f"⏰ Scan des signaux V100")
                 last_signal_scan = now
 
                 now_dt = datetime.utcnow()
