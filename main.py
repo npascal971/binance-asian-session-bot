@@ -1,14 +1,13 @@
 # ============================================================
-# main(101).py - Version V101 "ADAPTATION ROBUSTE"
+# main(101).py - Version V101 "ADAPTATION ROBUSTE" 
+# OPTIMISÉE POUR LES LOGS DE DÉCISION
 # 
-# AMÉLIORATIONS V101 (par rapport à V100) :
-# 1. ✅ Adaptation uniquement après ≥ 30 trades (au lieu de 10)
-# 2. ✅ Décision basée sur PF + Win Rate + Expectance combinés
-# 3. ✅ Hystérésis : 3 cycles consécutifs avant changement
-# 4. ✅ Amplitude limitée (±0.5 par cycle) pour éviter les oscillations
-# 5. ✅ Pondération des setups après ≥ 20 trades
-# 6. ✅ Suspension renforcée (PF + pertes consécutives)
-# 7. ✅ Conservation de toutes les fonctionnalités V100
+# AMÉLIORATIONS LOGS :
+# 1. ✅ Log structuré pour chaque signal analysé
+# 2. ✅ Raison exacte du rejet systématiquement affichée
+# 3. ✅ Logs ATR/Debug en DEBUG (pas en INFO)
+# 4. ✅ Résumé quotidien des statistiques
+# 5. ✅ Conservation de toutes les fonctionnalités V101
 # ============================================================
 
 import os
@@ -41,7 +40,7 @@ DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 # ============================================================
 # PARAMÈTRES DE BASE (seront adaptés dynamiquement)
 # ============================================================
-BASE_BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {
+BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "EUR_USD": 10,
     "GBP_USD": 9,
     "USD_CAD": 8,
@@ -154,7 +153,7 @@ class AdaptiveState:
                 "be_early_r": BASE_BREAKEVEN_EARLY_R,
                 "trailing_atr_mult": BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER,
                 "trailing_min_pips": BASE_TRAILING_STOP_MIN_DISTANCE_PIPS,
-                "confidence_min": BASE_BASE_MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, BASE_BASE_MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
+                "confidence_min": BASE_MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, BASE_MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
             }
         return self.pair_params[pair]
 
@@ -374,6 +373,7 @@ class TradingStatsV101:
         self.last_transaction_id = None
         self.adaptive_state = AdaptiveState()
         self._load_last_id()
+        self.last_daily_summary = time.time()
 
     def _load_last_id(self):
         try:
@@ -591,7 +591,47 @@ class TradingStatsV101:
             "expectancy": f"${expectancy:.2f}"
         }
 
+    def log_daily_summary(self):
+        """Résumé quotidien compact des statistiques"""
+        logger.info("=" * 60)
+        logger.info("📊 RÉSUMÉ QUOTIDIEN V101")
+        logger.info("=" * 60)
+        
+        total_signals = 0
+        total_accepted = 0
+        total_rejected = 0
+        total_wins = 0
+        total_losses = 0
+        total_be = 0
+        
+        for pair in sorted(self.stats.keys()):
+            summary = self.get_summary(pair)
+            total_signals += summary["total_signals"]
+            total_accepted += summary["accepted"]
+            total_rejected += summary["rejected"]
+            total_wins += summary["wins"]
+            total_losses += summary["losses"]
+            total_be += summary["breakevens"]
+            
+            logger.info(f"{pair:10} | Signaux:{summary['total_signals']:3} | Acceptés:{summary['accepted']:3} | Rejetés:{summary['rejected']:3} | Clôturés:{summary['total_closed']:3} | WR:{summary['win_rate']:>6} | PF:{summary['profit_factor']:>6} | Esp:{summary['expectancy']:>8}")
+        
+        if total_signals > 0:
+            logger.info("-" * 60)
+            logger.info(f"TOTAL      | Signaux:{total_signals:3} | Acceptés:{total_accepted:3} | Rejetés:{total_rejected:3} | Clôturés:{total_wins + total_losses + total_be:3}")
+            
+            if total_wins + total_losses > 0:
+                global_wr = total_wins / (total_wins + total_losses) * 100
+                logger.info(f"Win Rate global: {global_wr:.1f}% | Wins:{total_wins} | Losses:{total_losses} | BE:{total_be}")
+        
+        logger.info("=" * 60)
+
     def log_summary(self):
+        """Résumé complet (appelé à chaque scan)"""
+        # Vérifier si on doit faire un résumé quotidien
+        if time.time() - self.last_daily_summary >= 86400:  # 24h
+            self.log_daily_summary()
+            self.last_daily_summary = time.time()
+        
         logger.info("=" * 80)
         logger.info("📊 STATISTIQUES GLOBALES V101")
         logger.info("=" * 80)
@@ -3429,12 +3469,13 @@ def filter_min_volatility(df: pd.DataFrame, pair: str) -> tuple:
 
     min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
 
-    logger.info(f"[ATR_AUDIT] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
+    # LOG EN DEBUG POUR NE PAS POLLUER
+    logger.debug(f"[ATR_AUDIT] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
 
     if atr_pips < min_atr_pips:
-        return False, f"ATR = {atr_pips:.1f} pips < seuil {min_atr_pips} pips (brut: {atr_price:.6f})"
+        return False, f"ATR = {atr_pips:.1f} pips < seuil {min_atr_pips} pips"
 
-    return True, f"ATR = {atr_pips:.1f} pips >= seuil {min_atr_pips} pips (brut: {atr_price:.6f})"
+    return True, f"ATR = {atr_pips:.1f} pips >= seuil {min_atr_pips} pips"
 
 
 def filter_close_confirmation(df: pd.DataFrame, direction: str) -> tuple:
@@ -3893,7 +3934,7 @@ def calculate_signal_confidence(
 
     if not eqs_passed:
         rejection_logs.append(f"EQS = {eqs_score}/100 < seuil {EQS_MIN_THRESHOLD_ADAPT:.0f}")
-        details["VETO"] = f"❌ EQS insuffisant: {eqs_score}/100 < {EQS_MIN_THRESHOLD_ADAPT:.0f}"
+        details["VETO"] = f"EQS insuffisant: {eqs_score}/100 < {EQS_MIN_THRESHOLD_ADAPT:.0f}"
         return {
             "passed": False,
             "total_score": 0,
@@ -3912,7 +3953,7 @@ def calculate_signal_confidence(
     vol_passed, vol_msg = filter_min_volatility(df_m15, pair)
     if not vol_passed:
         rejection_logs.append(vol_msg)
-        details["VETO"] = f"❌ VOLATILITÉ: {vol_msg}"
+        details["VETO"] = f"VOLATILITÉ: {vol_msg}"
         return {
             "passed": False,
             "total_score": 0,
@@ -3930,7 +3971,7 @@ def calculate_signal_confidence(
     struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
     if not struct_passed:
         rejection_logs.append(struct_msg)
-        details["VETO"] = f"❌ STRUCTURE: {struct_msg}"
+        details["VETO"] = f"STRUCTURE: {struct_msg}"
         return {
             "passed": False,
             "total_score": 0,
@@ -3953,7 +3994,7 @@ def calculate_signal_confidence(
     pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if not pullback_passed:
         rejection_logs.append(pullback_msg)
-        details["VETO"] = f"❌ PULLBACK: {pullback_msg}"
+        details["VETO"] = f"PULLBACK: {pullback_msg}"
         return {
             "passed": False,
             "total_score": 0,
@@ -4172,18 +4213,27 @@ def calculate_signal_confidence(
     except:
         pass
 
+    # LOG DE DÉCISION STRUCTURÉ - LE PLUS IMPORTANT
+    if passed:
+        status = "✅ ACCEPT"
+    else:
+        status = "❌ REJECT"
+        if rejection_logs:
+            status += f" | raison={rejection_logs[0][:80]}"
+    
     decision_line = (
         f"[DECISION] {pair} | {direction} | {entry_type} | "
+        f"{status} | "
         f"Score={score}/{min_required} | EQS={eqs_score}/{EQS_MIN_THRESHOLD_ADAPT:.0f} | "
-        f"ATR={atr_pips:.1f}pips | ADX={adx:.1f} (seuil={ADX_MIN_THRESHOLD_ADAPT:.1f}) | "
-        f"RSI={rsi:.1f} | MOM={momentum:.2f}% | "
-        f"H={hour:02d} | Sess={session} | Spread={spread:.2f} | Vol={volatility_ratio:.4f} | "
-        f"H1Trend={h1_trend:+d} | H4Trend={h4_trend:+d} | RR={rr:.2f} | "
-        f"PoidsSetup={setup_weight:.2f} | "
-        f"ACTION={'EXECUTE' if passed else 'REJECT'}"
+        f"ATR={atr_pips:.1f}pips | ADX={adx:.1f}/{ADX_MIN_THRESHOLD_ADAPT:.1f} | "
+        f"RSI={rsi:.1f} | MOM={momentum:+.2f}% | "
+        f"H={hour:02d}h | Sess={session} | Spread={spread:.2f} | "
+        f"RR={rr:.2f} | PoidsSetup={setup_weight:.2f}"
     )
+    
+    # Ajouter le détail du rejet si nécessaire
     if not passed and rejection_logs:
-        decision_line += f" | REASON={rejection_logs[0][:60]}"
+        decision_line += f" | REJECT={rejection_logs[0][:80]}"
 
     logger.info(decision_line)
 
@@ -4358,7 +4408,8 @@ def advanced_main_v981():
             atr_price = calculate_atr(df_m15, period=ATR_PERIOD)
             atr_pips = price_to_pips(atr_price, pair)
             min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
-            logger.info(f"[ATR_DIAG] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
+            # LOG EN DEBUG POUR NE PAS POLLUER
+            logger.debug(f"[ATR_DIAG] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
 
             current_price = float(df_m15["close"].iloc[-1])
             bias_analysis = determine_advanced_bias(df_h4)
@@ -4418,11 +4469,11 @@ def advanced_main_v981():
                     stats.record_signal(pair, False, reason, entry_level, 0, 0, score, direction)
 
             if rejected_details:
-                logger.info(f"[REJECT_DETAILS] {pair} - {len(rejected_details)} rejets détaillés")
+                logger.debug(f"[REJECT_DETAILS] {pair} - {len(rejected_details)} rejets détaillés")
                 for detail in rejected_details[:5]:
-                    logger.info(f"  {detail}")
+                    logger.debug(f"  {detail}")
                 if len(rejected_details) > 5:
-                    logger.info(f"  ... et {len(rejected_details)-5} autres")
+                    logger.debug(f"  ... et {len(rejected_details)-5} autres")
 
             finalists = strict_keep_best_per_direction(scored_entries)
             log_line = (
@@ -4868,7 +4919,7 @@ def diagnostic_startup_v981():
     logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif)")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {BASE_EQS_MIN_THRESHOLD} (adaptatif)")
     logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {BASE_ADX_MIN_THRESHOLD} (adaptatif)")
-    logger.info(f"[DIAG] BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {BASE_BASE_MIN_CONFIDENCE_SCORE_BY_PAIR}")
+    logger.info(f"[DIAG] BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {BASE_MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
     logger.info("[DIAG] SUIVI DES CLÔTURES : tentative API + fallback")
