@@ -7,7 +7,7 @@
 # 2. ✅ Raison exacte du rejet systématiquement affichée
 # 3. ✅ Logs ATR/Debug en DEBUG (pas en INFO)
 # 4. ✅ Résumé quotidien des statistiques
-# 5. ✅ Détail complet du calcul EQS (chaque composant)
+# 5. ✅ Détail complet du calcul EQS avec chaque composant
 # 6. ✅ Conservation de toutes les fonctionnalités V101
 # ============================================================
 
@@ -3211,8 +3211,9 @@ def calculate_entry_quality_score(
     scores = {}
     total = 0
     logs = []
-    details_by_component = {}
+    components = {}
 
+    # 1. Distance Zone (max 20)
     entry_zone = abs(entry_level - current_price)
     entry_zone_pips = price_to_pips(entry_zone, pair)
     if entry_zone_pips <= 3:
@@ -3230,8 +3231,9 @@ def calculate_entry_quality_score(
     else:
         scores["distance_zone"] = 0
         logs.append(f"distance_zone: {entry_zone_pips:.1f}pips -> 0")
-    details_by_component["distance_zone"] = {"value": entry_zone_pips, "score": scores["distance_zone"], "max": 20}
+    components["distance_zone"] = {"value": f"{entry_zone_pips:.1f}pips", "score": scores["distance_zone"], "max": 20}
 
+    # 2. EMA Proximity (max 20)
     try:
         ema20 = df_m15['close'].ewm(span=20, adjust=False).mean().iloc[-1]
         ema_distance = abs(current_price - ema20)
@@ -3254,8 +3256,9 @@ def calculate_entry_quality_score(
     except Exception:
         scores["ema_proximity"] = 10
         logs.append("ema_proximity: error -> 10")
-    details_by_component["ema_proximity"] = {"value": ema_distance_pips if 'ema_distance_pips' in locals() else 0, "score": scores["ema_proximity"], "max": 20}
+    components["ema_proximity"] = {"value": f"{ema_distance_pips:.1f}pips" if 'ema_distance_pips' in locals() else "N/A", "score": scores["ema_proximity"], "max": 20}
 
+    # 3. Range Position (max 20)
     try:
         recent_high = df_m15['high'].iloc[-10:].max()
         recent_low = df_m15['low'].iloc[-10:].min()
@@ -3295,12 +3298,14 @@ def calculate_entry_quality_score(
     except Exception:
         scores["range_position"] = 10
         logs.append("range_position: error -> 10")
-    details_by_component["range_position"] = {"value": position if 'position' in locals() else 0, "score": scores["range_position"], "max": 20}
+    components["range_position"] = {"value": f"{position:.2f}" if 'position' in locals() else "N/A", "score": scores["range_position"], "max": 20}
 
+    # 4. Pullback Quality (max 20)
     pullback_passed, _ = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if pullback_passed:
         scores["pullback_quality"] = 20
         logs.append("pullback_quality: OK -> 20")
+        pullback_pips = "OK"
     else:
         if len(df_m15) > 5:
             if direction == "BUY":
@@ -3317,6 +3322,7 @@ def calculate_entry_quality_score(
                 else:
                     scores["pullback_quality"] = 5
                     logs.append("pullback_quality: pas de pullback -> 5")
+                    pullback_pips = 0
             else:
                 recent_high = df_m15['high'].iloc[-5:].max()
                 pullback_depth = recent_high - current_price
@@ -3331,11 +3337,14 @@ def calculate_entry_quality_score(
                 else:
                     scores["pullback_quality"] = 5
                     logs.append("pullback_quality: pas de pullback -> 5")
+                    pullback_pips = 0
         else:
             scores["pullback_quality"] = 10
             logs.append("pullback_quality: données insuffisantes -> 10")
-    details_by_component["pullback_quality"] = {"value": pullback_pips if 'pullback_pips' in locals() else 0, "score": scores["pullback_quality"], "max": 20}
+            pullback_pips = "N/A"
+    components["pullback_quality"] = {"value": f"{pullback_pips:.1f}pips" if isinstance(pullback_pips, float) else pullback_pips, "score": scores["pullback_quality"], "max": 20}
 
+    # 5. Stoch Position (max 20)
     try:
         k, _ = calculate_stoch_rsi(df_m15['close'])
         if direction == "BUY":
@@ -3367,11 +3376,12 @@ def calculate_entry_quality_score(
     except Exception:
         scores["stoch_position"] = 10
         logs.append("stoch_position: error -> 10")
-    details_by_component["stoch_position"] = {"value": k if 'k' in locals() else 50, "score": scores["stoch_position"], "max": 20}
+        k = 50
+    components["stoch_position"] = {"value": f"{k:.1f}", "score": scores["stoch_position"], "max": 20}
 
+    # 6. Spread Penalty (pénalité, max -10)
     spread_data = get_price_spread_v88(pair)
     spread = spread_data.get("spread", 0.0)
-
     if spread > pip_value * 2:
         scores["spread_penalty"] = -10
         logs.append(f"spread_penalty: {spread:.2f} > 2 pips -> -10")
@@ -3381,7 +3391,7 @@ def calculate_entry_quality_score(
     else:
         scores["spread_penalty"] = 0
         logs.append(f"spread_penalty: {spread:.2f} -> 0")
-    details_by_component["spread_penalty"] = {"value": spread, "score": scores["spread_penalty"], "max": 0}
+    components["spread_penalty"] = {"value": f"{spread:.2f}", "score": scores["spread_penalty"], "max": 0}
 
     total = sum(scores.values())
 
@@ -3395,7 +3405,7 @@ def calculate_entry_quality_score(
         "total": total,
         "passed": total >= BASE_EQS_MIN_THRESHOLD,
         "logs": logs,
-        "components": details_by_component
+        "components": components
     }
 
     return details
@@ -3939,8 +3949,8 @@ def calculate_signal_confidence(
 
     eqs_score = eqs_result["total"]
     eqs_passed = eqs_score >= EQS_MIN_THRESHOLD_ADAPT
-    details["EQS_Details"] = eqs_result["logs"]
     eqs_components = eqs_result.get("components", {})
+    details["EQS_Details"] = eqs_result["logs"]
 
     if not eqs_passed:
         # Construire un message de rejet détaillé avec les composants EQS
@@ -4241,7 +4251,7 @@ def calculate_signal_confidence(
         for comp_name, comp_data in eqs_components.items():
             comp_label = comp_name.replace("_", " ").title()
             comp_parts.append(f"{comp_label}:{comp_data['score']:+d}")
-        eqs_detail_str = " | EQS_components=" + " ".join(comp_parts)
+        eqs_detail_str = " | EQS=" + " ".join(comp_parts)
 
     # LOG DE DÉCISION STRUCTURÉ - LE PLUS IMPORTANT
     if passed:
