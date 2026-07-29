@@ -41,7 +41,7 @@ DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 # ============================================================
 # PARAMÈTRES DE BASE (seront adaptés dynamiquement)
 # ============================================================
-BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {
+BASE_BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {
     "EUR_USD": 10,
     "GBP_USD": 9,
     "USD_CAD": 8,
@@ -154,7 +154,7 @@ class AdaptiveState:
                 "be_early_r": BASE_BREAKEVEN_EARLY_R,
                 "trailing_atr_mult": BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER,
                 "trailing_min_pips": BASE_TRAILING_STOP_MIN_DISTANCE_PIPS,
-                "confidence_min": BASE_MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, BASE_MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
+                "confidence_min": BASE_BASE_MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, BASE_BASE_MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
             }
         return self.pair_params[pair]
 
@@ -3852,7 +3852,7 @@ def calculate_signal_confidence(
     rejection_logs = []
 
     # V101 : Seuil de confiance adaptatif avec pondération du setup
-    base_min_required = MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
+    base_min_required = BASE_MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, BASE_MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
     setup_type = str(entry.get("type", "FVG_RETEST")).upper()
     setup_weight = stats.adaptive_state.get_setup_weight(pair, setup_type)
     min_required = max(5, int(base_min_required / max(0.5, setup_weight)))
@@ -4868,7 +4868,7 @@ def diagnostic_startup_v981():
     logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif)")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {BASE_EQS_MIN_THRESHOLD} (adaptatif)")
     logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {BASE_ADX_MIN_THRESHOLD} (adaptatif)")
-    logger.info(f"[DIAG] MIN_CONFIDENCE_SCORE_BY_PAIR = {BASE_MIN_CONFIDENCE_SCORE_BY_PAIR}")
+    logger.info(f"[DIAG] BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {BASE_BASE_MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
     logger.info("[DIAG] SUIVI DES CLÔTURES : tentative API + fallback")
