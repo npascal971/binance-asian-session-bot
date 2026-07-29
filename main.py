@@ -3385,7 +3385,7 @@ def calculate_entry_quality_score(
         "stoch_position": scores["stoch_position"],
         "spread_penalty": scores["spread_penalty"],
         "total": total,
-        "passed": total >= EQS_MIN_THRESHOLD,
+        "passed": total >= BASE_EQS_MIN_THRESHOLD,
         "logs": logs
     }
 
