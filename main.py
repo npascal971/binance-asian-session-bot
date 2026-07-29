@@ -693,7 +693,7 @@ stats = TradingStatsV101()
 # SUIVI DES CLÔTURES
 # ============================================================
 open_trade_details = {}
-trade_tracker = TradeTracker()  # défini plus bas
+  # défini plus bas
 
 def check_closed_trades():
     global stats, open_trade_details
