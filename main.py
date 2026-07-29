@@ -7,7 +7,8 @@
 # 2. ✅ Raison exacte du rejet systématiquement affichée
 # 3. ✅ Logs ATR/Debug en DEBUG (pas en INFO)
 # 4. ✅ Résumé quotidien des statistiques
-# 5. ✅ Conservation de toutes les fonctionnalités V101
+# 5. ✅ Détail complet du calcul EQS (chaque composant)
+# 6. ✅ Conservation de toutes les fonctionnalités V101
 # ============================================================
 
 import os
@@ -3210,6 +3211,7 @@ def calculate_entry_quality_score(
     scores = {}
     total = 0
     logs = []
+    details_by_component = {}
 
     entry_zone = abs(entry_level - current_price)
     entry_zone_pips = price_to_pips(entry_zone, pair)
@@ -3228,6 +3230,7 @@ def calculate_entry_quality_score(
     else:
         scores["distance_zone"] = 0
         logs.append(f"distance_zone: {entry_zone_pips:.1f}pips -> 0")
+    details_by_component["distance_zone"] = {"value": entry_zone_pips, "score": scores["distance_zone"], "max": 20}
 
     try:
         ema20 = df_m15['close'].ewm(span=20, adjust=False).mean().iloc[-1]
@@ -3251,6 +3254,7 @@ def calculate_entry_quality_score(
     except Exception:
         scores["ema_proximity"] = 10
         logs.append("ema_proximity: error -> 10")
+    details_by_component["ema_proximity"] = {"value": ema_distance_pips if 'ema_distance_pips' in locals() else 0, "score": scores["ema_proximity"], "max": 20}
 
     try:
         recent_high = df_m15['high'].iloc[-10:].max()
@@ -3291,6 +3295,7 @@ def calculate_entry_quality_score(
     except Exception:
         scores["range_position"] = 10
         logs.append("range_position: error -> 10")
+    details_by_component["range_position"] = {"value": position if 'position' in locals() else 0, "score": scores["range_position"], "max": 20}
 
     pullback_passed, _ = filter_pullback(df_m15, direction, entry_level, current_price, pair)
     if pullback_passed:
@@ -3329,6 +3334,7 @@ def calculate_entry_quality_score(
         else:
             scores["pullback_quality"] = 10
             logs.append("pullback_quality: données insuffisantes -> 10")
+    details_by_component["pullback_quality"] = {"value": pullback_pips if 'pullback_pips' in locals() else 0, "score": scores["pullback_quality"], "max": 20}
 
     try:
         k, _ = calculate_stoch_rsi(df_m15['close'])
@@ -3361,6 +3367,7 @@ def calculate_entry_quality_score(
     except Exception:
         scores["stoch_position"] = 10
         logs.append("stoch_position: error -> 10")
+    details_by_component["stoch_position"] = {"value": k if 'k' in locals() else 50, "score": scores["stoch_position"], "max": 20}
 
     spread_data = get_price_spread_v88(pair)
     spread = spread_data.get("spread", 0.0)
@@ -3374,6 +3381,7 @@ def calculate_entry_quality_score(
     else:
         scores["spread_penalty"] = 0
         logs.append(f"spread_penalty: {spread:.2f} -> 0")
+    details_by_component["spread_penalty"] = {"value": spread, "score": scores["spread_penalty"], "max": 0}
 
     total = sum(scores.values())
 
@@ -3386,7 +3394,8 @@ def calculate_entry_quality_score(
         "spread_penalty": scores["spread_penalty"],
         "total": total,
         "passed": total >= BASE_EQS_MIN_THRESHOLD,
-        "logs": logs
+        "logs": logs,
+        "components": details_by_component
     }
 
     return details
@@ -3931,9 +3940,16 @@ def calculate_signal_confidence(
     eqs_score = eqs_result["total"]
     eqs_passed = eqs_score >= EQS_MIN_THRESHOLD_ADAPT
     details["EQS_Details"] = eqs_result["logs"]
+    eqs_components = eqs_result.get("components", {})
 
     if not eqs_passed:
-        rejection_logs.append(f"EQS = {eqs_score}/100 < seuil {EQS_MIN_THRESHOLD_ADAPT:.0f}")
+        # Construire un message de rejet détaillé avec les composants EQS
+        eqs_reject_details = []
+        for comp_name, comp_data in eqs_components.items():
+            comp_label = comp_name.replace("_", " ").title()
+            eqs_reject_details.append(f"{comp_label}: {comp_data['score']:+d}/{comp_data['max']}")
+        eqs_reject_summary = " | ".join(eqs_reject_details) if eqs_reject_details else "EQS insuffisant"
+        rejection_logs.append(f"EQS = {eqs_score}/100 < seuil {EQS_MIN_THRESHOLD_ADAPT:.0f} | {eqs_reject_summary}")
         details["VETO"] = f"EQS insuffisant: {eqs_score}/100 < {EQS_MIN_THRESHOLD_ADAPT:.0f}"
         return {
             "passed": False,
@@ -3945,6 +3961,7 @@ def calculate_signal_confidence(
             "atr_value": atr_value,
             "eqs_score": eqs_score,
             "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
             "rejection_logs": rejection_logs
         }
 
@@ -3964,6 +3981,7 @@ def calculate_signal_confidence(
             "atr_value": atr_value,
             "eqs_score": eqs_score,
             "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
             "rejection_logs": rejection_logs
         }
     details["Volatility"] = vol_msg
@@ -3982,6 +4000,7 @@ def calculate_signal_confidence(
             "atr_value": atr_value,
             "eqs_score": eqs_score,
             "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
             "rejection_logs": rejection_logs
         }
     if "partiellement" in struct_msg:
@@ -4005,6 +4024,7 @@ def calculate_signal_confidence(
             "atr_value": atr_value,
             "eqs_score": eqs_score,
             "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
             "rejection_logs": rejection_logs
         }
     score_components["Pullback"] += 2
@@ -4075,6 +4095,7 @@ def calculate_signal_confidence(
                     "details": {"VETO": f"Prix vraiment trop loin ({distance:.5f})"},
                     "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value,
                     "eqs_score": eqs_score, "eqs_details": eqs_result,
+                    "eqs_components": eqs_components,
                     "rejection_logs": rejection_logs}
     except Exception as exc:
         details["Distance_Error"] = str(exc)
@@ -4213,6 +4234,15 @@ def calculate_signal_confidence(
     except:
         pass
 
+    # Construction du détail EQS pour le log
+    eqs_detail_str = ""
+    if eqs_components:
+        comp_parts = []
+        for comp_name, comp_data in eqs_components.items():
+            comp_label = comp_name.replace("_", " ").title()
+            comp_parts.append(f"{comp_label}:{comp_data['score']:+d}")
+        eqs_detail_str = " | EQS_components=" + " ".join(comp_parts)
+
     # LOG DE DÉCISION STRUCTURÉ - LE PLUS IMPORTANT
     if passed:
         status = "✅ ACCEPT"
@@ -4224,7 +4254,7 @@ def calculate_signal_confidence(
     decision_line = (
         f"[DECISION] {pair} | {direction} | {entry_type} | "
         f"{status} | "
-        f"Score={score}/{min_required} | EQS={eqs_score}/{EQS_MIN_THRESHOLD_ADAPT:.0f} | "
+        f"Score={score}/{min_required} | EQS={eqs_score}/{EQS_MIN_THRESHOLD_ADAPT:.0f}{eqs_detail_str} | "
         f"ATR={atr_pips:.1f}pips | ADX={adx:.1f}/{ADX_MIN_THRESHOLD_ADAPT:.1f} | "
         f"RSI={rsi:.1f} | MOM={momentum:+.2f}% | "
         f"H={hour:02d}h | Sess={session} | Spread={spread:.2f} | "
@@ -4269,6 +4299,7 @@ def calculate_signal_confidence(
         "momentum_filter": momentum_filter_info,
         "eqs_score": eqs_score,
         "eqs_details": eqs_result,
+        "eqs_components": eqs_components,
         "rejection_logs": rejection_logs,
         "metrics": metrics
     }
