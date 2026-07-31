@@ -4460,8 +4460,28 @@ def advanced_main_v981():
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
+
     for pair in PAIR_LIST:
         _reset_log_dedup()
+
+        # ============================================================
+        # ✅ V103 : FILTRES DE SESSION - PLACÉS ICI (dans la boucle)
+        # ============================================================
+        hour = datetime.utcnow().hour
+
+        # Bloquer EUR/USD et GBP/USD en ASIA (21h-7h)
+        if (21 <= hour or hour < 7) and pair in ["EUR_USD", "GBP_USD"]:
+            logger.info(f"[SESSION] {pair} - Session ASIA ({hour}h), trade ignoré")
+            continue
+
+        # Bloquer EUR/USD en NY (18h-21h) - car 0% de win rate sur les 24h
+        if (18 <= hour < 21) and pair == "EUR_USD":
+            logger.info(f"[SESSION] EUR_USD - Session NY ({hour}h), trade ignoré")
+            continue
+
+        # ============================================================
+        # FIN DES FILTRES DE SESSION
+        # ============================================================
 
         if stats.adaptive_state.is_pair_suspended(pair):
             logger.info(f"[SUSPEND] {pair} est suspendue - scan ignoré")
@@ -4476,6 +4496,7 @@ def advanced_main_v981():
             df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
             df_m15 = get_candles_with_retry(api, pair, GRANULARITY_M15, 250)
             df_d1 = get_candles_with_retry(api, pair, "D", count=250)
+            
             if any(df.empty for df in [df_h4, df_h1, df_m15]):
                 logger.warning(f"⚠️ Données manquantes pour {pair}, analyse ignorée")
                 continue
@@ -4483,7 +4504,6 @@ def advanced_main_v981():
             atr_price = calculate_atr(df_m15, period=ATR_PERIOD)
             atr_pips = price_to_pips(atr_price, pair)
             min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
-            # LOG EN DEBUG POUR NE PAS POLLUER
             logger.debug(f"[ATR_DIAG] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
 
             current_price = float(df_m15["close"].iloc[-1])
@@ -4513,14 +4533,18 @@ def advanced_main_v981():
                 direction = entry.get("direction", "").upper()
                 entry_type = entry.get("type", "UNKNOWN")
                 entry_level = entry.get("entry_level")
+                
                 if entry_level is None:
                     rejected_reasons["entry_level_none"] += 1
                     continue
+                    
                 distance = abs(current_price - entry_level)
                 max_distance = MAX_DISTANCE_PIPS.get(pair, MAX_DISTANCE_PIPS["DEFAULT"])
+                
                 if distance > max_distance * 3:
                     rejected_reasons["distance_too_far"] += 1
                     continue
+                    
                 confidence_result = calculate_signal_confidence(
                     pair, direction, df_h4, df_h1, df_m15, entry, bias, current_price,
                     False, "", df_d1=df_d1
@@ -4659,8 +4683,8 @@ def advanced_main_v981():
             logger.error(f"💥 Erreur sur {pair} : {str(e)}")
             logger.error(traceback.format_exc())
             continue
+            
     stats.log_summary()
-
 # ============================================================
 # V102 : BREAK EVEN AVEC PARAMÈTRES ADAPTATIFS (BE à 0.40R)
 # ============================================================
