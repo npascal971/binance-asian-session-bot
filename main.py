@@ -78,10 +78,10 @@ BASE_EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "55.0"))
 
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "10"))
 MIN_ATR_PIPS_BY_PAIR = {
-    "EUR_USD": 6.0,
-    "GBP_USD": 8.0,
-    "USD_CAD": 6.0,
-    "AUD_USD": 6.0,
+    "EUR_USD": 5.0,
+    "GBP_USD": 7.0,
+    "USD_CAD": 5.0,
+    "AUD_USD": 5.0,
     "AUD_CAD": 6.0,
     "XAU_USD": 40.0,
     "USD_JPY": 8.0,
@@ -3521,7 +3521,7 @@ def filter_min_volatility(df: pd.DataFrame, pair: str) -> tuple:
     min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
 
     # LOG EN DEBUG POUR NE PAS POLLUER
-    logger.debug(f"[ATR_AUDIT] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
+    logger.info(f"[ATR_AUDIT] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
 
     if atr_pips < min_atr_pips:
         return False, f"ATR = {atr_pips:.1f} pips < seuil {min_atr_pips} pips"
@@ -4520,7 +4520,7 @@ def advanced_main_v981():
             atr_price = calculate_atr(df_m15, period=ATR_PERIOD)
             atr_pips = price_to_pips(atr_price, pair)
             min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
-            logger.debug(f"[ATR_DIAG] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
+            logger.info(f"[ATR_DIAG] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
 
             current_price = float(df_m15["close"].iloc[-1])
             bias_analysis = determine_advanced_bias(df_h4)
