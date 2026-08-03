@@ -1820,6 +1820,16 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
                               eqs: int, setup_type: str, metrics: dict) -> str | None:
     global last_execution_attempt
     pair_upper = pair.upper()
+    logger.info(
+    f"[TREND_CHECK] "
+    f"{pair} | "
+    f"DIR={direction} | "
+    f"H4={metrics.get('h4_trend')} | "
+    f"H1={metrics.get('h1_trend')} | "
+    f"ADX={metrics.get('adx')} | "
+    f"EQS={eqs} | "
+    f"SETUP={setup_type}"
+    )                         
     now = time.time()
     if pair_upper in last_execution_attempt and now - last_execution_attempt[pair_upper] < EXECUTION_COOLDOWN_SECONDS:
         logger.warning(f"[ORDER] ⏳ Dernier essai pour {pair_upper} il y a {now - last_execution_attempt[pair_upper]:.1f}s < {EXECUTION_COOLDOWN_SECONDS}s, on attend.")
@@ -4662,7 +4672,7 @@ def advanced_main_v981():
             logger.info(f"[COOLDOWN] {pair} - en cooldown après une perte, scan ignoré")
             continue
 
-        # ============================================================
+                # ============================================================
         # FIN DES FILTRES DE SESSION
         # ============================================================
 
@@ -4732,15 +4742,29 @@ def advanced_main_v981():
                     pair, direction, df_h4, df_h1, df_m15, entry, bias, current_price,
                     False, "", df_d1=df_d1
                 )
+                
                 score = confidence_result.get("total_score", 0)
                 eqs = confidence_result.get("eqs_score", 0)
-
+                metrics = confidence_result.get("metrics", {})
+                passed = confidence_result.get("passed", False)
+                
+                # ✅ Log unique et correct
+                logger.info(
+                    f"[SIGNAL] {pair} | "
+                    f"DIR={direction} | "
+                    f"EQS={eqs} | "
+                    f"ADX={metrics.get('adx', 'NA')} | "
+                    f"ATR={atr_pips:.1f} | "
+                    f"SETUP={entry_type} | "
+                    f"PASSED={passed} | "
+                    f"SCORE={score}"
+                )
+                
                 if DEBUG_MODE:
-                    logger.debug(f"📊 {pair} {direction} | Score: {score} | EQS: {eqs}/100 | Passed: {confidence_result.get('passed', False)}")
+                    logger.debug(f"📊 {pair} {direction} | Score: {score} | EQS: {eqs}/100 | Passed: {passed}")
 
-                if confidence_result.get("passed", False):
+                if passed:
                     scored_entries.append({"entry": entry, "confidence": confidence_result})
-                    metrics = confidence_result.get("metrics", {})
                     stats.record_signal(pair, True, "score_ok", entry_level, 0, 0, score, direction, metrics)
                 else:
                     reason = confidence_result.get("details", {}).get("VETO", f"score_{score}")
