@@ -1,15 +1,15 @@
 # ============================================================
-# main(103).py - Version V103 "SESSION PROTECTION" 
-# PROTECTION RENFORCÉE CONTRE LES PERTES EN ASIA
+# main(104).py - Version V104 "CONDITIONS FAVORABLES" 
+# FILTRES RENFORCÉS POUR ÉVITER LES TRADES EN CONDITIONS DÉFAVORABLES
 #
-# AMÉLIORATIONS V103 :
-# 1. ✅ Blocage des trades en ASIA pour USD/CAD et AUD/USD
-# 2. ✅ Seuils EQS et ADX relevés en ASIA (EQS≥70, ADX≥20)
-# 3. ✅ Filtre ADX renforcé (rejet si ADX < 18 dans momentum)
-# 4. ✅ Risque par trade réduit à 0.75%
-# 5. ✅ EXIT_EARLY plus sélectif (4 signaux au lieu de 3)
-# 6. ✅ Adaptation accélérée (15 trades, 1 cycle d'hystérésis)
-# 7. ✅ Conservation de toutes les fonctionnalités V102
+# AMÉLIORATIONS V104 :
+# 1. ✅ Blocage des trades contre la tendance 4H (sauf BREAKER et BISI)
+# 2. ✅ ADX minimum relevé à 25 pendant les sessions actives
+# 3. ✅ Veto si momentum opposé à la direction (>0.15%)
+# 4. ✅ Confluence HTF requise (2/3)
+# 5. ✅ Cooldown de 1h après une perte
+# 6. ✅ Score minimum augmenté de +2 en session active
+# 7. ✅ Conservation de toutes les fonctionnalités V103
 # ============================================================
 
 import os
@@ -32,7 +32,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V103
+# CONFIGURATION V104
 # =========================
 load_dotenv()
 
@@ -89,12 +89,12 @@ MIN_ATR_PIPS_BY_PAIR = {
     "DEFAULT": 6.0
 }
 # ============================================================
-# CONFIGURATION ADAPTATIVE (V103 - accélérée)
+# CONFIGURATION ADAPTATIVE (V104 - accélérée)
 # ============================================================
 # Fenêtre d'apprentissage
 LEARNING_WINDOW = int(os.getenv("LEARNING_WINDOW", "50"))  # 50 derniers trades
-# ✅ V103 : Adaptation plus rapide (15 trades au lieu de 20)
-ADAPTATION_MIN_TRADES = int(os.getenv("ADAPTATION_MIN_TRADES", "15"))
+# ✅ V104 : Adaptation encore plus rapide (10 trades au lieu de 15)
+ADAPTATION_MIN_TRADES = int(os.getenv("ADAPTATION_MIN_TRADES", "10"))
 ADAPTATION_INTERVAL = int(os.getenv("ADAPTATION_INTERVAL", "300"))  # 5 minutes
 
 # Seuils d'adaptation (V102 : combinaison de critères)
@@ -105,7 +105,7 @@ WR_BAD_THRESHOLD = 0.40
 EXPECTANCY_GOOD_THRESHOLD = 0.0   # expectancy positive en $
 EXPECTANCY_BAD_THRESHOLD = -5.0   # expectancy négative
 
-# ✅ V103 : Hystérésis réduite à 1 cycle (au lieu de 2) pour réagir plus vite
+# ✅ V104 : Hystérésis réduite à 1 cycle (inchangé)
 HYSTERESIS_CYCLES_REQUIRED = int(os.getenv("HYSTERESIS_CYCLES", "1"))
 
 # Amplitude maximale de changement par cycle
@@ -136,7 +136,7 @@ SETUP_WEIGHTS_DEFAULT = {
 }
 
 # ============================================================
-# ÉTAT ADAPTATIF (V103 - réactivité accrue)
+# ÉTAT ADAPTATIF (V104 - réactivité accrue + cooldown)
 # ============================================================
 class AdaptiveState:
     """État adaptatif du bot : paramètres dynamiques, qualité du marché, apprentissage"""
@@ -149,6 +149,9 @@ class AdaptiveState:
         self.adaptation_history = []
         # V101 : Hystérésis
         self.adaptation_counters = defaultdict(lambda: {"good": 0, "bad": 0})
+        # ✅ V104 : Cooldown après une perte
+        self.last_loss_time = defaultdict(float)
+        self.loss_cooldown = 3600  # 1 heure
 
     def get_pair_params(self, pair: str) -> dict:
         if pair not in self.pair_params:
@@ -186,8 +189,21 @@ class AdaptiveState:
         self.suspended_pairs[pair] = time.time()
         logger.warning(f"[SUSPEND] {pair} suspendu pour 1 heure | Raison: {reason}")
 
+    # ✅ V104 : Cooldown après une perte
+    def can_trade(self, pair: str) -> bool:
+        """Vérifie si on peut trader sur cette paire (pas en cooldown après une perte)"""
+        if pair in self.last_loss_time:
+            elapsed = time.time() - self.last_loss_time[pair]
+            if elapsed < self.loss_cooldown:
+                logger.debug(f"[COOLDOWN] {pair} en cooldown pour encore {int(self.loss_cooldown - elapsed)}s")
+                return False
+        return True
+
     def record_loss(self, pair: str):
         self.consecutive_losses[pair] += 1
+        # ✅ V104 : Enregistrer l'heure de la perte pour le cooldown
+        self.last_loss_time[pair] = time.time()
+        
         # V101 : suspension renforcée (pertes consécutives + PF bas)
         stats_pair = stats.stats[pair]
         total_closed = stats_pair.get("wins", 0) + stats_pair.get("losses", 0)
@@ -203,10 +219,13 @@ class AdaptiveState:
 
     def record_win(self, pair: str):
         self.consecutive_losses[pair] = 0
+        # ✅ V104 : Réinitialiser le cooldown après un gain
+        if pair in self.last_loss_time:
+            del self.last_loss_time[pair]
 
     def adapt_parameters(self, pair: str, stats: dict):
         """
-        V103 : Adaptation robuste basée sur PF + WR + Expectance, avec hystérésis réduite.
+        V104 : Adaptation robuste basée sur PF + WR + Expectance, avec hystérésis réduite.
         """
         total_trades = stats.get("wins", 0) + stats.get("losses", 0) + stats.get("breakevens", 0)
         if total_trades < ADAPTATION_MIN_TRADES:
@@ -338,7 +357,7 @@ class AdaptiveState:
                     f"Trailing={params['trailing_atr_mult']:.2f}")
 
 # ============================================================
-# V103 - STATISTIQUES AVEC APPRENTISSAGE ROBUSTE
+# V104 - STATISTIQUES AVEC APPRENTISSAGE ROBUSTE
 # ============================================================
 class TradingStatsV101:
     def __init__(self):
@@ -615,7 +634,7 @@ class TradingStatsV101:
     def log_daily_summary(self):
         """Résumé quotidien compact des statistiques"""
         logger.info("=" * 60)
-        logger.info("📊 RÉSUMÉ QUOTIDIEN V103")
+        logger.info("📊 RÉSUMÉ QUOTIDIEN V104")
         logger.info("=" * 60)
         
         total_signals = 0
@@ -654,7 +673,7 @@ class TradingStatsV101:
             self.last_daily_summary = time.time()
         
         logger.info("=" * 80)
-        logger.info("📊 STATISTIQUES GLOBALES V103")
+        logger.info("📊 STATISTIQUES GLOBALES V104")
         logger.info("=" * 80)
         logger.info(f"{'Paire':10} | {'Signaux':>7} | {'Acceptés':>7} | {'Rejetés':>7} | {'Clôturés':>7} | {'Win Rate':>9} | {'PF':>6} | {'Espérance':>10}")
         logger.info("-" * 80)
@@ -767,7 +786,7 @@ class TradingStatsV101:
 
 
 # ============================================================
-# INSTANCIATION STATS V103
+# INSTANCIATION STATS V104
 # ============================================================
 stats = TradingStatsV101()
 
@@ -1791,7 +1810,7 @@ SCORING_CONFIG = {
 }
 
 # ============================================================
-# V103 - EXÉCUTION D'ORDRE (inchangé)
+# V104 - EXÉCUTION D'ORDRE (inchangé)
 # ============================================================
 last_execution_attempt = {}
 EXECUTION_COOLDOWN_SECONDS = 60
@@ -1807,7 +1826,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
         return None
     last_execution_attempt[pair_upper] = now
 
-    logger.info(f"[ORDER] V103 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] V104 EXECUTION START {pair} {direction} type={entry_type} score={score}")
 
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
@@ -1876,7 +1895,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V103 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    logger.info(f"[ORDER] SIGNAL V104 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
 
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
@@ -1979,7 +1998,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
 
 # ============================================================
-# V103 - MODIFICATION SL (inchangé)
+# V104 - MODIFICATION SL (inchangé)
 # ============================================================
 def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
     try:
@@ -2031,7 +2050,7 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
 
 
 # ============================================================
-# V103 - CRÉATION TRAILING STOP (inchangé)
+# V104 - CRÉATION TRAILING STOP (inchangé)
 # ============================================================
 def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -> bool:
     try:
@@ -2378,7 +2397,7 @@ def get_pair_settings(pair: str) -> dict:
     return PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
 # =============================
-# LOGGING (avec tag V103)
+# LOGGING (avec tag V104)
 # =============================
 LOG_ASCII_SAFE = os.getenv("LOG_ASCII_SAFE", "true").lower() == "true"
 
@@ -3142,7 +3161,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# FILTRES ET SCORING - utilise les paramètres adaptatifs + session ASIA
+# FILTRES ET SCORING - V104 (filtres renforcés)
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
@@ -3764,7 +3783,7 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
 
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V103</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V104</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -3915,8 +3934,42 @@ def get_signal_quality_label(score: int, eqs: int) -> str:
     return "B"
 
 # =============================
-# SYSTÈME DE SCORING (V103) - utilise les paramètres adaptatifs + session ASIA
+# SYSTÈME DE SCORING (V104) - utilise les paramètres adaptatifs + session ASIA + filtres renforcés
 # =============================
+
+def check_htf_confluence(direction: str, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> tuple:
+    """Vérifie la confluence sur les hauts timeframes (2/3 requis)"""
+    score = 0
+    details = []
+    
+    # Vérifier la tendance H1
+    h1_trend = score_ema_trend(df_h1)
+    if (direction == "BUY" and h1_trend > 0) or (direction == "SELL" and h1_trend < 0):
+        score += 1
+        details.append("Tendance H1 alignée")
+    else:
+        details.append("Tendance H1 neutre/opposée")
+    
+    # Vérifier la tendance H4
+    h4_trend = score_ema_trend(df_h4)
+    if (direction == "BUY" and h4_trend > 0) or (direction == "SELL" and h4_trend < 0):
+        score += 1
+        details.append("Tendance H4 alignée")
+    else:
+        details.append("Tendance H4 neutre/opposée")
+    
+    # Vérifier la structure H1
+    h1_structure = score_market_structure(df_h1)
+    if (direction == "BUY" and h1_structure > 0) or (direction == "SELL" and h1_structure < 0):
+        score += 1
+        details.append("Structure H1 alignée")
+    else:
+        details.append("Structure H1 neutre/opposée")
+    
+    # ✅ V104 : Exiger au moins 2 conflues sur 3
+    passed = score >= 2
+    return passed, f"{score}/3", details
+
 
 def calculate_signal_confidence(
     pair: str,
@@ -3950,17 +4003,27 @@ def calculate_signal_confidence(
     setup_weight = stats.adaptive_state.get_setup_weight(pair, setup_type)
     min_required = max(5, int(base_min_required / max(0.5, setup_weight)))
 
+    # ✅ V104 : Augmenter le score minimum en session active
+    hour = datetime.utcnow().hour
+    is_london = 7 <= hour < 16
+    is_ny = 12 <= hour < 21
+    if is_london or is_ny:
+        min_required += 2
+
     # Paramètres adaptatifs
     pair_params = stats.adaptive_state.get_pair_params(pair)
 
     # ✅ V103 : Seuils spécifiques à la session ASIA (21h-7h UTC)
-    hour = datetime.utcnow().hour
     if 21 <= hour or hour < 7:
         eqs_min_effective = max(pair_params["eqs_min"], 70)
         adx_min_effective = max(pair_params["adx_min"], 20)
     else:
         eqs_min_effective = pair_params["eqs_min"]
         adx_min_effective = pair_params["adx_min"]
+    
+    # ✅ V104 : ADX minimum renforcé à 25 pendant les sessions actives
+    if is_london or is_ny:
+        adx_min_effective = max(adx_min_effective, 25)
 
     direction = (direction or "").upper()
     entry_level = entry.get("entry_level")
@@ -4097,6 +4160,41 @@ def calculate_signal_confidence(
         entry_type=entry_type
     )
 
+    # ✅ V104 : Veto si momentum opposé à la direction
+    momentum = calculate_momentum(df_m15, period=5)
+    if direction == "BUY" and momentum < -0.15:
+        rejection_logs.append(f"Momentum baissier ({momentum:.2f}%) contre BUY")
+        details["VETO"] = f"Momentum opposé: {momentum:.2f}%"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs
+        }
+    if direction == "SELL" and momentum > 0.15:
+        rejection_logs.append(f"Momentum haussier ({momentum:.2f}%) contre SELL")
+        details["VETO"] = f"Momentum opposé: {momentum:.2f}%"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs
+        }
+
     # V101 : Adaptation du traitement du momentum selon l'état adaptatif
     if momentum_passed:
         score_components["Momentum"] += penalty_total
@@ -4111,6 +4209,45 @@ def calculate_signal_confidence(
 
     momentum_filter_info = {"passed": momentum_passed, "message": momentum_msg, "penalties": momentum_penalties}
 
+    # ✅ V104 : ADX minimum renforcé (veto si ADX < 20)
+    adx = calculate_adx(df_h1)
+    if adx < 20:
+        rejection_logs.append(f"ADX trop faible ({adx:.1f} < 20)")
+        details["VETO"] = f"ADX insuffisant: {adx:.1f} < 20"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs
+        }
+
+    # ✅ V104 : Confluence HTF requise (2/3)
+    htf_passed, htf_score, htf_details = check_htf_confluence(direction, df_h1, df_h4)
+    if not htf_passed:
+        rejection_logs.append(f"Confluence HTF insuffisante ({htf_score})")
+        details["VETO"] = f"Confluence HTF: {htf_score} (requis 2/3)"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs
+        }
+    details["HTF_Confluence"] = f"{htf_score} ({' | '.join(htf_details)})"
+
     if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
         score_components["ICT"] += 3
         details["Trend_H4"] = "+3 (Aligné)"
@@ -4118,8 +4255,27 @@ def calculate_signal_confidence(
         score_components["ICT"] += 1
         details["Trend_H4"] = "+1 (Neutre)"
     else:
-        score_components["ICT"] -= 2
-        details["Trend_H4"] = "-2 (H4 opposé)"
+        # ✅ V104 : Blocage contre-tendance sauf pour BREAKER et BISI
+        allowed_counter = ["BREAKER", "BISI"]
+        if setup_type not in allowed_counter:
+            rejection_logs.append(f"Contre-tendance 4H ({bias} vs {direction})")
+            details["VETO"] = f"Contre-tendance: bias 4H={bias}, direction={direction}"
+            return {
+                "passed": False,
+                "total_score": 0,
+                "final_confidence": "LOW",
+                "details": details,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "atr_value": atr_value,
+                "eqs_score": eqs_score,
+                "eqs_details": eqs_result,
+                "eqs_components": eqs_components,
+                "rejection_logs": rejection_logs
+            }
+        else:
+            score_components["ICT"] -= 2
+            details["Trend_H4"] = f"-2 (H4 opposé, autorisé pour {setup_type})"
 
     try:
         distance = abs(float(current_price) - entry_level)
@@ -4444,13 +4600,13 @@ def detect_setups_aligned_with_bias(
     return setups
 
 # =============================
-# FONCTION PRINCIPALE (scan des signaux) - avec filtres session V103
+# FONCTION PRINCIPALE (scan des signaux) - avec filtres session V104
 # =============================
 def advanced_main_v981():
     try:
         api = v88_client()
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V103 - Seuil adaptatif + session ASIA")
+        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V104 - Seuil adaptatif + session ASIA")
         logger.info(f"✅ Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R)")
         logger.info("✅ AUDIT ATR ACTIVÉ")
         logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
@@ -4462,7 +4618,13 @@ def advanced_main_v981():
         logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
         logger.info(f"✅ VERROUILLAGE PAR PAIRE: {EXECUTION_COOLDOWN_SECONDS}s")
         logger.info("✅ SUIVI MFE/MAE ACTIVÉ")
-        logger.info("✅ PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 15 trades, hystérésis 1 cycle)")
+        logger.info("✅ PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 10 trades, hystérésis 1 cycle)")
+        logger.info("✅ V104 : Blocage contre-tendance 4H (sauf BREAKER/BISI)")
+        logger.info("✅ V104 : ADX minimum 25 en session active")
+        logger.info("✅ V104 : Veto si momentum opposé >0.15%")
+        logger.info("✅ V104 : Confluence HTF requise (2/3)")
+        logger.info("✅ V104 : Cooldown de 1h après une perte")
+        logger.info("✅ V104 : Score minimum +2 en session active")
         logger.info("✅ V103 : Blocage USD/CAD et AUD/USD en ASIA")
         logger.info("✅ V103 : Seuils EQS≥70 et ADX≥20 en ASIA")
         logger.info("✅ V103 : Filtre ADX renforcé (seuil 18)")
@@ -4476,7 +4638,7 @@ def advanced_main_v981():
         _reset_log_dedup()
 
         # ============================================================
-        # ✅ V103 : FILTRES DE SESSION - PLACÉS ICI
+        # ✅ V104 : FILTRES DE SESSION + COOLDOWN
         # ============================================================
         hour = datetime.utcnow().hour
 
@@ -4493,6 +4655,11 @@ def advanced_main_v981():
         # ✅ V103 : Bloquer USD/CAD et AUD/USD en ASIA (21h-7h)
         if (21 <= hour or hour < 7) and pair in ["USD_CAD", "AUD_USD"]:
             logger.info(f"[SESSION] {pair} - Session ASIA ({hour}h), trade ignoré")
+            continue
+
+        # ✅ V104 : Cooldown après une perte
+        if not stats.adaptive_state.can_trade(pair):
+            logger.info(f"[COOLDOWN] {pair} - en cooldown après une perte, scan ignoré")
             continue
 
         # ============================================================
@@ -4702,7 +4869,7 @@ def advanced_main_v981():
             
     stats.log_summary()
 # ============================================================
-# V103 : BREAK EVEN AVEC PARAMÈTRES ADAPTATIFS (BE à 0.40R)
+# V104 : BREAK EVEN AVEC PARAMÈTRES ADAPTATIFS (BE à 0.40R)
 # ============================================================
 def check_breakeven_v981():
     try:
@@ -5024,16 +5191,16 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# DIAGNOSTIC DE DÉMARRAGE V103
+# DIAGNOSTIC DE DÉMARRAGE V104
 # ============================================================
 def diagnostic_startup_v981():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V103")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V104")
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BASE_BREAKEVEN_TRIGGER_R} (adaptatif) - ✅ V102: 0.40R")
     logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif) - ✅ V102: 0.25R")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {BASE_EQS_MIN_THRESHOLD} (adaptatif, majoré en ASIA)")
-    logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {BASE_ADX_MIN_THRESHOLD} (adaptatif, majoré en ASIA)")
+    logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {BASE_ADX_MIN_THRESHOLD} (adaptatif, majoré en ASIA, 25 en session active)")
     logger.info(f"[DIAG] TRAILING_STOP = {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R - ✅ V102: 1.0R")
     logger.info(f"[DIAG] BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {BASE_MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
@@ -5051,9 +5218,15 @@ def diagnostic_startup_v981():
     logger.info(f"[DIAG] MAX TRADES = {MAX_TRADES_TOTAL}")
     logger.info("[DIAG] SUIVI MFE/MAE ACTIVÉ")
     logger.info("[DIAG] APPRENTISSAGE DES SETUPS ACTIVÉ (seuil 10 trades)")
-    logger.info("[DIAG] PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 15 trades, hystérésis 1 cycle, amplitude limitée) - ✅ V103")
+    logger.info("[DIAG] PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 10 trades, hystérésis 1 cycle, amplitude limitée) - ✅ V104")
     logger.info("[DIAG] FILTRES SESSION ASIA : EUR/USD, GBP/USD, USD/CAD, AUD/USD bloqués - ✅ V103")
     logger.info("[DIAG] RISQUE PAR TRADE : 0.75% - ✅ V103")
+    logger.info("[DIAG] BLOCAGE CONTRE-TENDANCE 4H (sauf BREAKER/BISI) - ✅ V104")
+    logger.info("[DIAG] ADX MINIMUM 25 EN SESSION ACTIVE - ✅ V104")
+    logger.info("[DIAG] VETO SI MOMENTUM OPPOSÉ >0.15% - ✅ V104")
+    logger.info("[DIAG] CONFLUENCE HTF REQUISE (2/3) - ✅ V104")
+    logger.info("[DIAG] COOLDOWN 1H APRÈS UNE PERTE - ✅ V104")
+    logger.info("[DIAG] SCORE MINIMUM +2 EN SESSION ACTIVE - ✅ V104")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -5075,7 +5248,7 @@ def diagnostic_startup_v981():
 # BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V103 (SESSION PROTECTION)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V104 (CONDITIONS FAVORABLES)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R) - ✅ V102: 0.40R")
@@ -5088,16 +5261,16 @@ if __name__ == "__main__":
     logger.info("🔧 APPELS OANDA CORRIGÉS : formatage, retry, gestion d'erreur")
     logger.info("📈 SUIVI MFE/MAE ACTIVÉ pour chaque trade")
     logger.info("📈 APPRENTISSAGE DES SETUPS ACTIVÉ (seuil 10 trades)")
-    logger.info("📈 PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 15 trades, hystérésis 1 cycle, amplitude limitée) - ✅ V103")
+    logger.info("📈 PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 10 trades, hystérésis 1 cycle, amplitude limitée) - ✅ V104")
     logger.info("")
-    logger.info("🔧 CORRECTIONS V103 APPLIQUÉES :")
-    logger.info("  ✅ Blocage des trades en ASIA pour USD/CAD et AUD/USD")
-    logger.info("  ✅ Seuils EQS et ADX relevés en ASIA (EQS≥70, ADX≥20)")
-    logger.info("  ✅ Filtre ADX renforcé (rejet si ADX < 18 dans momentum)")
-    logger.info("  ✅ Risque par trade réduit à 0.75%")
-    logger.info("  ✅ EXIT_EARLY plus sélectif (4 signaux au lieu de 3)")
-    logger.info("  ✅ Adaptation accélérée (15 trades, 1 cycle d'hystérésis)")
-    logger.info("  ✅ Conservation de toutes les fonctionnalités V102")
+    logger.info("🔧 CORRECTIONS V104 APPLIQUÉES :")
+    logger.info("  ✅ Blocage contre-tendance 4H (sauf BREAKER/BISI)")
+    logger.info("  ✅ ADX minimum 25 en session active")
+    logger.info("  ✅ Veto si momentum opposé >0.15%")
+    logger.info("  ✅ Confluence HTF requise (2/3)")
+    logger.info("  ✅ Cooldown de 1h après une perte")
+    logger.info("  ✅ Score minimum +2 en session active")
+    logger.info("  ✅ Conservation de toutes les fonctionnalités V103")
     logger.info("")
 
     diagnostic_startup_v981()
@@ -5136,7 +5309,7 @@ if __name__ == "__main__":
             check_breakeven_v981()
 
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V103")
+                logger.info(f"⏰ Scan des signaux V104")
                 last_signal_scan = now
 
                 now_dt = datetime.utcnow()
