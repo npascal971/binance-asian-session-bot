@@ -11,6 +11,10 @@
 # 6. ✅ Cooldown après perte augmenté à 2h
 # 7. ✅ Suppression du filtre EUR/USD NY (18h-21h)
 # 8. ✅ Conservation de toutes les fonctionnalités V104
+# 9. ✅ FILTRE STRUCTURE H1 AJOUTÉ
+# 10. ✅ LOGS [SIGNAL], [REJECT], [REJECT_SUMMARY] AMÉLIORÉS
+# 11. ✅ ADAPTATION DES POIDS DES SETUPS
+# 12. ✅ SÉLECTION DU MEILLEUR SETUP AVEC SEUIL DE QUALITÉ RELATIVE
 # ============================================================
 
 import os
@@ -167,6 +171,8 @@ class AdaptiveState:
         # ✅ V105 : Cooldown après une perte (2 heures)
         self.last_loss_time = defaultdict(float)
         self.loss_cooldown = 7200  # 2 heures
+        # ✅ V105 : Adaptation des poids des setups
+        self.setup_performance = defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0})
 
     def get_pair_params(self, pair: str) -> dict:
         if pair not in self.pair_params:
@@ -190,6 +196,33 @@ class AdaptiveState:
     def update_setup_weight(self, pair: str, setup_type: str, new_weight: float):
         key = f"{pair}_{setup_type}"
         self.setup_weights[key] = max(0.2, min(2.0, new_weight))
+        logger.info(f"[SETUP_WEIGHT] {pair} | {setup_type} | Nouveau poids: {new_weight:.2f}")
+
+    def record_setup_performance(self, pair: str, setup_type: str, result: str, r: float):
+        """Enregistre la performance d'un setup pour adaptation"""
+        key = f"{pair}_{setup_type}"
+        perf = self.setup_performance[key]
+        if result == "WIN":
+            perf["wins"] += 1
+        elif result == "LOSS":
+            perf["losses"] += 1
+        perf["total_r"] += r
+        
+        # Adaptation du poids si assez de trades
+        total = perf["wins"] + perf["losses"]
+        if total >= 10:
+            win_rate = perf["wins"] / total if total > 0 else 0.5
+            avg_r = perf["total_r"] / total if total > 0 else 0
+            raw_performance = (win_rate * 0.6) + (avg_r * 0.4)
+            
+            # Régression vers la moyenne
+            if total < 20:
+                performance_score = 0.5 + raw_performance * 0.5
+            else:
+                performance_score = raw_performance
+            
+            new_weight = max(0.5, min(1.5, performance_score * 1.2))
+            self.update_setup_weight(pair, setup_type, new_weight)
 
     def is_pair_suspended(self, pair: str) -> bool:
         if pair not in self.suspended_pairs:
@@ -414,6 +447,8 @@ class TradingStatsV101:
         self.adaptive_state = AdaptiveState()
         self._load_last_id()
         self.last_daily_summary = time.time()
+        # ✅ V105 : Suivi des rejets
+        self.rejection_stats = defaultdict(lambda: defaultdict(int))
 
     def _load_last_id(self):
         try:
@@ -430,6 +465,29 @@ class TradingStatsV101:
         except:
             pass
 
+    def record_rejection(self, pair: str, filter_name: str, reason: str):
+        """Enregistre un rejet pour analyse statistique"""
+        self.rejection_stats[pair][filter_name] += 1
+        if DEBUG_MODE:
+            logger.debug(f"[REJECT] {pair} | {filter_name}: {reason}")
+
+    def get_rejection_summary(self, pair: str) -> dict:
+        """Retourne le résumé des rejets pour une paire"""
+        return dict(self.rejection_stats.get(pair, {}))
+
+    def log_rejection_summary(self):
+        """Log un résumé des rejets par paire"""
+        logger.info("=" * 60)
+        logger.info("📊 RÉSUMÉ DES REJETS")
+        logger.info("=" * 60)
+        for pair, filters in self.rejection_stats.items():
+            total_rejections = sum(filters.values())
+            logger.info(f"{pair:10} | Total rejets: {total_rejections}")
+            for filter_name, count in sorted(filters.items(), key=lambda x: -x[1])[:5]:
+                pct = count / total_rejections * 100 if total_rejections > 0 else 0
+                logger.info(f"  {filter_name:20} | {count:4} ({pct:.1f}%)")
+        logger.info("=" * 60)
+
     def record_signal(self, pair: str, accepted: bool, reason: str = "",
                       entry: float = 0, sl: float = 0, tp: float = 0,
                       score: int = 0, direction: str = "",
@@ -438,8 +496,11 @@ class TradingStatsV101:
         stats["total_signals"] += 1
         if accepted:
             stats["accepted"] += 1
+            logger.info(f"[SIGNAL_ACCEPTED] {pair} | {direction} | Score={score} | EQS={entry_metrics.get('eqs', 0) if entry_metrics else 0} | {reason}")
         else:
             stats["rejected"] += 1
+            self.record_rejection(pair, reason.split(":")[0] if ":" in reason else "UNKNOWN", reason)
+            logger.info(f"[SIGNAL_REJECTED] {pair} | {direction} | {reason}")
         if accepted and entry_metrics:
             trade_record = {
                 "timestamp": datetime.utcnow().isoformat(),
@@ -492,6 +553,9 @@ class TradingStatsV101:
             # Cas particulier : R positif mais P&L nul (frais exacts)
             if r > 0.02:
                 logger.warning(f"[CLOSE_AMBIGUOUS] {pair} | R={r:.2f} | P&L={profit_loss:+.2f} | Frais ont mangé le profit")
+
+        # ✅ V105 : Enregistrer la performance du setup pour adaptation
+        self.adaptive_state.record_setup_performance(pair, setup_type, result, r)
 
         setup_stats = stats["by_setup"][setup_type]
         setup_stats["wins"] += 1 if result == "WIN" else 0
@@ -677,6 +741,9 @@ class TradingStatsV101:
             if total_wins + total_losses > 0:
                 global_wr = total_wins / (total_wins + total_losses) * 100
                 logger.info(f"Win Rate global: {global_wr:.1f}% | Wins:{total_wins} | Losses:{total_losses} | BE:{total_be}")
+        
+        # ✅ V105 : Log des rejets
+        self.log_rejection_summary()
         
         logger.info("=" * 60)
 
@@ -4265,6 +4332,42 @@ def calculate_signal_confidence(
             "rejection_logs": rejection_logs
         }
 
+    # ✅ V105 : FILTRE STRUCTURE H1
+    h1_structure = score_market_structure(df_h1)
+    if direction == "BUY" and h1_structure < 0:
+        rejection_logs.append(f"Structure H1 baissière ({h1_structure}) contre BUY")
+        details["VETO"] = f"Structure H1: {h1_structure} (baissière)"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs
+        }
+    if direction == "SELL" and h1_structure > 0:
+        rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL")
+        details["VETO"] = f"Structure H1: {h1_structure} (haussière)"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs
+        }
+    details["H1_Structure"] = f"OK ({h1_structure:+d})"
+
     # ✅ V104 : Confluence HTF requise (2/3)
     htf_passed, htf_score, htf_details = check_htf_confluence(direction, df_h1, df_h4)
     if not htf_passed:
@@ -4672,6 +4775,9 @@ def advanced_main_v981():
         logger.info("✅ V105 : Risque réduit à 0.5% en ASIA")
         logger.info("✅ V105 : EQS minimum 65 en ASIA")
         logger.info("✅ V105 : Suppression filtre EUR/USD NY (18h-21h)")
+        logger.info("✅ V105 : Filtre structure H1")
+        logger.info("✅ V105 : Adaptation des poids des setups")
+        logger.info("✅ V105 : Sélection du meilleur setup avec seuil relatif")
         logger.info("✅ V103 : Blocage USD/CAD et AUD/USD en ASIA")
         logger.info("✅ V103 : Filtre ADX renforcé (seuil 18)")
         logger.info("✅ V103 : RISK 0.75% (0.5% ASIA)")
@@ -4777,7 +4883,7 @@ def advanced_main_v981():
                 metrics = confidence_result.get("metrics", {})
                 passed = confidence_result.get("passed", False)
                 
-                # ✅ Log unique et correct
+                # ✅ V105 : LOG enrichi
                 logger.info(
                     f"[SIGNAL] {pair} | "
                     f"DIR={direction} | "
@@ -4810,7 +4916,9 @@ def advanced_main_v981():
                 if len(rejected_details) > 5:
                     logger.debug(f"  ... et {len(rejected_details)-5} autres")
 
-            finalists = strict_keep_best_per_direction(scored_entries)
+            # ✅ V105 : Sélection avec seuil de qualité relative
+            finalists = strict_keep_best_per_direction(scored_entries, min_score_gap=3)
+            
             log_line = (
                 f"{pair:10} | Biais: {bias:6} | Setups: {len(setups):3} | "
                 f"Scorés: {len(scored_entries):3} | Finalistes: {len(finalists):3}"
@@ -5150,7 +5258,14 @@ def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tupl
     return False, f"trop loin distance={distance:.5f}"
 
 
-def strict_keep_best_per_direction(scored_entries: list) -> list:
+def strict_keep_best_per_direction(scored_entries: list, min_score_gap: int = 3) -> list:
+    """
+    V105 : Sélection du meilleur setup avec seuil de qualité relative.
+    Si deux directions ont des scores trop proches, on ne prend aucun trade.
+    """
+    if not scored_entries:
+        return []
+    
     best = {}
     for item in scored_entries:
         entry = item["entry"]
@@ -5173,6 +5288,28 @@ def strict_keep_best_per_direction(scored_entries: list) -> list:
         if direction not in best or key_score > best[direction]["key_score"]:
             item["key_score"] = key_score
             best[direction] = item
+    
+    # Vérifier l'écart entre les directions
+    if len(best) >= 2:
+        # Récupérer les scores des deux directions
+        scores = {}
+        for direction, item in best.items():
+            scores[direction] = item["key_score"][0]  # score principal
+        
+        # Trier par score décroissant
+        sorted_dirs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        best_score = sorted_dirs[0][1]
+        second_score = sorted_dirs[1][1] if len(sorted_dirs) > 1 else 0
+        
+        # Si l'écart est trop faible, ne pas trader
+        if best_score - second_score < min_score_gap:
+            logger.info(f"[SELECTION] Écart de score trop faible: {best_score} vs {second_score} (gap={best_score - second_score} < {min_score_gap}) - aucun trade")
+            return []
+        
+        # Log la sélection
+        logger.info(f"[SELECTION] Meilleur trade: {sorted_dirs[0][0]} (score={best_score}) contre {sorted_dirs[1][0]} (score={second_score}) - écart={best_score - second_score}")
+    
+    # Retourner les meilleurs triés
     return sorted(best.values(), key=lambda x: x["key_score"], reverse=True)
 
 
@@ -5283,6 +5420,9 @@ def diagnostic_startup_v981():
     logger.info("[DIAG] SCORE MINIMUM +3 EN ASIA - ✅ V105")
     logger.info("[DIAG] QUALITÉ REQUISE SNIPER/A+ EN ASIA - ✅ V105")
     logger.info("[DIAG] SUPPRESSION FILTRE EUR/USD NY (18h-21h) - ✅ V105")
+    logger.info("[DIAG] FILTRE STRUCTURE H1 - ✅ V105")
+    logger.info("[DIAG] ADAPTATION DES POIDS DES SETUPS - ✅ V105")
+    logger.info("[DIAG] SÉLECTION DU MEILLEUR SETUP AVEC SEUIL RELATIF - ✅ V105")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -5327,6 +5467,9 @@ if __name__ == "__main__":
     logger.info("  ✅ Risque réduit à 0.5% en ASIA")
     logger.info("  ✅ Cooldown après perte augmenté à 2h")
     logger.info("  ✅ Suppression du filtre EUR/USD NY (18h-21h)")
+    logger.info("  ✅ Filtre structure H1")
+    logger.info("  ✅ Adaptation des poids des setups")
+    logger.info("  ✅ Sélection du meilleur setup avec seuil relatif")
     logger.info("  ✅ Conservation de toutes les fonctionnalités V104")
     logger.info("")
 
