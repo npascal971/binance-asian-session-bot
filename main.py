@@ -59,8 +59,8 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
     "AUD_USD": 5.0,
     "AUD_CAD": 5.0,
     "XAU_USD": 30.0,
-    "USD_JPY": 8.0,
-    "GBP_JPY": 10.0,
+    "USD_JPY": 6.0,
+    "GBP_JPY": 6.0,
     "DEFAULT": 5.0
 }
 # ✅ V102 : Break Even baissé à 0.40R (au lieu de 0.80R)
