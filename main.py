@@ -96,7 +96,8 @@ MIN_ATR_PIPS_BY_PAIR = {
 
 # ✅ V105 : Seuils ATR réduits de 30% pour la session ASIA
 MIN_ATR_PIPS_BY_PAIR_ASIA = {
-    "EUR_USD": 3.5,      # 5.0 * 0.9
+    "EUR_USD": 3.5,
+    "AUD_JPY": 3.5,# 5.0 * 0.9
     "GBP_USD": 4.2,      # 7.0 * 0.85
     "USD_CAD": 4.5,      # 5.0 * 0.9
     "AUD_USD": 4.5,      # 5.0 * 0.9
@@ -171,7 +172,7 @@ class AdaptiveState:
         self.adaptation_counters = defaultdict(lambda: {"good": 0, "bad": 0})
         # ✅ V105 : Cooldown après une perte (2 heures)
         self.last_loss_time = defaultdict(float)
-        self.loss_cooldown = 7200  # 2 heures
+        self.loss_cooldown = 3600  # 2 heures
         # ✅ V105 : Adaptation des poids des setups
         self.setup_performance = defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0})
 
