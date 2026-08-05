@@ -88,10 +88,9 @@ MIN_ATR_PIPS_BY_PAIR = {
     "USD_CAD": 5.0,
     "AUD_USD": 5.0,
     "AUD_CAD": 6.0,
-    "XAU_USD": 40.0,
-    "USD_JPY": 8.0,
+    "XAU_USD": 40.0,    
     "GBP_JPY": 10.0,
-    "USD_JPY": 6.0,
+    "USD_JPY": 8.0,
     "DEFAULT": 6.0
 }
 
@@ -103,7 +102,7 @@ MIN_ATR_PIPS_BY_PAIR_ASIA = {
     "AUD_USD": 4.5,      # 5.0 * 0.9
     "AUD_CAD": 4.5,      # 6.0 * 0.75
     "XAU_USD": 28.0,     # 40.0 * 0.7
-    "USD_JPY": 6.0,      # 8.0 * 0.75
+          # 8.0 * 0.75
     "GBP_JPY": 8.0,      # 10.0 * 0.8
     "USD_JPY": 6.0,
     "DEFAULT": 4.5,      # 6.0 * 0.75
@@ -115,7 +114,7 @@ MIN_ATR_PIPS_BY_PAIR_ASIA = {
 # Fenêtre d'apprentissage
 LEARNING_WINDOW = int(os.getenv("LEARNING_WINDOW", "50"))  # 50 derniers trades
 # ✅ V104 : Adaptation encore plus rapide (10 trades au lieu de 15)
-ADAPTATION_MIN_TRADES = int(os.getenv("ADAPTATION_MIN_TRADES", "10"))
+ADAPTATION_MIN_TRADES = int(os.getenv("ADAPTATION_MIN_TRADES", "5"))
 ADAPTATION_INTERVAL = int(os.getenv("ADAPTATION_INTERVAL", "300"))  # 5 minutes
 
 # Seuils d'adaptation (V102 : combinaison de critères)
@@ -141,7 +140,7 @@ PF_FOR_SUSPEND = 0.7
 
 # Plages d'adaptation (inchangées)
 ADX_MIN_RANGE = (15, 35)
-EQS_MIN_RANGE = (65, 85)
+EQS_MIN_RANGE = (5, 85)
 BE_TRIGGER_R_RANGE = (0.5, 1.2)
 TRAILING_ATR_RANGE = (1.2, 2.8)
 
@@ -212,7 +211,7 @@ class AdaptiveState:
         
         # Adaptation du poids si assez de trades
         total = perf["wins"] + perf["losses"]
-        if total >= 10:
+        if total >= 5:
             win_rate = perf["wins"] / total if total > 0 else 0.5
             avg_r = perf["total_r"] / total if total > 0 else 0
             raw_performance = (win_rate * 0.6) + (avg_r * 0.4)
