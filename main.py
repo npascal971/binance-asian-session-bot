@@ -4149,7 +4149,6 @@ def calculate_signal_confidence(
     entry_type = str(entry.get("type", "FVG_RETEST")).upper()
 
     if entry_level is None or direction not in ["BUY", "SELL"]:
-        # Retour d'erreur avec metrics vide (on n'a pas encore de données)
         return {
             "passed": False,
             "total_score": 0,
@@ -4190,7 +4189,7 @@ def calculate_signal_confidence(
     h4_trend = score_ema_trend(df_h4)
 
     metrics = {
-        "eqs": 0,  # sera mis à jour après EQS
+        "eqs": 0,
         "setup_type": entry_type,
         "atr": atr_pips,
         "adx": adx,
@@ -4218,7 +4217,7 @@ def calculate_signal_confidence(
     eqs_passed = eqs_score >= eqs_min_effective
     eqs_components = eqs_result.get("components", {})
     details["EQS_Details"] = eqs_result["logs"]
-    metrics["eqs"] = eqs_score   # mise à jour
+    metrics["eqs"] = eqs_score
 
     if not eqs_passed:
         eqs_reject_details = []
@@ -4240,7 +4239,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
 
     details["EQS"] = f"{eqs_score}/100"
@@ -4262,7 +4261,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
     details["Volatility"] = vol_msg
 
@@ -4283,7 +4282,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
     if "partiellement" in struct_msg:
         score_components["Structure"] += 1
@@ -4309,7 +4308,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
     score_components["Pullback"] += 2
     details["Pullback_V98.1"] = f"+2 ({pullback_msg})"
@@ -4348,7 +4347,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
     if direction == "SELL" and momentum > 0.15:
         rejection_logs.append(f"Momentum haussier ({momentum:.2f}%) contre SELL")
@@ -4365,7 +4364,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
 
     if momentum_passed:
@@ -4380,7 +4379,7 @@ def calculate_signal_confidence(
             details["Momentum"] = f"-2 (momentum faible, toléré)"
     momentum_filter_info = {"passed": momentum_passed, "message": momentum_msg, "penalties": momentum_penalties}
 
-    # --- 9. ADX (maintenant avec ADX déjà calculé) ---
+    # --- 9. ADX ---
     if adx < adx_min_effective:
         rejection_logs.append(f"ADX trop faible ({adx:.1f} < {adx_min_effective:.1f})")
         details["VETO"] = f"ADX insuffisant: {adx:.1f} < {adx_min_effective:.1f}"
@@ -4396,7 +4395,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
 
     # --- 10. Filtre structure H1 ---
@@ -4416,7 +4415,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
     if direction == "SELL" and h1_structure > 0:
         rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL")
@@ -4433,7 +4432,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
     details["H1_Structure"] = f"OK ({h1_structure:+d})"
 
@@ -4454,7 +4453,7 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics   # <-- AJOUTÉ
+            "metrics": metrics
         }
     details["HTF_Confluence"] = f"{htf_score} ({' | '.join(htf_details)})"
 
@@ -4482,7 +4481,7 @@ def calculate_signal_confidence(
                 "eqs_details": eqs_result,
                 "eqs_components": eqs_components,
                 "rejection_logs": rejection_logs,
-                "metrics": metrics   # <-- AJOUTÉ
+                "metrics": metrics
             }
         else:
             score_components["ICT"] -= 2
@@ -4521,12 +4520,12 @@ def calculate_signal_confidence(
                 "eqs_details": eqs_result,
                 "eqs_components": eqs_components,
                 "rejection_logs": rejection_logs,
-                "metrics": metrics   # <-- AJOUTÉ
+                "metrics": metrics
             }
     except Exception as exc:
         details["Distance_Error"] = str(exc)
 
-    # --- 14. Scores structurels (EMA, structure H1, alignement) ---
+    # --- 14. Scores structurels ---
     try:
         ema_score = max(-2, min(2, _directional_score(score_ema_trend(df_h1), direction)))
         structure_score = _directional_score(score_market_structure(df_h1), direction)
@@ -4539,7 +4538,7 @@ def calculate_signal_confidence(
     except Exception as exc:
         details["Trend_H1_Error"] = str(exc)
 
-    # --- 15. Type de setup (ICT / Liquidity / etc.) ---
+    # --- 15. Type de setup ---
     if "LIQUIDITY" in entry_type:
         score_components["ICT"] += 2
         details["Setup_Type"] = "+2 Liquidity"
@@ -4578,6 +4577,7 @@ def calculate_signal_confidence(
         else:
             details["RR"] = f"0 (faible {rr_ratio:.2f})"
     except Exception:
+        rr_ratio = 0.0
         pass
 
     # --- 18. D1 Trend ---
@@ -4664,7 +4664,7 @@ def calculate_signal_confidence(
         f"ATR={atr_pips:.1f}pips | ADX={adx:.1f}/{adx_min_effective:.1f} | "
         f"RSI={rsi:.1f} | MOM={momentum:+.2f}% | "
         f"H={hour:02d}h | Sess={session} | Spread={spread:.2f} | "
-        f"RR={rr_ratio:.2f} | PoidsSetup={setup_weight:.2f}"
+        f"RR={rr_ratio:.2f} | PoidsSetup={setup_weight:.2f}"  # ✅ CORRIGÉ : rr_ratio au lieu de rr
     )
     if not passed and rejection_logs:
         decision_line += f" | REJECT={rejection_logs[0][:80]}"
@@ -4689,7 +4689,7 @@ def calculate_signal_confidence(
         "eqs_details": eqs_result,
         "eqs_components": eqs_components,
         "rejection_logs": rejection_logs,
-        "metrics": metrics   # <-- TOUJOURS PRÉSENT
+        "metrics": metrics
     }
 # =============================
 # DÉTECTION BIAS-FIRST - inchangé
