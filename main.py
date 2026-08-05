@@ -3002,7 +3002,7 @@ def detect_swing_points_advanced(df: pd.DataFrame, lookback: int = SWING_LOOKBAC
 def get_min_gap_for_pair(pair: str) -> float:
     pair = pair.upper()
     if pair == "XAU_USD":
-        return 0.02
+        return 0.015
     elif "JPY" in pair:
         return 0.03
     elif pair == "GBP_USD":
@@ -5209,7 +5209,7 @@ STRICT_ALLOWED_ENTRY_TYPES = {
     "NESTED_FVG", "WICK_REJECTION", "LIQUIDITY_DRAW",
 }
 STRICT_MAX_DISTANCE_PIPS = {
-    "XAU_USD": 35.0, "USD_JPY": 18.0, "GBP_JPY": 22.0,
+    "XAU_USD": 60.0, "USD_JPY": 18.0, "GBP_JPY": 22.0,
     "EUR_USD": 15.0, "GBP_USD": 18.0, "AUD_USD": 15.0,
     "USD_CAD": 15.0, "AUD_CAD": 15.0, "AUD_JPY": 18.0,
     "NAS100_USD": 50.0, "DEFAULT": 15.0,
