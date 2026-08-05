@@ -91,6 +91,7 @@ MIN_ATR_PIPS_BY_PAIR = {
     "XAU_USD": 40.0,
     "USD_JPY": 8.0,
     "GBP_JPY": 10.0,
+    "USD_JPY": 6.0,
     "DEFAULT": 6.0
 }
 
@@ -104,6 +105,7 @@ MIN_ATR_PIPS_BY_PAIR_ASIA = {
     "XAU_USD": 28.0,     # 40.0 * 0.7
     "USD_JPY": 6.0,      # 8.0 * 0.75
     "GBP_JPY": 8.0,      # 10.0 * 0.8
+    "USD_JPY": 6.0,
     "DEFAULT": 4.5,      # 6.0 * 0.75
 }
 
@@ -1780,7 +1782,7 @@ last_reset_time = datetime.utcnow()
 # =============================
 load_dotenv()
 
-PAIR_LIST = ["GBP_USD", "USD_CAD", "AUD_USD", "XAU_USD", "EUR_USD"]
+PAIR_LIST = ["GBP_USD", "USD_CAD", "AUD_USD", "XAU_USD", "EUR_USD", "USD_JPY", "AUD_JPY"]
 
 GRANULARITY_D1 = "D"
 GRANULARITY_H4 = "H4"
