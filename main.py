@@ -69,7 +69,7 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
     "DEFAULT": 5.0
 }
 # ✅ V102 : Break Even baissé à 0.40R (au lieu de 0.80R)
-BASE_BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.40"))
+BASE_BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.55"))
 # ✅ V102 : Break Even Early baissé à 0.25R (au lieu de 0.50R)
 BASE_BREAKEVEN_EARLY_R = float(os.getenv("BREAKEVEN_EARLY_R", "0.25"))
 # ✅ V102 : Trailing Stop baissé à 1.0R (au lieu de 1.8R)
@@ -97,8 +97,8 @@ MIN_ATR_PIPS_BY_PAIR = {
 
 # ✅ V105 : Seuils ATR réduits de 30% pour la session ASIA
 MIN_ATR_PIPS_BY_PAIR_ASIA = {
-    "EUR_USD": 4.5,      # 5.0 * 0.9
-    "GBP_USD": 5.0,      # 7.0 * 0.85
+    "EUR_USD": 3.5,      # 5.0 * 0.9
+    "GBP_USD": 4.2,      # 7.0 * 0.85
     "USD_CAD": 4.5,      # 5.0 * 0.9
     "AUD_USD": 4.5,      # 5.0 * 0.9
     "AUD_CAD": 4.5,      # 6.0 * 0.75
