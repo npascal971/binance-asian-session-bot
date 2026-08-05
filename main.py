@@ -4664,7 +4664,7 @@ def calculate_signal_confidence(
         f"ATR={atr_pips:.1f}pips | ADX={adx:.1f}/{adx_min_effective:.1f} | "
         f"RSI={rsi:.1f} | MOM={momentum:+.2f}% | "
         f"H={hour:02d}h | Sess={session} | Spread={spread:.2f} | "
-        f"RR={rr:.2f} | PoidsSetup={setup_weight:.2f}"
+        f"RR={rr_ratio:.2f} | PoidsSetup={setup_weight:.2f}"
     )
     if not passed and rejection_logs:
         decision_line += f" | REJECT={rejection_logs[0][:80]}"
