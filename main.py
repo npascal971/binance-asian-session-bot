@@ -4315,7 +4315,7 @@ def calculate_signal_confidence(
 
     # ✅ V104 : ADX minimum renforcé (veto si ADX < 20)
     adx = calculate_adx(df_h1)
-    if adx < 20:
+    if adx < adx_min_effective:
         rejection_logs.append(f"ADX trop faible ({adx:.1f} < 20)")
         details["VETO"] = f"ADX insuffisant: {adx:.1f} < 20"
         return {
