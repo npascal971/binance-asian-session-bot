@@ -98,7 +98,7 @@ MIN_ATR_PIPS_BY_PAIR = {
 # ✅ V105 : Seuils ATR réduits de 30% pour la session ASIA
 MIN_ATR_PIPS_BY_PAIR_ASIA = {
     "EUR_USD": 4.5,      # 5.0 * 0.9
-    "GBP_USD": 6.0,      # 7.0 * 0.85
+    "GBP_USD": 5.0,      # 7.0 * 0.85
     "USD_CAD": 4.5,      # 5.0 * 0.9
     "AUD_USD": 4.5,      # 5.0 * 0.9
     "AUD_CAD": 4.5,      # 6.0 * 0.75
@@ -4075,6 +4075,19 @@ def check_htf_confluence(direction: str, df_h1: pd.DataFrame, df_h4: pd.DataFram
     passed = score >= 2
     return passed, f"{score}/3", details
 
+def get_effective_atr_threshold(pair: str) -> float:
+    hour = datetime.utcnow().hour
+    is_asia = 21 <= hour or hour < 7
+    is_london = 7 <= hour < 16
+    is_ny = 12 <= hour < 21
+    
+    base_min_atr = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
+    if is_asia:
+        return MIN_ATR_PIPS_BY_PAIR_ASIA.get(pair, base_min_atr * 0.75)
+    elif is_london or is_ny:
+        return base_min_atr
+    else:
+        return base_min_atr * 0.85
 
 def calculate_signal_confidence(
     pair: str,
@@ -4102,31 +4115,31 @@ def calculate_signal_confidence(
     details: dict = {}
     rejection_logs = []
 
-    # V101 : Seuil de confiance adaptatif avec pondération du setup
+    # --- 1. Récupération des paramètres de base ---
     base_min_required = BASE_MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, BASE_MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
     setup_type = str(entry.get("type", "FVG_RETEST")).upper()
     setup_weight = stats.adaptive_state.get_setup_weight(pair, setup_type)
     min_required = max(5, int(base_min_required / max(0.5, setup_weight)))
 
-    # ✅ V105 : Seuils spécifiques à la session
     hour = datetime.utcnow().hour
     is_asia = 21 <= hour or hour < 7
     is_london = 7 <= hour < 16
     is_ny = 12 <= hour < 21
     is_active = is_london or is_ny
 
-    # Paramètres adaptatifs
     pair_params = stats.adaptive_state.get_pair_params(pair)
 
-    # ✅ V105 : Seuils EQS et ADX adaptés
     if is_asia:
-        eqs_min_effective = max(pair_params["eqs_min"], 65)      # 65 au lieu de 55
-        adx_min_effective = max(pair_params["adx_min"], 20)      # 20
-        min_required += 3                                        # +3 en ASIA
+        eqs_min_effective = max(pair_params["eqs_min"], 65)
+        if pair in ["USD_JPY", "AUD_JPY"]:
+            adx_min_effective = max(pair_params["adx_min"], 18)
+        else:
+            adx_min_effective = max(pair_params["adx_min"], 20)
+        min_required += 3
     elif is_active:
         eqs_min_effective = pair_params["eqs_min"]
-        adx_min_effective = max(pair_params["adx_min"], 25)      # 25 en session active
-        min_required += 2                                        # +2 en session active
+        adx_min_effective = max(pair_params["adx_min"], 25)
+        min_required += 2
     else:
         eqs_min_effective = pair_params["eqs_min"]
         adx_min_effective = pair_params["adx_min"]
@@ -4136,7 +4149,14 @@ def calculate_signal_confidence(
     entry_type = str(entry.get("type", "FVG_RETEST")).upper()
 
     if entry_level is None or direction not in ["BUY", "SELL"]:
-        return {"passed": False, "total_score": 0, "final_confidence": "LOW", "details": {"VETO": "Entrée/direction invalide"}}
+        # Retour d'erreur avec metrics vide (on n'a pas encore de données)
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": {"VETO": "Entrée/direction invalide"},
+            "metrics": {}
+        }
 
     entry_level = float(entry_level)
     atr_value = calculate_atr(df_m15)
@@ -4147,417 +4167,7 @@ def calculate_signal_confidence(
         pair=pair, entry_type=entry_type, fvg_data=fvg_data,
     )
 
-    eqs_result = calculate_entry_quality_score(
-        pair=pair,
-        direction=direction,
-        df_m15=df_m15,
-        entry_level=entry_level,
-        current_price=current_price,
-        atr=atr_value
-    )
-
-    eqs_score = eqs_result["total"]
-    eqs_passed = eqs_score >= eqs_min_effective
-    eqs_components = eqs_result.get("components", {})
-    details["EQS_Details"] = eqs_result["logs"]
-
-    if not eqs_passed:
-        # Construire un message de rejet détaillé avec les composants EQS
-        eqs_reject_details = []
-        for comp_name, comp_data in eqs_components.items():
-            comp_label = comp_name.replace("_", " ").title()
-            eqs_reject_details.append(f"{comp_label}: {comp_data['score']:+d}/{comp_data['max']}")
-        eqs_reject_summary = " | ".join(eqs_reject_details) if eqs_reject_details else "EQS insuffisant"
-        rejection_logs.append(f"EQS = {eqs_score}/100 < seuil {eqs_min_effective:.0f} | {eqs_reject_summary}")
-        details["VETO"] = f"EQS insuffisant: {eqs_score}/100 < {eqs_min_effective:.0f}"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-
-    details["EQS"] = f"{eqs_score}/100"
-
-    vol_passed, vol_msg = filter_min_volatility(df_m15, pair)
-    if not vol_passed:
-        rejection_logs.append(vol_msg)
-        details["VETO"] = f"VOLATILITÉ: {vol_msg}"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-    details["Volatility"] = vol_msg
-
-    struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
-    if not struct_passed:
-        rejection_logs.append(struct_msg)
-        details["VETO"] = f"STRUCTURE: {struct_msg}"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-    if "partiellement" in struct_msg:
-        score_components["Structure"] += 1
-        details["Structure_V98.1"] = f"+1 ({struct_msg})"
-    else:
-        score_components["Structure"] += 2
-        details["Structure_V98.1"] = f"+2 ({struct_msg})"
-
-    pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
-    if not pullback_passed:
-        rejection_logs.append(pullback_msg)
-        details["VETO"] = f"PULLBACK: {pullback_msg}"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-    score_components["Pullback"] += 2
-    details["Pullback_V98.1"] = f"+2 ({pullback_msg})"
-
-    close_passed, close_msg = filter_close_confirmation(df_m15, direction)
-    if close_passed:
-        score_components["Secondary"] += 1
-        details["Close_Confirm"] = f"+1 ({close_msg})"
-    else:
-        details["Close_Confirm"] = close_msg
-
-    momentum_passed, momentum_msg, momentum_penalties, penalty_total = filter_momentum_exhaustion(
-        pair=pair,
-        direction=direction,
-        df_m15=df_m15,
-        df_h1=df_h1,
-        entry_level=entry_level,
-        current_price=current_price,
-        entry_type=entry_type
-    )
-
-    # ✅ V104 : Veto si momentum opposé à la direction
-    momentum = calculate_momentum(df_m15, period=5)
-    if direction == "BUY" and momentum < -0.15:
-        rejection_logs.append(f"Momentum baissier ({momentum:.2f}%) contre BUY")
-        details["VETO"] = f"Momentum opposé: {momentum:.2f}%"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-    if direction == "SELL" and momentum > 0.15:
-        rejection_logs.append(f"Momentum haussier ({momentum:.2f}%) contre SELL")
-        details["VETO"] = f"Momentum opposé: {momentum:.2f}%"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-
-    # V101 : Adaptation du traitement du momentum selon l'état adaptatif
-    if momentum_passed:
-        score_components["Momentum"] += penalty_total
-        details["Momentum"] = f"{penalty_total:+d} ({momentum_msg})"
-    else:
-        if pair_params.get("adx_min", 23) > 28:
-            score_components["Momentum"] -= 5
-            details["Momentum"] = f"-5 (momentum faible, marché exigeant)"
-        else:
-            score_components["Momentum"] -= 2
-            details["Momentum"] = f"-2 (momentum faible, toléré)"
-
-    momentum_filter_info = {"passed": momentum_passed, "message": momentum_msg, "penalties": momentum_penalties}
-
-    # ✅ V104 : ADX minimum renforcé (veto si ADX < 20)
-    adx = calculate_adx(df_h1)
-    if adx < adx_min_effective:
-        rejection_logs.append(f"ADX trop faible ({adx:.1f} < 20)")
-        details["VETO"] = f"ADX insuffisant: {adx:.1f} < 20"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-
-    # ✅ V105 : FILTRE STRUCTURE H1
-    h1_structure = score_market_structure(df_h1)
-    if direction == "BUY" and h1_structure < 0:
-        rejection_logs.append(f"Structure H1 baissière ({h1_structure}) contre BUY")
-        details["VETO"] = f"Structure H1: {h1_structure} (baissière)"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-    if direction == "SELL" and h1_structure > 0:
-        rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL")
-        details["VETO"] = f"Structure H1: {h1_structure} (haussière)"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-    details["H1_Structure"] = f"OK ({h1_structure:+d})"
-
-    # ✅ V104 : Confluence HTF requise (2/3)
-    htf_passed, htf_score, htf_details = check_htf_confluence(direction, df_h1, df_h4)
-    if not htf_passed:
-        rejection_logs.append(f"Confluence HTF insuffisante ({htf_score})")
-        details["VETO"] = f"Confluence HTF: {htf_score} (requis 2/3)"
-        return {
-            "passed": False,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs
-        }
-    details["HTF_Confluence"] = f"{htf_score} ({' | '.join(htf_details)})"
-
-    if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
-        score_components["ICT"] += 3
-        details["Trend_H4"] = "+3 (Aligné)"
-    elif bias == "NEUTRAL":
-        score_components["ICT"] += 1
-        details["Trend_H4"] = "+1 (Neutre)"
-    else:
-        # ✅ V104 : Blocage contre-tendance sauf pour BREAKER et BISI
-        allowed_counter = ["BREAKER", "BISI"]
-        if setup_type not in allowed_counter:
-            rejection_logs.append(f"Contre-tendance 4H ({bias} vs {direction})")
-            details["VETO"] = f"Contre-tendance: bias 4H={bias}, direction={direction}"
-            return {
-                "passed": False,
-                "total_score": 0,
-                "final_confidence": "LOW",
-                "details": details,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "atr_value": atr_value,
-                "eqs_score": eqs_score,
-                "eqs_details": eqs_result,
-                "eqs_components": eqs_components,
-                "rejection_logs": rejection_logs
-            }
-        else:
-            score_components["ICT"] -= 2
-            details["Trend_H4"] = f"-2 (H4 opposé, autorisé pour {setup_type})"
-
-    try:
-        distance = abs(float(current_price) - entry_level)
-        pip = get_pip_value_for_pair(pair)
-        entry_type_max_pips = {
-            "FVG_RETEST_PERFECT": 15.0, "FVG_RETEST": 18.0,
-            "NESTED_FVG": 18.0, "WICK_REJECTION": 15.0,
-            "BISI": 18.0, "BREAKER": 15.0,
-        }
-        max_pips = entry_type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]))
-        max_distance_price = max(float(atr_value) * 1.20, pip * max_pips)
-        if distance <= max_distance_price * 0.50:
-            score_components["Risk_RR_Distance"] += 2
-            details["Distance"] = f"+2 proche ({distance:.5f})"
-        elif distance <= max_distance_price:
-            details["Distance"] = f"0 acceptable ({distance:.5f})"
-        elif distance <= max_distance_price * 1.50:
-            score_components["Risk_RR_Distance"] -= 2
-            details["Distance"] = f"-2 un peu loin ({distance:.5f})"
-        else:
-            rejection_logs.append(f"Distance trop grande: {distance:.5f}")
-            return {"passed": False, "total_score": 0, "final_confidence": "LOW",
-                    "details": {"VETO": f"Prix vraiment trop loin ({distance:.5f})"},
-                    "stop_loss": stop_loss, "take_profit": take_profit, "atr_value": atr_value,
-                    "eqs_score": eqs_score, "eqs_details": eqs_result,
-                    "eqs_components": eqs_components,
-                    "rejection_logs": rejection_logs}
-    except Exception as exc:
-        details["Distance_Error"] = str(exc)
-
-    try:
-        ema_score = max(-2, min(2, _directional_score(score_ema_trend(df_h1), direction)))
-        structure_score = _directional_score(score_market_structure(df_h1), direction)
-        htf_score = score_higher_timeframe_alignment(direction, df_h1, df_h4)
-        score_components["Structure_H1"] += ema_score + structure_score
-        score_components["HTF_Alignment"] += htf_score
-        details["EMA"] = f"{ema_score:+d} (EMA50 H1)"
-        details["Structure_H1"] = f"{structure_score:+d} (HH/HL/LH/LL)"
-        details["HTF_Alignment"] = f"{htf_score:+d} (alignement H1/H4)"
-    except Exception as exc:
-        details["Trend_H1_Error"] = str(exc)
-
-    if "LIQUIDITY" in entry_type:
-        score_components["ICT"] += 2
-        details["Setup_Type"] = "+2 Liquidity"
-    elif any(x in entry_type for x in ["FVG", "BISI", "NESTED"]):
-        score_components["ICT"] += 3 if "BISI" in entry_type else 2
-        details["Setup_Type"] = f"+{3 if 'BISI' in entry_type else 2} ICT"
-    elif "BREAKER" in entry_type:
-        score_components["ICT"] += 2
-        details["Setup_Type"] = "+2 Breaker"
-    elif "WICK" in entry_type:
-        score_components["ICT"] += 2
-        details["Setup_Type"] = "+2 Wick rejection"
-    else:
-        score_components["ICT"] += 1
-        details["Setup_Type"] = f"+1 ({entry_type})"
-
-    # V101 : Bonus/Malus selon le poids du setup
-    if setup_weight > 1.2:
-        score_components["Secondary"] += 2
-        details["Setup_Weight"] = f"+2 (poids setup {setup_weight:.2f})"
-    elif setup_weight < 0.8:
-        score_components["Secondary"] -= 1
-        details["Setup_Weight"] = f"-1 (poids setup {setup_weight:.2f})"
-
-    try:
-        dist_sl = abs(entry_level - stop_loss)
-        dist_tp = abs(take_profit - entry_level)
-        rr_ratio = dist_tp / dist_sl if dist_sl > 0 else 0
-        if rr_ratio >= 2.5:
-            score_components["Risk_RR_Distance"] += 2
-            details["RR"] = f"+2 (excellent {rr_ratio:.2f})"
-        elif rr_ratio >= 2.0:
-            score_components["Risk_RR_Distance"] += 1
-            details["RR"] = f"+1 (correct {rr_ratio:.2f})"
-        else:
-            details["RR"] = f"0 (faible {rr_ratio:.2f})"
-    except Exception:
-        pass
-
-    try:
-        d1_bonus, d1_label = get_d1_trend_bonus(df_d1, direction)
-        if d1_bonus > 0:
-            score_components["Secondary"] += 2
-            details["D1_Trend"] = "+2 (D1 aligné)"
-        else:
-            details["D1_Trend"] = d1_label
-    except Exception:
-        pass
-
-    try:
-        macd_bonus, macd_label = get_macd_h1_bonus(df_h1, direction)
-        if macd_bonus > 0:
-            score_components["Secondary"] += 1
-            details["MACD_H1"] = "+1 (confirme)"
-        else:
-            details["MACD_H1"] = macd_label
-    except Exception:
-        pass
-
-    try:
-        session_bonus, session_label = get_session_quality_bonus(pair)
-        if session_bonus > 0:
-            score_components["Secondary"] += 1
-            details["Session"] = "+1 (bonne session)"
-        else:
-            details["Session"] = session_label
-    except Exception:
-        pass
-
-    score = compute_final_score(score_components)
-    passed = score >= min_required
-
-    if not passed:
-        rejection_logs.append(f"Score = {score} < seuil {min_required}")
-
-    final_confidence = "HIGH" if score >= min_required + 3 else "MEDIUM" if passed else "LOW"
-
-    confluences = {
-        "d1_aligned": details.get("D1_Trend", "").startswith("+"),
-        "rsi_divergence": False,
-        "session_active": details.get("Session", "").startswith("+"),
-        "macd_confirmed": details.get("MACD_H1", "").startswith("+"),
-        "bos_confirmed": "BOS" in str(details),
-        "structure_ok": score_components.get("Structure", 0) >= 1,
-        "pullback_ok": score_components.get("Pullback", 0) >= 2,
-    }
-
-    win_rate = estimate_win_rate(score, eqs_score, confluences)
-    quality_label = get_signal_quality_label(score, eqs_score)
-
-    # ✅ V105 : Qualité requise SNIPER/A+ en ASIA
-    if is_asia and quality_label not in ["SNIPER", "A+"]:
-        passed = False
-        rejection_logs.append(f"Qualité {quality_label} insuffisante en ASIA (requis SNIPER/A+)")
-
-    log_score_detail(score_components, score, "PASSED" if passed else "REJECTED")
-
-    # Métriques enrichies
+    # --- 2. Construire les métriques le plus tôt possible ---
     atr_pips = price_to_pips(atr_value, pair)
     adx = calculate_adx(df_h1)
     rsi = get_last_rsi(df_m15["close"])
@@ -4579,49 +4189,8 @@ def calculate_signal_confidence(
     h1_trend = score_ema_trend(df_h1)
     h4_trend = score_ema_trend(df_h4)
 
-    rr = 0
-    try:
-        dist_sl = abs(entry_level - stop_loss)
-        dist_tp = abs(take_profit - entry_level)
-        rr = dist_tp / dist_sl if dist_sl > 0 else 0
-    except:
-        pass
-
-    # Construction du détail EQS pour le log
-    eqs_detail_str = ""
-    if eqs_components:
-        comp_parts = []
-        for comp_name, comp_data in eqs_components.items():
-            comp_label = comp_name.replace("_", " ").title()
-            comp_parts.append(f"{comp_label}:{comp_data['score']:+d}")
-        eqs_detail_str = " | EQS=" + " ".join(comp_parts)
-
-    # LOG DE DÉCISION STRUCTURÉ - LE PLUS IMPORTANT
-    if passed:
-        status = "✅ ACCEPT"
-    else:
-        status = "❌ REJECT"
-        if rejection_logs:
-            status += f" | raison={rejection_logs[0][:80]}"
-    
-    decision_line = (
-        f"[DECISION] {pair} | {direction} | {entry_type} | "
-        f"{status} | "
-        f"Score={score}/{min_required} | EQS={eqs_score}/{eqs_min_effective:.0f}{eqs_detail_str} | "
-        f"ATR={atr_pips:.1f}pips | ADX={adx:.1f}/{adx_min_effective:.1f} | "
-        f"RSI={rsi:.1f} | MOM={momentum:+.2f}% | "
-        f"H={hour:02d}h | Sess={session} | Spread={spread:.2f} | "
-        f"RR={rr:.2f} | PoidsSetup={setup_weight:.2f}"
-    )
-    
-    # Ajouter le détail du rejet si nécessaire
-    if not passed and rejection_logs:
-        decision_line += f" | REJECT={rejection_logs[0][:80]}"
-
-    logger.info(decision_line)
-
     metrics = {
-        "eqs": eqs_score,
+        "eqs": 0,  # sera mis à jour après EQS
         "setup_type": entry_type,
         "atr": atr_pips,
         "adx": adx,
@@ -4636,6 +4205,472 @@ def calculate_signal_confidence(
         "h4_trend": h4_trend
     }
 
+    # --- 3. EQS ---
+    eqs_result = calculate_entry_quality_score(
+        pair=pair,
+        direction=direction,
+        df_m15=df_m15,
+        entry_level=entry_level,
+        current_price=current_price,
+        atr=atr_value
+    )
+    eqs_score = eqs_result["total"]
+    eqs_passed = eqs_score >= eqs_min_effective
+    eqs_components = eqs_result.get("components", {})
+    details["EQS_Details"] = eqs_result["logs"]
+    metrics["eqs"] = eqs_score   # mise à jour
+
+    if not eqs_passed:
+        eqs_reject_details = []
+        for comp_name, comp_data in eqs_components.items():
+            comp_label = comp_name.replace("_", " ").title()
+            eqs_reject_details.append(f"{comp_label}: {comp_data['score']:+d}/{comp_data['max']}")
+        eqs_reject_summary = " | ".join(eqs_reject_details) if eqs_reject_details else "EQS insuffisant"
+        rejection_logs.append(f"EQS = {eqs_score}/100 < seuil {eqs_min_effective:.0f} | {eqs_reject_summary}")
+        details["VETO"] = f"EQS insuffisant: {eqs_score}/100 < {eqs_min_effective:.0f}"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+
+    details["EQS"] = f"{eqs_score}/100"
+
+    # --- 4. Volatilité (ATR) ---
+    vol_passed, vol_msg = filter_min_volatility(df_m15, pair)
+    if not vol_passed:
+        rejection_logs.append(vol_msg)
+        details["VETO"] = f"VOLATILITÉ: {vol_msg}"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+    details["Volatility"] = vol_msg
+
+    # --- 5. Structure ---
+    struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
+    if not struct_passed:
+        rejection_logs.append(struct_msg)
+        details["VETO"] = f"STRUCTURE: {struct_msg}"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+    if "partiellement" in struct_msg:
+        score_components["Structure"] += 1
+        details["Structure_V98.1"] = f"+1 ({struct_msg})"
+    else:
+        score_components["Structure"] += 2
+        details["Structure_V98.1"] = f"+2 ({struct_msg})"
+
+    # --- 6. Pullback ---
+    pullback_passed, pullback_msg = filter_pullback(df_m15, direction, entry_level, current_price, pair)
+    if not pullback_passed:
+        rejection_logs.append(pullback_msg)
+        details["VETO"] = f"PULLBACK: {pullback_msg}"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+    score_components["Pullback"] += 2
+    details["Pullback_V98.1"] = f"+2 ({pullback_msg})"
+
+    # --- 7. Close confirmation ---
+    close_passed, close_msg = filter_close_confirmation(df_m15, direction)
+    if close_passed:
+        score_components["Secondary"] += 1
+        details["Close_Confirm"] = f"+1 ({close_msg})"
+    else:
+        details["Close_Confirm"] = close_msg
+
+    # --- 8. Momentum ---
+    momentum_passed, momentum_msg, momentum_penalties, penalty_total = filter_momentum_exhaustion(
+        pair=pair,
+        direction=direction,
+        df_m15=df_m15,
+        df_h1=df_h1,
+        entry_level=entry_level,
+        current_price=current_price,
+        entry_type=entry_type
+    )
+
+    if direction == "BUY" and momentum < -0.15:
+        rejection_logs.append(f"Momentum baissier ({momentum:.2f}%) contre BUY")
+        details["VETO"] = f"Momentum opposé: {momentum:.2f}%"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+    if direction == "SELL" and momentum > 0.15:
+        rejection_logs.append(f"Momentum haussier ({momentum:.2f}%) contre SELL")
+        details["VETO"] = f"Momentum opposé: {momentum:.2f}%"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+
+    if momentum_passed:
+        score_components["Momentum"] += penalty_total
+        details["Momentum"] = f"{penalty_total:+d} ({momentum_msg})"
+    else:
+        if pair_params.get("adx_min", 23) > 28:
+            score_components["Momentum"] -= 5
+            details["Momentum"] = f"-5 (momentum faible, marché exigeant)"
+        else:
+            score_components["Momentum"] -= 2
+            details["Momentum"] = f"-2 (momentum faible, toléré)"
+    momentum_filter_info = {"passed": momentum_passed, "message": momentum_msg, "penalties": momentum_penalties}
+
+    # --- 9. ADX (maintenant avec ADX déjà calculé) ---
+    if adx < adx_min_effective:
+        rejection_logs.append(f"ADX trop faible ({adx:.1f} < {adx_min_effective:.1f})")
+        details["VETO"] = f"ADX insuffisant: {adx:.1f} < {adx_min_effective:.1f}"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+
+    # --- 10. Filtre structure H1 ---
+    h1_structure = score_market_structure(df_h1)
+    if direction == "BUY" and h1_structure < 0:
+        rejection_logs.append(f"Structure H1 baissière ({h1_structure}) contre BUY")
+        details["VETO"] = f"Structure H1: {h1_structure} (baissière)"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+    if direction == "SELL" and h1_structure > 0:
+        rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL")
+        details["VETO"] = f"Structure H1: {h1_structure} (haussière)"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+    details["H1_Structure"] = f"OK ({h1_structure:+d})"
+
+    # --- 11. Confluence HTF ---
+    htf_passed, htf_score, htf_details = check_htf_confluence(direction, df_h1, df_h4)
+    if not htf_passed:
+        rejection_logs.append(f"Confluence HTF insuffisante ({htf_score})")
+        details["VETO"] = f"Confluence HTF: {htf_score} (requis 2/3)"
+        return {
+            "passed": False,
+            "total_score": 0,
+            "final_confidence": "LOW",
+            "details": details,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "atr_value": atr_value,
+            "eqs_score": eqs_score,
+            "eqs_details": eqs_result,
+            "eqs_components": eqs_components,
+            "rejection_logs": rejection_logs,
+            "metrics": metrics   # <-- AJOUTÉ
+        }
+    details["HTF_Confluence"] = f"{htf_score} ({' | '.join(htf_details)})"
+
+    # --- 12. Bias / tendance H4 ---
+    if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
+        score_components["ICT"] += 3
+        details["Trend_H4"] = "+3 (Aligné)"
+    elif bias == "NEUTRAL":
+        score_components["ICT"] += 1
+        details["Trend_H4"] = "+1 (Neutre)"
+    else:
+        allowed_counter = ["BREAKER", "BISI"]
+        if setup_type not in allowed_counter:
+            rejection_logs.append(f"Contre-tendance 4H ({bias} vs {direction})")
+            details["VETO"] = f"Contre-tendance: bias 4H={bias}, direction={direction}"
+            return {
+                "passed": False,
+                "total_score": 0,
+                "final_confidence": "LOW",
+                "details": details,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "atr_value": atr_value,
+                "eqs_score": eqs_score,
+                "eqs_details": eqs_result,
+                "eqs_components": eqs_components,
+                "rejection_logs": rejection_logs,
+                "metrics": metrics   # <-- AJOUTÉ
+            }
+        else:
+            score_components["ICT"] -= 2
+            details["Trend_H4"] = f"-2 (H4 opposé, autorisé pour {setup_type})"
+
+    # --- 13. Distance ---
+    try:
+        distance = abs(float(current_price) - entry_level)
+        pip = get_pip_value_for_pair(pair)
+        entry_type_max_pips = {
+            "FVG_RETEST_PERFECT": 15.0, "FVG_RETEST": 18.0,
+            "NESTED_FVG": 18.0, "WICK_REJECTION": 15.0,
+            "BISI": 18.0, "BREAKER": 15.0,
+        }
+        max_pips = entry_type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]))
+        max_distance_price = max(float(atr_value) * 1.20, pip * max_pips)
+        if distance <= max_distance_price * 0.50:
+            score_components["Risk_RR_Distance"] += 2
+            details["Distance"] = f"+2 proche ({distance:.5f})"
+        elif distance <= max_distance_price:
+            details["Distance"] = f"0 acceptable ({distance:.5f})"
+        elif distance <= max_distance_price * 1.50:
+            score_components["Risk_RR_Distance"] -= 2
+            details["Distance"] = f"-2 un peu loin ({distance:.5f})"
+        else:
+            rejection_logs.append(f"Distance trop grande: {distance:.5f}")
+            return {
+                "passed": False,
+                "total_score": 0,
+                "final_confidence": "LOW",
+                "details": {"VETO": f"Prix vraiment trop loin ({distance:.5f})"},
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "atr_value": atr_value,
+                "eqs_score": eqs_score,
+                "eqs_details": eqs_result,
+                "eqs_components": eqs_components,
+                "rejection_logs": rejection_logs,
+                "metrics": metrics   # <-- AJOUTÉ
+            }
+    except Exception as exc:
+        details["Distance_Error"] = str(exc)
+
+    # --- 14. Scores structurels (EMA, structure H1, alignement) ---
+    try:
+        ema_score = max(-2, min(2, _directional_score(score_ema_trend(df_h1), direction)))
+        structure_score = _directional_score(score_market_structure(df_h1), direction)
+        htf_score = score_higher_timeframe_alignment(direction, df_h1, df_h4)
+        score_components["Structure_H1"] += ema_score + structure_score
+        score_components["HTF_Alignment"] += htf_score
+        details["EMA"] = f"{ema_score:+d} (EMA50 H1)"
+        details["Structure_H1"] = f"{structure_score:+d} (HH/HL/LH/LL)"
+        details["HTF_Alignment"] = f"{htf_score:+d} (alignement H1/H4)"
+    except Exception as exc:
+        details["Trend_H1_Error"] = str(exc)
+
+    # --- 15. Type de setup (ICT / Liquidity / etc.) ---
+    if "LIQUIDITY" in entry_type:
+        score_components["ICT"] += 2
+        details["Setup_Type"] = "+2 Liquidity"
+    elif any(x in entry_type for x in ["FVG", "BISI", "NESTED"]):
+        score_components["ICT"] += 3 if "BISI" in entry_type else 2
+        details["Setup_Type"] = f"+{3 if 'BISI' in entry_type else 2} ICT"
+    elif "BREAKER" in entry_type:
+        score_components["ICT"] += 2
+        details["Setup_Type"] = "+2 Breaker"
+    elif "WICK" in entry_type:
+        score_components["ICT"] += 2
+        details["Setup_Type"] = "+2 Wick rejection"
+    else:
+        score_components["ICT"] += 1
+        details["Setup_Type"] = f"+1 ({entry_type})"
+
+    # --- 16. Bonus/malus selon le poids du setup ---
+    if setup_weight > 1.2:
+        score_components["Secondary"] += 2
+        details["Setup_Weight"] = f"+2 (poids setup {setup_weight:.2f})"
+    elif setup_weight < 0.8:
+        score_components["Secondary"] -= 1
+        details["Setup_Weight"] = f"-1 (poids setup {setup_weight:.2f})"
+
+    # --- 17. RR ---
+    try:
+        dist_sl = abs(entry_level - stop_loss)
+        dist_tp = abs(take_profit - entry_level)
+        rr_ratio = dist_tp / dist_sl if dist_sl > 0 else 0
+        if rr_ratio >= 2.5:
+            score_components["Risk_RR_Distance"] += 2
+            details["RR"] = f"+2 (excellent {rr_ratio:.2f})"
+        elif rr_ratio >= 2.0:
+            score_components["Risk_RR_Distance"] += 1
+            details["RR"] = f"+1 (correct {rr_ratio:.2f})"
+        else:
+            details["RR"] = f"0 (faible {rr_ratio:.2f})"
+    except Exception:
+        pass
+
+    # --- 18. D1 Trend ---
+    try:
+        d1_bonus, d1_label = get_d1_trend_bonus(df_d1, direction)
+        if d1_bonus > 0:
+            score_components["Secondary"] += 2
+            details["D1_Trend"] = "+2 (D1 aligné)"
+        else:
+            details["D1_Trend"] = d1_label
+    except Exception:
+        pass
+
+    # --- 19. MACD H1 ---
+    try:
+        macd_bonus, macd_label = get_macd_h1_bonus(df_h1, direction)
+        if macd_bonus > 0:
+            score_components["Secondary"] += 1
+            details["MACD_H1"] = "+1 (confirme)"
+        else:
+            details["MACD_H1"] = macd_label
+    except Exception:
+        pass
+
+    # --- 20. Session quality ---
+    try:
+        session_bonus, session_label = get_session_quality_bonus(pair)
+        if session_bonus > 0:
+            score_components["Secondary"] += 1
+            details["Session"] = "+1 (bonne session)"
+        else:
+            details["Session"] = session_label
+    except Exception:
+        pass
+
+    # --- 21. Calcul final du score ---
+    score = compute_final_score(score_components)
+    passed = score >= min_required
+
+    if not passed:
+        rejection_logs.append(f"Score = {score} < seuil {min_required}")
+
+    final_confidence = "HIGH" if score >= min_required + 3 else "MEDIUM" if passed else "LOW"
+
+    confluences = {
+        "d1_aligned": details.get("D1_Trend", "").startswith("+"),
+        "rsi_divergence": False,
+        "session_active": details.get("Session", "").startswith("+"),
+        "macd_confirmed": details.get("MACD_H1", "").startswith("+"),
+        "bos_confirmed": "BOS" in str(details),
+        "structure_ok": score_components.get("Structure", 0) >= 1,
+        "pullback_ok": score_components.get("Pullback", 0) >= 2,
+    }
+
+    win_rate = estimate_win_rate(score, eqs_score, confluences)
+    quality_label = get_signal_quality_label(score, eqs_score)
+
+    if is_asia and quality_label not in ["SNIPER", "A+"]:
+        passed = False
+        rejection_logs.append(f"Qualité {quality_label} insuffisante en ASIA (requis SNIPER/A+)")
+
+    log_score_detail(score_components, score, "PASSED" if passed else "REJECTED")
+
+    # --- 22. Log de décision structuré ---
+    eqs_detail_str = ""
+    if eqs_components:
+        comp_parts = []
+        for comp_name, comp_data in eqs_components.items():
+            comp_label = comp_name.replace("_", " ").title()
+            comp_parts.append(f"{comp_label}:{comp_data['score']:+d}")
+        eqs_detail_str = " | EQS=" + " ".join(comp_parts)
+
+    if passed:
+        status = "✅ ACCEPT"
+    else:
+        status = "❌ REJECT"
+        if rejection_logs:
+            status += f" | raison={rejection_logs[0][:80]}"
+
+    decision_line = (
+        f"[DECISION] {pair} | {direction} | {entry_type} | "
+        f"{status} | "
+        f"Score={score}/{min_required} | EQS={eqs_score}/{eqs_min_effective:.0f}{eqs_detail_str} | "
+        f"ATR={atr_pips:.1f}pips | ADX={adx:.1f}/{adx_min_effective:.1f} | "
+        f"RSI={rsi:.1f} | MOM={momentum:+.2f}% | "
+        f"H={hour:02d}h | Sess={session} | Spread={spread:.2f} | "
+        f"RR={rr:.2f} | PoidsSetup={setup_weight:.2f}"
+    )
+    if not passed and rejection_logs:
+        decision_line += f" | REJECT={rejection_logs[0][:80]}"
+    logger.info(decision_line)
+
+    # --- 23. Retour final ---
     return {
         "total_score": score,
         "details": details,
@@ -4654,9 +4689,8 @@ def calculate_signal_confidence(
         "eqs_details": eqs_result,
         "eqs_components": eqs_components,
         "rejection_logs": rejection_logs,
-        "metrics": metrics
+        "metrics": metrics   # <-- TOUJOURS PRÉSENT
     }
-
 # =============================
 # DÉTECTION BIAS-FIRST - inchangé
 # =============================
@@ -4833,8 +4867,8 @@ def advanced_main_v981():
 
             atr_price = calculate_atr(df_m15, period=ATR_PERIOD)
             atr_pips = price_to_pips(atr_price, pair)
-            min_atr_pips = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
-            logger.info(f"[ATR_DIAG] {pair} | ATR prix: {atr_price:.6f} | ATR pips: {atr_pips:.1f} | Seuil: {min_atr_pips:.1f} | Écart: {atr_pips - min_atr_pips:.1f}")
+            effective_atr_threshold = get_effective_atr_threshold(pair)
+            logger.info(f"[ATR_DIAG] {pair} | ATR pips: {atr_pips:.1f} | Seuil effectif: {effective_atr_threshold:.1f}")
 
             current_price = float(df_m15["close"].iloc[-1])
             bias_analysis = determine_advanced_bias(df_h4)
