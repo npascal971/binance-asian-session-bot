@@ -58,15 +58,15 @@ BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {
 }
 # V90 - Pullback minimum (en pips) pour confirmer un retracement
 PULLBACK_MIN_PIPS_BY_PAIR = {
-    "EUR_USD": 5.0,
-    "GBP_USD": 6.0,
-    "USD_CAD": 5.0,
-    "AUD_USD": 5.0,
-    "AUD_CAD": 5.0,
-    "XAU_USD": 30.0,
-    "USD_JPY": 6.0,
-    "GBP_JPY": 6.0,
-    "DEFAULT": 5.0
+    "EUR_USD": 4.0,
+    "GBP_USD": 5.0,
+    "USD_CAD": 4.0,
+    "AUD_USD": 4.0,
+    "AUD_CAD": 4.0,
+    "XAU_USD": 25.0,
+    "USD_JPY": 5.0,
+    "GBP_JPY": 5.0,
+    "DEFAULT": 4.0
 }
 # ✅ V102 : Break Even baissé à 0.40R (au lieu de 0.80R)
 BASE_BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.55"))
