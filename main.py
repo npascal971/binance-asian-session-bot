@@ -83,29 +83,29 @@ BASE_EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "55.0"))
 
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "10"))
 MIN_ATR_PIPS_BY_PAIR = {
-    "EUR_USD": 5.0,
-    "GBP_USD": 7.0,
-    "USD_CAD": 5.0,
-    "AUD_USD": 5.0,
-    "AUD_CAD": 6.0,
-    "XAU_USD": 40.0,    
-    "GBP_JPY": 10.0,
-    "USD_JPY": 8.0,
-    "DEFAULT": 6.0
+    "EUR_USD": 4.0,
+    "GBP_USD": 5.4,
+    "USD_CAD": 4.2,
+    "AUD_USD": 3.6,
+    "AUD_CAD": 3.9,
+    "XAU_USD": 34.0,    
+    "GBP_JPY": 7.0,
+    "USD_JPY": 5.0,
+    "DEFAULT": 5.0
 }
 
 # ✅ V105 : Seuils ATR réduits de 30% pour la session ASIA
 MIN_ATR_PIPS_BY_PAIR_ASIA = {
-    "EUR_USD": 3.5,
+    "EUR_USD": 3.0,
     "AUD_JPY": 3.5,# 5.0 * 0.9
-    "GBP_USD": 4.2,      # 7.0 * 0.85
-    "USD_CAD": 4.5,      # 5.0 * 0.9
-    "AUD_USD": 4.5,      # 5.0 * 0.9
-    "AUD_CAD": 4.5,      # 6.0 * 0.75
-    "XAU_USD": 28.0,     # 40.0 * 0.7
+    "GBP_USD": 3.5,      # 7.0 * 0.85
+    "USD_CAD": 3.5,      # 5.0 * 0.9
+    "AUD_USD": 3.5,      # 5.0 * 0.9
+    "AUD_CAD": 3.5,      # 6.0 * 0.75
+    "XAU_USD": 24.0,     # 40.0 * 0.7
           # 8.0 * 0.75
-    "GBP_JPY": 8.0,      # 10.0 * 0.8
-    "USD_JPY": 6.0,
+    "GBP_JPY": 7.0,      # 10.0 * 0.8
+    "USD_JPY": 5.0,
     "DEFAULT": 4.5,      # 6.0 * 0.75
 }
 
