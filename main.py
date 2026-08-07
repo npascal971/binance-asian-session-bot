@@ -83,15 +83,15 @@ BASE_EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "55.0"))
 
 MAX_TRADES_TOTAL = int(os.getenv("MAX_TRADES_TOTAL", "10"))
 MIN_ATR_PIPS_BY_PAIR = {
-    "EUR_USD": 4.0,
-    "GBP_USD": 5.4,
-    "USD_CAD": 4.2,
-    "AUD_USD": 3.6,
+    "EUR_USD": 3.5,
+    "GBP_USD": 4.4,
+    "USD_CAD": 3.9,
+    "AUD_USD": 3.5,
     "AUD_CAD": 3.9,
     "XAU_USD": 34.0,    
     "GBP_JPY": 7.0,
     "USD_JPY": 5.0,
-    "DEFAULT": 5.0
+    "DEFAULT": 4.0
 }
 
 # ✅ V105 : Seuils ATR réduits de 30% pour la session ASIA
