@@ -1843,10 +1843,10 @@ PAIR_SETTINGS = {
 }
 
 SIGNAL_RISK_SETTINGS = {
-    "NESTED_FVG": {"sl_multiplier": 1.0, "tp_multiplier": 2.5},
-    "FVG_RETEST": {"sl_multiplier": 1.5, "tp_multiplier": 3.0},
-    "WICK_REJECTION": {"sl_multiplier": 1.7, "tp_multiplier": 4.5},
-    "LIQUIDITY_DRAW": {"sl_multiplier": 1.8, "tp_multiplier": 3.5}
+    "NESTED_FVG": {"sl_multiplier": 0.6, "tp_multiplier": 1.8},
+    "FVG_RETEST": {"sl_multiplier": 0.8, "tp_multiplier": 2.0},
+    "WICK_REJECTION": {"sl_multiplier": 0.9, "tp_multiplier": 2.7},
+    "LIQUIDITY_DRAW": {"sl_multiplier": 1.0, "tp_multiplier": 2.5}
 }
 
 MAX_PIPS_ACCEPTED = {
