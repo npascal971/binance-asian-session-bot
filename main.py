@@ -3595,7 +3595,12 @@ def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, curren
     direction = direction.upper()
     pip_value = get_pip_value_for_pair(pair)
     min_pullback_pips = PULLBACK_MIN_PIPS_BY_PAIR.get(pair, PULLBACK_MIN_PIPS_BY_PAIR["DEFAULT"])
-    min_pullback_price = min_pullback_pips * pip_value
+    # Tolérance de 0.5 pip
+    tolerance_pips = 0.5
+    min_pullback_price = max(
+        0,
+        (min_pullback_pips - tolerance_pips) * pip_value
+    )
 
     if len(df) < 8:
         return False, "Données insuffisantes pour pullback"
