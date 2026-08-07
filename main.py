@@ -60,8 +60,8 @@ BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {
 PULLBACK_MIN_PIPS_BY_PAIR = {
     "EUR_USD": 4.0,
     "GBP_USD": 5.0,
-    "USD_CAD": 4.0,
-    "AUD_USD": 4.0,
+    "USD_CAD": 3.5,
+    "AUD_USD": .0,
     "AUD_CAD": 4.0,
     "XAU_USD": 25.0,
     "USD_JPY": 5.0,
@@ -86,7 +86,7 @@ MIN_ATR_PIPS_BY_PAIR = {
     "EUR_USD": 3.5,
     "GBP_USD": 4.4,
     "USD_CAD": 3.9,
-    "AUD_USD": 3.5,
+    "AUD_USD": 3.0,
     "AUD_CAD": 3.9,
     "XAU_USD": 34.0,    
     "GBP_JPY": 7.0,
@@ -100,7 +100,7 @@ MIN_ATR_PIPS_BY_PAIR_ASIA = {
     "AUD_JPY": 3.5,# 5.0 * 0.9
     "GBP_USD": 3.5,      # 7.0 * 0.85
     "USD_CAD": 3.5,      # 5.0 * 0.9
-    "AUD_USD": 3.5,      # 5.0 * 0.9
+    "AUD_USD": 3.0,      # 5.0 * 0.9
     "AUD_CAD": 3.5,      # 6.0 * 0.75
     "XAU_USD": 24.0,     # 40.0 * 0.7
           # 8.0 * 0.75
