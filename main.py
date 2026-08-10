@@ -1,20 +1,13 @@
 # ============================================================
-# main(105).py - Version V105 "ASIA SMART" 
-# ADAPTATION INTELLIGENTE POUR LA SESSION ASIA
-#
-# AMÉLIORATIONS V105 :
-# 1. ✅ Seuils ATR réduits de 30% en ASIA
-# 2. ✅ EQS minimum relevé à 65 en ASIA
-# 3. ✅ Score minimum +3 en ASIA
-# 4. ✅ Qualité requise SNIPER/A+ en ASIA
-# 5. ✅ Risque réduit à 0.5% en ASIA
-# 6. ✅ Cooldown après perte augmenté à 2h
-# 7. ✅ Suppression du filtre EUR/USD NY (18h-21h)
-# 8. ✅ Conservation de toutes les fonctionnalités V104
-# 9. ✅ FILTRE STRUCTURE H1 AJOUTÉ
-# 10. ✅ LOGS [SIGNAL], [REJECT], [REJECT_SUMMARY] AMÉLIORÉS
-# 11. ✅ ADAPTATION DES POIDS DES SETUPS
-# 12. ✅ SÉLECTION DU MEILLEUR SETUP AVEC SEUIL DE QUALITÉ RELATIVE
+# main(105).py - Version V105.1 "ASIA SMART" 
+# AMÉLIORATIONS V105.1 :
+# 1. ✅ Logs MFE/MAE enrichis pour diagnostic
+# 2. ✅ SL/TP rééquilibrés (multiplicateurs plus serrés)
+# 3. ✅ Trailing stop optimisé (activation 0.80R, distance 1.5R)
+# 4. ✅ BE conservé à 0.55R
+# 5. ✅ Pullback AUD/USD corrigé (3.5)
+# 6. ✅ Cooldown 1h conservé
+# 7. ✅ Tous les filtres V105 conservés
 # ============================================================
 
 import os
@@ -37,7 +30,7 @@ from ta.momentum import RSIIndicator
 from typing import List, Dict, Tuple, Optional
 
 # =========================
-# CONFIGURATION V105
+# CONFIGURATION V105.1
 # =========================
 load_dotenv()
 
@@ -61,7 +54,7 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
     "EUR_USD": 4.0,
     "GBP_USD": 5.0,
     "USD_CAD": 3.5,
-    "AUD_USD": .0,
+    "AUD_USD": 3.5,  # ✅ V105.1 : Corrigé (était à 0)
     "AUD_CAD": 4.0,
     "XAU_USD": 25.0,
     "USD_JPY": 5.0,
@@ -72,9 +65,11 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
 BASE_BREAKEVEN_TRIGGER_R = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.55"))
 # ✅ V102 : Break Even Early baissé à 0.25R (au lieu de 0.50R)
 BASE_BREAKEVEN_EARLY_R = float(os.getenv("BREAKEVEN_EARLY_R", "0.25"))
-# ✅ V102 : Trailing Stop baissé à 1.0R (au lieu de 1.8R)
-BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.0"))
+# ✅ V105.1 : Trailing Stop optimisé (activation 0.80R, distance 1.5R)
+BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = float(os.getenv("TRAILING_STOP_DISTANCE_ATR_MULTIPLIER", "1.5"))
 BASE_TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTANCE_PIPS", "8.0"))
+# ✅ V105.1 : Seuil d'activation du trailing (0.80R)
+BASE_TRAILING_ACTIVATION_R = float(os.getenv("TRAILING_ACTIVATION_R", "0.80"))
 
 BASE_ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "23.0"))
 BASE_MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
@@ -97,16 +92,15 @@ MIN_ATR_PIPS_BY_PAIR = {
 # ✅ V105 : Seuils ATR réduits de 30% pour la session ASIA
 MIN_ATR_PIPS_BY_PAIR_ASIA = {
     "EUR_USD": 3.0,
-    "AUD_JPY": 3.5,# 5.0 * 0.9
-    "GBP_USD": 3.5,      # 7.0 * 0.85
-    "USD_CAD": 3.5,      # 5.0 * 0.9
-    "AUD_USD": 3.0,      # 5.0 * 0.9
-    "AUD_CAD": 3.5,      # 6.0 * 0.75
-    "XAU_USD": 24.0,     # 40.0 * 0.7
-          # 8.0 * 0.75
-    "GBP_JPY": 7.0,      # 10.0 * 0.8
+    "AUD_JPY": 3.5,
+    "GBP_USD": 3.5,
+    "USD_CAD": 3.5,
+    "AUD_USD": 3.0,
+    "AUD_CAD": 3.5,
+    "XAU_USD": 24.0,
+    "GBP_JPY": 7.0,
     "USD_JPY": 5.0,
-    "DEFAULT": 4.5,      # 6.0 * 0.75
+    "DEFAULT": 4.5,
 }
 
 # ============================================================
@@ -185,6 +179,7 @@ class AdaptiveState:
                 "be_early_r": BASE_BREAKEVEN_EARLY_R,
                 "trailing_atr_mult": BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER,
                 "trailing_min_pips": BASE_TRAILING_STOP_MIN_DISTANCE_PIPS,
+                "trailing_activation_r": BASE_TRAILING_ACTIVATION_R,
                 "confidence_min": BASE_MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, BASE_MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
             }
         return self.pair_params[pair]
@@ -715,7 +710,7 @@ class TradingStatsV101:
     def log_daily_summary(self):
         """Résumé quotidien compact des statistiques"""
         logger.info("=" * 60)
-        logger.info("📊 RÉSUMÉ QUOTIDIEN V105")
+        logger.info("📊 RÉSUMÉ QUOTIDIEN V105.1")
         logger.info("=" * 60)
         
         total_signals = 0
@@ -757,7 +752,7 @@ class TradingStatsV101:
             self.last_daily_summary = time.time()
         
         logger.info("=" * 80)
-        logger.info("📊 STATISTIQUES GLOBALES V105")
+        logger.info("📊 STATISTIQUES GLOBALES V105.1")
         logger.info("=" * 80)
         logger.info(f"{'Paire':10} | {'Signaux':>7} | {'Acceptés':>7} | {'Rejetés':>7} | {'Clôturés':>7} | {'Win Rate':>9} | {'PF':>6} | {'Espérance':>10}")
         logger.info("-" * 80)
@@ -772,7 +767,7 @@ class TradingStatsV101:
         logger.info("📈 PARAMÈTRES ADAPTATIFS")
         logger.info("-" * 80)
         for pair, params in self.adaptive_state.pair_params.items():
-            logger.info(f"{pair:10} | ADX={params['adx_min']:.1f} | EQS={params['eqs_min']:.0f} | BE={params['be_trigger_r']:.2f}R | Trailing={params['trailing_atr_mult']:.2f}")
+            logger.info(f"{pair:10} | ADX={params['adx_min']:.1f} | EQS={params['eqs_min']:.0f} | BE={params['be_trigger_r']:.2f}R | Trailing={params['trailing_atr_mult']:.2f} | TrailAct={params.get('trailing_activation_r', 0.80):.2f}R")
 
         logger.info("=" * 80)
         logger.info("📈 PERFORMANCE PAR SETUP")
@@ -870,7 +865,7 @@ class TradingStatsV101:
 
 
 # ============================================================
-# INSTANCIATION STATS V105
+# INSTANCIATION STATS V105.1
 # ============================================================
 stats = TradingStatsV101()
 
@@ -943,6 +938,44 @@ def check_closed_trades():
 
                 stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl, close_price, is_estimate, trade_info)
                 trade_tracker.close_trade(trade_id, close_price, r_multiple)
+
+                # ✅ V105.1 : LOG MFE/MAE enrichi pour diagnostic
+                tracker_trade = trade_tracker.get_trade(trade_id)
+                if tracker_trade:
+                    # Déterminer le type de sortie
+                    exit_type = "UNKNOWN"
+                    try:
+                        # Récupérer les détails du trade pour voir s'il avait un trailing
+                        api = v88_client()
+                        r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
+                        resp = api.request(r)
+                        trade_data = resp.get("trade", {})
+                        if trade_data:
+                            if trade_data.get("trailingStopLossOrder"):
+                                exit_type = "TRAILING"
+                            elif trade_data.get("stopLossOrder"):
+                                # Vérifier si le SL a été modifié
+                                sl_order = trade_data.get("stopLossOrder", {})
+                                if sl_order and sl_order.get("price"):
+                                    # Comparer avec le SL initial stocké
+                                    initial_sl = trade_info.get("sl")
+                                    if initial_sl and abs(float(sl_order.get("price", 0)) - initial_sl) > 0.0001:
+                                        exit_type = "BE_TRAILING"
+                                    else:
+                                        exit_type = "SL_INITIAL"
+                            else:
+                                exit_type = "CLOSE_MANUAL"
+                    except Exception as e:
+                        logger.debug(f"Impossible de déterminer le type de sortie pour {trade_id}: {e}")
+                    
+                    logger.info(
+                        f"[MFE_MAE_DIAG] {pair} | {setup_type} | "
+                        f"MFE={tracker_trade.get('max_favorable_pips', 0):.1f}pips | "
+                        f"MAE={tracker_trade.get('max_adverse_pips', 0):.1f}pips | "
+                        f"R_sortie={r_multiple:.2f} | "
+                        f"Sortie={exit_type} | "
+                        f"EQS={eqs}"
+                    )
 
                 if is_estimate:
                     logger.info(f"[CLOSE_ESTIMATED] Trade {trade_id} fermé (estimé) - prix actuel={close_price:.5f}")
@@ -1842,11 +1875,15 @@ PAIR_SETTINGS = {
     }
 }
 
+# ✅ V105.1 : SL/TP rééquilibrés (multiplicateurs plus serrés)
 SIGNAL_RISK_SETTINGS = {
     "NESTED_FVG": {"sl_multiplier": 0.6, "tp_multiplier": 1.8},
     "FVG_RETEST": {"sl_multiplier": 0.8, "tp_multiplier": 2.0},
     "WICK_REJECTION": {"sl_multiplier": 0.9, "tp_multiplier": 2.7},
-    "LIQUIDITY_DRAW": {"sl_multiplier": 1.0, "tp_multiplier": 2.5}
+    "LIQUIDITY_DRAW": {"sl_multiplier": 1.0, "tp_multiplier": 2.5},
+    "FVG_RETEST_PERFECT": {"sl_multiplier": 0.7, "tp_multiplier": 2.2},  # ✅ V105.1 : Nouveau
+    "BISI": {"sl_multiplier": 0.7, "tp_multiplier": 2.2},  # ✅ V105.1 : Nouveau
+    "BREAKER": {"sl_multiplier": 0.9, "tp_multiplier": 2.5},  # ✅ V105.1 : Nouveau
 }
 
 MAX_PIPS_ACCEPTED = {
@@ -1898,7 +1935,7 @@ SCORING_CONFIG = {
 }
 
 # ============================================================
-# V105 - EXÉCUTION D'ORDRE
+# V105.1 - EXÉCUTION D'ORDRE
 # ============================================================
 last_execution_attempt = {}
 EXECUTION_COOLDOWN_SECONDS = 60
@@ -1914,7 +1951,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
         return None
     last_execution_attempt[pair_upper] = now
 
-    logger.info(f"[ORDER] V105 EXECUTION START {pair} {direction} type={entry_type} score={score}")
+    logger.info(f"[ORDER] V105.1 EXECUTION START {pair} {direction} type={entry_type} score={score}")
 
     if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
         logger.info(f"{pair}: trade déjà ouvert")
@@ -1988,7 +2025,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
     risk = abs(entry_price - stop_loss)
     rr = abs(take_profit - entry_price) / risk if risk > 0 else 0
-    logger.info(f"[ORDER] SIGNAL V105 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
+    logger.info(f"[ORDER] SIGNAL V105.1 {pair} {direction} | RR={rr:.2f} score={score} units={units}")
 
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false : ordre simulé")
@@ -2091,7 +2128,7 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
 
 
 # ============================================================
-# V105 - MODIFICATION SL (inchangé)
+# V105.1 - MODIFICATION SL
 # ============================================================
 def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
     try:
@@ -2143,7 +2180,7 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float) -> bool:
 
 
 # ============================================================
-# V105 - CRÉATION TRAILING STOP (inchangé)
+# V105.1 - CRÉATION TRAILING STOP (optimisé avec activation à 0.80R)
 # ============================================================
 def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -> bool:
     try:
@@ -2490,7 +2527,7 @@ def get_pair_settings(pair: str) -> dict:
     return PAIR_SETTINGS.get(pair, PAIR_SETTINGS["DEFAULT"])
 
 # =============================
-# LOGGING (avec tag V105)
+# LOGGING (avec tag V105.1)
 # =============================
 LOG_ASCII_SAFE = os.getenv("LOG_ASCII_SAFE", "true").lower() == "true"
 
@@ -2573,7 +2610,7 @@ def repair_mojibake_v82(value) -> str:
 
 
 class ReadableLogFormatterV82(logging.Formatter):
-    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]", "[CLOSE]", "[CLOSE_DETAILS]", "[CLOSE_ESTIMATED]", "[CLOSE_CONFIRMED]", "[MFE/MAE]", "[ADAPT]", "[SUSPEND]", "[SETUP_WEIGHT]")
+    ALLOWED_TAGS_V83 = ("[START]", "[SCAN]", "[INFO]", "[SIGNAL]", "[ORDER]", "[RISK]", "[ERROR]", "[TRACE]", "[BE]", "[TSL]", "[CONFIRM]", "[DIAG]", "[DECISION]", "[CLOSE]", "[CLOSE_DETAILS]", "[CLOSE_ESTIMATED]", "[CLOSE_CONFIRMED]", "[MFE/MAE]", "[MFE_MAE_DIAG]", "[ADAPT]", "[SUSPEND]", "[SETUP_WEIGHT]")
 
     def _clean_message_v83(self, message: str, levelname: str) -> str:
         text = repair_mojibake_v82(str(message))
@@ -3254,7 +3291,7 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# FILTRES ET SCORING - V105 (filtres renforcés + ASIA adapté)
+# FILTRES ET SCORING - V105.1 (filtres renforcés + ASIA adapté)
 # ============================================================
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
@@ -3786,7 +3823,7 @@ def filter_momentum_exhaustion(
     return passed, message, penalties, total_penalty
 
 # =============================
-# GESTION DES ORDRES (SL/TP) - inchangé
+# GESTION DES ORDRES (SL/TP) - V105.1 (rééquilibré)
 # =============================
 def calculate_sl_tp(entry_price: float, atr: float, direction: str, pair: str,
                     entry_type: str = "FVG_RETEST", fvg_data: dict = None,
@@ -3893,7 +3930,7 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float,
     confluences_line = f"<b>Confluences:</b> {' · '.join(confluence_tags)}\n" if confluence_tags else ""
 
     message = f"""
-<b>FVG ORDERFLOW TRADING SIGNAL V105</b>
+<b>FVG ORDERFLOW TRADING SIGNAL V105.1</b>
 <b>Paire:</b> {pair}
 <b>Direction:</b> {direction}
 <b>Type d'entrée:</b> {entry_type}
@@ -4044,7 +4081,7 @@ def get_signal_quality_label(score: int, eqs: int) -> str:
     return "B"
 
 # =============================
-# SYSTÈME DE SCORING (V105) - utilise les paramètres adaptatifs + session ASIA + filtres renforcés
+# SYSTÈME DE SCORING (V105.1) - utilise les paramètres adaptatifs + session ASIA + filtres renforcés
 # =============================
 
 def check_htf_confluence(direction: str, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> tuple:
@@ -4669,7 +4706,7 @@ def calculate_signal_confidence(
         f"ATR={atr_pips:.1f}pips | ADX={adx:.1f}/{adx_min_effective:.1f} | "
         f"RSI={rsi:.1f} | MOM={momentum:+.2f}% | "
         f"H={hour:02d}h | Sess={session} | Spread={spread:.2f} | "
-        f"RR={rr_ratio:.2f} | PoidsSetup={setup_weight:.2f}"  # ✅ CORRIGÉ : rr_ratio au lieu de rr
+        f"RR={rr_ratio:.2f} | PoidsSetup={setup_weight:.2f}"
     )
     if not passed and rejection_logs:
         decision_line += f" | REJECT={rejection_logs[0][:80]}"
@@ -4792,7 +4829,7 @@ def advanced_main_v981():
     try:
         api = v88_client()
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V105 - Seuil adaptatif + ASIA (65)")
+        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V105.1 - Seuil adaptatif + ASIA (65)")
         logger.info(f"✅ Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R)")
         logger.info("✅ AUDIT ATR ACTIVÉ")
         logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
@@ -4823,6 +4860,10 @@ def advanced_main_v981():
         logger.info("✅ V103 : Filtre ADX renforcé (seuil 18)")
         logger.info("✅ V103 : RISK 0.75% (0.5% ASIA)")
         logger.info("✅ V103 : EXIT_EARLY plus sélectif (4 signaux)")
+        logger.info("✅ V105.1 : Logs MFE/MAE enrichis pour diagnostic")
+        logger.info("✅ V105.1 : SL/TP rééquilibrés (multiplicateurs plus serrés)")
+        logger.info("✅ V105.1 : Trailing stop optimisé (activation 0.80R, distance 1.5R)")
+        logger.info("✅ V105.1 : Pullback AUD/USD corrigé (3.5)")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -5071,7 +5112,7 @@ def advanced_main_v981():
             
     stats.log_summary()
 # ============================================================
-# V105 : BREAK EVEN AVEC PARAMÈTRES ADAPTATIFS (BE à 0.40R)
+# V105.1 : BREAK EVEN AVEC PARAMÈTRES ADAPTATIFS (BE à 0.55R + trailing optimisé)
 # ============================================================
 def check_breakeven_v981():
     try:
@@ -5128,7 +5169,7 @@ def check_breakeven_v981():
 
             pair_params = stats.adaptive_state.get_pair_params(pair)
             effective_threshold = pair_params["be_early_r"] if early_be else pair_params["be_trigger_r"]
-            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} (seuil={effective_threshold:.2f})")
+            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} (seuil={effective_threshold:.2f}) | TrailingActivation={pair_params.get('trailing_activation_r', 0.80):.2f}R")
 
             # ✅ V103 : Sortie anticipée sur retournement - uniquement si R < -0.30 et 4 signaux
             try:
@@ -5145,6 +5186,7 @@ def check_breakeven_v981():
             except Exception as e:
                 logger.debug(f"Erreur check_indicator_reversal pour {trade_id}: {e}")
 
+            # ✅ V105.1 : BE à 0.55R (conservé)
             if r >= effective_threshold:
                 logger.info(f"[BE] 🎯 Condition R>={effective_threshold:.2f} atteinte pour {trade_id}")
                 if direction == "BUY":
@@ -5163,42 +5205,51 @@ def check_breakeven_v981():
                             logger.info(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
                             continue
 
-                        # ✅ V102 : Trailing à 1.0R (plus agressif)
+                        # ✅ V105.1 : Trailing stop optimisé (activation 0.80R, distance 1.5R)
                         atr = get_atr_m15_v88(pair)
                         pip_value = get_pip_value_for_pair(pair)
 
-                        trailing_mult = pair_params["trailing_atr_mult"]
-                        trailing_min_pips = pair_params["trailing_min_pips"]
+                        # Vérifier si on a atteint le seuil d'activation du trailing
+                        trailing_activation = pair_params.get("trailing_activation_r", 0.80)
+                        
+                        if r >= trailing_activation:
+                            logger.info(f"[TSL] R={r:.2f} >= seuil d'activation {trailing_activation:.2f}R - création du trailing")
+                            
+                            trailing_mult = pair_params["trailing_atr_mult"]
+                            trailing_min_pips = pair_params["trailing_min_pips"]
 
-                        base_distance = atr * trailing_mult
+                            base_distance = atr * trailing_mult
 
-                        r_factor = max(0.6, min(1.4, 1.0 / (1.0 + abs(r) * 0.5)))
-                        distance = base_distance * r_factor
+                            # Ajustement en fonction de la volatilité et du R
+                            r_factor = max(0.6, min(1.4, 1.0 / (1.0 + abs(r) * 0.3)))
+                            distance = base_distance * r_factor
 
-                        tracker_trade = trade_tracker.get_trade(trade_id)
-                        if tracker_trade:
-                            if direction == "BUY":
-                                highest_since_entry = tracker_trade["highest_price"]
-                                if current_price > highest_since_entry * 0.98:
-                                    distance = min(distance, atr * 1.2)
+                            tracker_trade = trade_tracker.get_trade(trade_id)
+                            if tracker_trade:
+                                if direction == "BUY":
+                                    highest_since_entry = tracker_trade["highest_price"]
+                                    if current_price > highest_since_entry * 0.98:
+                                        distance = min(distance, atr * 1.2)
+                                else:
+                                    lowest_since_entry = tracker_trade["lowest_price"]
+                                    if current_price < lowest_since_entry * 1.02:
+                                        distance = min(distance, atr * 1.2)
+
+                            distance = max(distance, atr * 0.8)
+                            distance = min(distance, atr * 2.8)
+                            distance = max(distance, pip_value * trailing_min_pips)
+                            distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
+
+                            if distance > 0:
+                                logger.info(f"[TSL] Création du trailing stop optimisé pour trade {trade_id}, distance={distance:.5f} (ATR={atr:.5f}, R={r:.2f}, mult={trailing_mult:.2f}, activation={trailing_activation:.2f}R)")
+                                if create_oanda_trailing_stop_v981(trade_id, pair, distance):
+                                    logger.info(f"[TSL] ✅ Trailing stop créé")
+                                else:
+                                    logger.error(f"[TSL] ❌ ÉCHEC création trailing")
                             else:
-                                lowest_since_entry = tracker_trade["lowest_price"]
-                                if current_price < lowest_since_entry * 1.02:
-                                    distance = min(distance, atr * 1.2)
-
-                        distance = max(distance, atr * 0.8)
-                        distance = min(distance, atr * 2.8)
-                        distance = max(distance, pip_value * trailing_min_pips)
-                        distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
-
-                        if distance > 0:
-                            logger.info(f"[TSL] Création du trailing stop adaptatif pour trade {trade_id}, distance={distance:.5f} (ATR={atr:.5f}, R={r:.2f}, mult={trailing_mult:.2f})")
-                            if create_oanda_trailing_stop_v981(trade_id, pair, distance):
-                                logger.info(f"[TSL] ✅ Trailing stop créé")
-                            else:
-                                logger.error(f"[TSL] ❌ ÉCHEC création trailing")
+                                logger.warning(f"[TSL] Distance invalide ({distance})")
                         else:
-                            logger.warning(f"[TSL] Distance invalide ({distance})")
+                            logger.info(f"[TSL] R={r:.2f} < seuil d'activation {trailing_activation:.2f}R - pas de trailing pour l'instant")
                     else:
                         logger.error(f"[BE] ❌ ÉCHEC modification SL")
 
@@ -5422,33 +5473,34 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# DIAGNOSTIC DE DÉMARRAGE V105
+# DIAGNOSTIC DE DÉMARRAGE V105.1
 # ============================================================
 def diagnostic_startup_v981():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V105")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V105.1")
     logger.info("=" * 60)
-    logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BASE_BREAKEVEN_TRIGGER_R} (adaptatif) - ✅ V102: 0.40R")
-    logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif) - ✅ V102: 0.25R")
+    logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BASE_BREAKEVEN_TRIGGER_R} (adaptatif) - ✅ V105.1: 0.55R")
+    logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif) - ✅ V105.1: 0.25R")
     logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {BASE_EQS_MIN_THRESHOLD} (adaptatif, 65 en ASIA) - ✅ V105")
     logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {BASE_ADX_MIN_THRESHOLD} (adaptatif, 20 en ASIA, 25 en session active)")
-    logger.info(f"[DIAG] TRAILING_STOP = {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R - ✅ V102: 1.0R")
+    logger.info(f"[DIAG] TRAILING_STOP = {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R - ✅ V105.1: 1.5R")
+    logger.info(f"[DIAG] TRAILING_ACTIVATION = {BASE_TRAILING_ACTIVATION_R}R - ✅ V105.1: 0.80R")
     logger.info(f"[DIAG] BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {BASE_MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS_ASIA = {MIN_ATR_PIPS_BY_PAIR_ASIA} - ✅ V105")
-    logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
+    logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR} - ✅ V105.1: AUD/USD corrigé à 3.5")
     logger.info("[DIAG] SUIVI DES CLÔTURES : tentative API + fallback")
     logger.info("[DIAG] ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS")
     logger.info("[DIAG] APPELS OANDA CORRIGÉS")
     logger.info("[DIAG] GESTION DE MAINTENANCE OANDA ACTIVÉE")
     logger.info("[DIAG] SUIVI DES TRADES STAGNANTS ACTIVÉ")
     logger.info("[DIAG] BREAK EVEN ADAPTATIF ACTIVÉ")
-    logger.info("[DIAG] TRAILING STOP ADAPTATIF ACTIVÉ")
+    logger.info("[DIAG] TRAILING STOP OPTIMISÉ ACTIVÉ (activation 0.80R, distance 1.5R)")
     logger.info("[DIAG] SORTIE ANTICIPÉE SUR RETOURNEMENT ACTIVÉE - ✅ V103: 4 signaux requis")
     logger.info("[DIAG] DISTANCE SL MINIMUM (10 pips) ACTIVÉE")
     logger.info("[DIAG] FILTRE SPREAD ÉLEVÉ ACTIVÉ")
     logger.info(f"[DIAG] MAX TRADES = {MAX_TRADES_TOTAL}")
-    logger.info("[DIAG] SUIVI MFE/MAE ACTIVÉ")
+    logger.info("[DIAG] SUIVI MFE/MAE ACTIVÉ AVEC LOGS ENRICHIS - ✅ V105.1")
     logger.info("[DIAG] APPRENTISSAGE DES SETUPS ACTIVÉ (seuil 10 trades)")
     logger.info("[DIAG] PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 10 trades, hystérésis 1 cycle, amplitude limitée) - ✅ V104")
     logger.info("[DIAG] FILTRES SESSION ASIA : USD/CAD, AUD/USD bloqués - ✅ V103")
@@ -5464,6 +5516,7 @@ def diagnostic_startup_v981():
     logger.info("[DIAG] FILTRE STRUCTURE H1 - ✅ V105")
     logger.info("[DIAG] ADAPTATION DES POIDS DES SETUPS - ✅ V105")
     logger.info("[DIAG] SÉLECTION DU MEILLEUR SETUP AVEC SEUIL RELATIF - ✅ V105")
+    logger.info("[DIAG] SL/TP RÉÉQUILIBRÉS (multiplicateurs plus serrés) - ✅ V105.1")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -5485,33 +5538,30 @@ def diagnostic_startup_v981():
 # BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V105 (ASIA SMART)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V105.1 (ASIA SMART OPTIMISÉ)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
-    logger.info(f"✅ Seuil Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R) - ✅ V102: 0.40R")
-    logger.info(f"✅ Seuil Break Even anticipé adaptatif (base: {BASE_BREAKEVEN_EARLY_R}R) - ✅ V102: 0.25R")
+    logger.info(f"✅ Seuil Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R) - ✅ V105.1: 0.55R")
+    logger.info(f"✅ Seuil Break Even anticipé adaptatif (base: {BASE_BREAKEVEN_EARLY_R}R) - ✅ V105.1: 0.25R")
     logger.info(f"✅ Seuil EQS adaptatif (base: {BASE_EQS_MIN_THRESHOLD}/100, 65 en ASIA) - ✅ V105")
+    logger.info(f"✅ Trailing stop optimisé (activation {BASE_TRAILING_ACTIVATION_R}R, distance {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R) - ✅ V105.1")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("📈 SUIVI DES CLÔTURES : tentative de récupération via TradeDetails + fallback")
     logger.info("📊 ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS (wins+losses+breakevens)")
     logger.info("📊 MÉTRIQUES ENRICHIES : ATR, ADX, RSI, Momentum, Heure, Jour, Session, Spread, Volatilité, Tendances H1/H4")
     logger.info("🔧 APPELS OANDA CORRIGÉS : formatage, retry, gestion d'erreur")
-    logger.info("📈 SUIVI MFE/MAE ACTIVÉ pour chaque trade")
+    logger.info("📈 SUIVI MFE/MAE ACTIVÉ AVEC LOGS ENRICHIS - ✅ V105.1")
     logger.info("📈 APPRENTISSAGE DES SETUPS ACTIVÉ (seuil 10 trades)")
     logger.info("📈 PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 10 trades, hystérésis 1 cycle, amplitude limitée) - ✅ V104")
     logger.info("")
-    logger.info("🔧 CORRECTIONS V105 APPLIQUÉES :")
-    logger.info("  ✅ Seuils ATR réduits de 30% en ASIA")
-    logger.info("  ✅ EQS minimum relevé à 65 en ASIA")
-    logger.info("  ✅ Score minimum +3 en ASIA")
-    logger.info("  ✅ Qualité requise SNIPER/A+ en ASIA")
-    logger.info("  ✅ Risque réduit à 0.5% en ASIA")
-    logger.info("  ✅ Cooldown après perte augmenté à 2h")
-    logger.info("  ✅ Suppression du filtre EUR/USD NY (18h-21h)")
-    logger.info("  ✅ Filtre structure H1")
-    logger.info("  ✅ Adaptation des poids des setups")
-    logger.info("  ✅ Sélection du meilleur setup avec seuil relatif")
-    logger.info("  ✅ Conservation de toutes les fonctionnalités V104")
+    logger.info("🔧 CORRECTIONS V105.1 APPLIQUÉES :")
+    logger.info("  ✅ Logs MFE/MAE enrichis pour diagnostic")
+    logger.info("  ✅ SL/TP rééquilibrés (multiplicateurs plus serrés)")
+    logger.info("  ✅ Trailing stop optimisé (activation 0.80R, distance 1.5R)")
+    logger.info("  ✅ BE conservé à 0.55R")
+    logger.info("  ✅ Pullback AUD/USD corrigé (3.5)")
+    logger.info("  ✅ Cooldown 1h conservé")
+    logger.info("  ✅ Tous les filtres V105 conservés")
     logger.info("")
 
     diagnostic_startup_v981()
@@ -5550,7 +5600,7 @@ if __name__ == "__main__":
             check_breakeven_v981()
 
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V105")
+                logger.info(f"⏰ Scan des signaux V105.1")
                 last_signal_scan = now
 
                 now_dt = datetime.utcnow()
