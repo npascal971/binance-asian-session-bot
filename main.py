@@ -3935,6 +3935,60 @@ def get_effective_atr_threshold(pair: str) -> float:
     else:
         return base_min_atr * 0.85
 
+# ============================================================
+# V106 - CALCUL SL/TP AVEC MULTIPLICATEURS PAR SETUP
+# ============================================================
+def calculate_sl_tp(
+    entry_price: float,
+    atr: float,
+    direction: str,
+    pair: str,
+    entry_type: str = "FVG_RETEST",
+    fvg_data: dict = None,
+    breaker_level: float = None,
+) -> Tuple[float, float]:
+    """
+    Calcule le Stop Loss et le Take Profit en fonction du type de setup.
+    Utilise SIGNAL_RISK_SETTINGS pour les multiplicateurs.
+    Retourne (stop_loss, take_profit).
+    """
+    direction = direction.upper()
+    pip_value = get_pip_value_for_pair(pair)
+
+    # Récupérer les multiplicateurs pour ce setup
+    risk_settings = SIGNAL_RISK_SETTINGS.get(entry_type, SIGNAL_RISK_SETTINGS["FVG_RETEST"])
+    sl_mult = risk_settings.get("sl_multiplier", 0.8)
+    tp_mult = risk_settings.get("tp_multiplier", 2.0)
+
+    # Ajustements spécifiques
+    if entry_type == "BREAKER" and breaker_level is not None:
+        # Pour BREAKER, on place le SL juste au-delà du breaker
+        if direction == "BUY":
+            stop_loss = breaker_level - (atr * 0.3)
+        else:
+            stop_loss = breaker_level + (atr * 0.3)
+    else:
+        # Calcul standard basé sur l'ATR
+        sl_distance = max(atr * sl_mult, pip_value * 10)  # minimum 10 pips
+        if direction == "BUY":
+            stop_loss = entry_price - sl_distance
+        else:
+            stop_loss = entry_price + sl_distance
+
+    # Calcul du TP (RR minimum 2:1)
+    risk = abs(entry_price - stop_loss)
+    tp_distance = max(risk * max(tp_mult, 2.0), risk * 2.0)
+
+    if direction == "BUY":
+        take_profit = entry_price + tp_distance
+    else:
+        take_profit = entry_price - tp_distance
+
+    # Arrondir selon la paire
+    stop_loss = float(round_price_v88(pair, stop_loss))
+    take_profit = float(round_price_v88(pair, take_profit))
+
+    return stop_loss, take_profit
 
 # ✅ V106 : calculate_signal_confidence transformée en score /100
 def calculate_signal_confidence(
@@ -4018,11 +4072,13 @@ def calculate_signal_confidence(
     atr_value = calculate_atr(df_m15)
     fvg_data = entry.get("fvg") if "fvg" in entry else None
 
-    stop_loss, take_profit = calculate_sl_tp(
-        entry_price=entry_level, atr=atr_value, direction=direction,
-        pair=pair, entry_type=entry_type, fvg_data=fvg_data,
-    )
-
+    try:
+        stop_loss, take_profit = calculate_sl_tp(
+            entry_price=entry_level, atr=atr_value, direction=direction,
+            pair=pair, entry_type=entry_type, fvg_data=fvg_data,
+        )
+    except NameError:
+        logger.error(f"[CRITICAL] La fonction 'calculate_sl_tp' est manquante !")
     # --- 2. Construire les métriques le plus tôt possible ---
     atr_pips = price_to_pips(atr_value, pair)
     adx = calculate_adx(df_h1)
