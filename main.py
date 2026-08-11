@@ -175,7 +175,7 @@ class AdaptiveState:
         self.adaptation_counters = defaultdict(lambda: {"good": 0, "bad": 0})
         # ✅ V105 : Cooldown après une perte (2 heures)
         self.last_loss_time = defaultdict(float)
-        self.loss_cooldown = 3600  # 2 heures
+        self.loss_cooldown = 3600  # 1 heures
         # ✅ V105 : Adaptation des poids des setups
         self.setup_performance = defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0})
 
@@ -4264,6 +4264,8 @@ def get_session_quality_bonus(pair: str) -> Tuple[int, str]:
     
     else:
         return 0, "Session creuse"
+
+
 # ✅ V106 : calculate_signal_confidence transformée en score /100
 def calculate_signal_confidence(
     pair: str,
