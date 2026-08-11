@@ -5040,9 +5040,13 @@ def advanced_main_v981():
     stats.log_summary()
 
 # ============================================================
-# V106 : BREAK EVEN AVEC PARAMÈTRES ADAPTATIFS (BE à 0.55R) + correction TP
+# V106 - CORRECTION DU TRAILING APRÈS BE
 # ============================================================
+
 def check_breakeven_v981():
+    """
+    Version corrigée : le trailing peut s'activer même si BE déjà déclenché.
+    """
     try:
         if is_maintenance_suspended():
             logger.debug("⏳ OANDA en maintenance - BE suspendu")
@@ -5085,102 +5089,92 @@ def check_breakeven_v981():
 
             check_stagnant_trades(trade_id, pair, direction, entry, r)
 
-            early_be = False
-            try:
-                api = v88_client()
-                df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
-                df_h4 = get_candles_with_retry(api, pair, GRANULARITY_H4, 300)
-                trade_info = {"direction": direction, "pair": pair}
-                early_be = should_early_breakeven(trade_info, df_h1, df_h4)
-            except Exception as e:
-                logger.debug(f"Erreur early_be pour {trade_id}: {e}")
-
             pair_params = stats.adaptive_state.get_pair_params(pair)
-            effective_threshold = pair_params["be_early_r"] if early_be else pair_params["be_trigger_r"]
-            logger.info(f"[BE] Trade {trade_id} {pair} {direction} | R={r:.2f} (seuil={effective_threshold:.2f}) | TrailingActivation={pair_params.get('trailing_activation_r', 0.80):.2f}R")
-
-            # ✅ V103 : Sortie anticipée sur retournement - uniquement si R < -0.30 et 4 signaux
-            try:
-                api = v88_client()
-                df_m15 = get_candles_with_retry(api, pair, GRANULARITY_M15, 40)
-                df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
-                if check_indicator_reversal(pair, direction, df_m15, df_h1, r):
-                    logger.warning(f"[EXIT_EARLY] Trade {trade_id} {pair} {direction} : R={r:.2f} < -0.30, indicateurs retournés (4 signaux), fermeture anticipée")
-                    if close_trade_api(trade_id):
-                        logger.info(f"[EXIT_EARLY] Trade {trade_id} fermé avec succès")
-                        continue
+            effective_threshold = pair_params["be_trigger_r"]
+            
+            # ✅ CORRECTION : Vérifier si le SL est déjà au BE
+            is_already_be = (direction == "BUY" and current_sl >= entry) or (direction == "SELL" and current_sl <= entry)
+            
+            if is_already_be:
+                logger.debug(f"[BE] Trade {trade_id} déjà au BE, on passe au trailing")
+                # ✅ Même si déjà BE, on vérifie le trailing
+            else:
+                # Vérifier si BE doit être déclenché
+                if r >= effective_threshold:
+                    logger.info(f"[BE] 🎯 Condition R>={effective_threshold:.2f} atteinte pour {trade_id}")
+                    if direction == "BUY":
+                        be_sl = entry + offset
                     else:
-                        logger.error(f"[EXIT_EARLY] Échec fermeture trade {trade_id}")
-            except Exception as e:
-                logger.debug(f"Erreur check_indicator_reversal pour {trade_id}: {e}")
+                        be_sl = entry - offset
 
-            # ✅ V106 : BE à 0.55R (conservé)
-            if r >= effective_threshold:
-                logger.info(f"[BE] 🎯 Condition R>={effective_threshold:.2f} atteinte pour {trade_id}")
-                if direction == "BUY":
-                    be_sl = entry + offset
-                else:
-                    be_sl = entry - offset
-
-                if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
-                    logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
-                    # ✅ V106 : modification SL avec ajustement du TP pour préserver RR
-                    if modify_trade_sl_v981(trade_id, pair, be_sl, adjust_tp=True):
-                        logger.info(f"[BE] ✅ SL et TP ajustés avec succès pour {trade_id}")
-                        time.sleep(1)
-                        _OANDA_CACHE_V88.pop("open_trades_raw", None)
-                        trade_details = get_trade_details_v88(trade_id)
-                        if has_trailing_stop_v88(trade_details):
-                            logger.info(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
+                    if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
+                        logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
+                        if modify_trade_sl_v981(trade_id, pair, be_sl, adjust_tp=True):
+                            logger.info(f"[BE] ✅ SL et TP ajustés avec succès pour {trade_id}")
+                            time.sleep(1)
+                            _OANDA_CACHE_V88.pop("open_trades_raw", None)
+                            # On continue pour vérifier le trailing
+                        else:
+                            logger.error(f"[BE] ❌ ÉCHEC modification SL")
                             continue
 
-                        # ✅ V105.1 : Trailing stop optimisé (activation 0.80R, distance 1.5R)
-                        atr = get_atr_m15_v88(pair)
-                        pip_value = get_pip_value_for_pair(pair)
+            # ✅ Vérifier le trailing (même si BE déjà déclenché)
+            trade_details = get_trade_details_v88(trade_id)
+            if has_trailing_stop_v88(trade_details):
+                logger.debug(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
+                continue
 
-                        # Vérifier si on a atteint le seuil d'activation du trailing
-                        trailing_activation = pair_params.get("trailing_activation_r", 0.80)
-                        
-                        if r >= trailing_activation:
-                            logger.info(f"[TSL] R={r:.2f} >= seuil d'activation {trailing_activation:.2f}R - création du trailing")
-                            
-                            trailing_mult = pair_params["trailing_atr_mult"]
-                            trailing_min_pips = pair_params["trailing_min_pips"]
+            # ✅ Récupérer le SL actuel après BE
+            trade_details = get_trade_details_v88(trade_id)
+            current_sl = get_stop_loss_v88(trade_details)
+            if current_sl <= 0:
+                continue
 
-                            base_distance = atr * trailing_mult
+            # Recalculer R avec le nouveau SL
+            if direction == "BUY":
+                risk = entry - current_sl
+                profit = current_price - entry
+            else:
+                risk = current_sl - entry
+                profit = entry - current_price
+            if risk <= 0:
+                continue
+            r = profit / risk
 
-                            # Ajustement en fonction de la volatilité et du R
-                            r_factor = max(0.6, min(1.4, 1.0 / (1.0 + abs(r) * 0.3)))
-                            distance = base_distance * r_factor
+            trailing_activation = pair_params.get("trailing_activation_r", 0.80)
+            
+            # ✅ Trailing avec activation progressive
+            if r >= trailing_activation:
+                logger.info(f"[TSL] R={r:.2f} >= seuil d'activation {trailing_activation:.2f}R")
+                
+                atr = get_atr_m15_v88(pair)
+                pip_value = get_pip_value_for_pair(pair)
+                trailing_mult = pair_params["trailing_atr_mult"]
+                trailing_min_pips = pair_params["trailing_min_pips"]
 
-                            tracker_trade = trade_tracker.get_trade(trade_id)
-                            if tracker_trade:
-                                if direction == "BUY":
-                                    highest_since_entry = tracker_trade["highest_price"]
-                                    if current_price > highest_since_entry * 0.98:
-                                        distance = min(distance, atr * 1.2)
-                                else:
-                                    lowest_since_entry = tracker_trade["lowest_price"]
-                                    if current_price < lowest_since_entry * 1.02:
-                                        distance = min(distance, atr * 1.2)
+                # Calcul de la distance
+                base_distance = atr * trailing_mult
+                
+                # Ajustement volatilité
+                r_factor = max(0.6, min(1.4, 1.0 / (1.0 + abs(r) * 0.3)))
+                distance = base_distance * r_factor
+                
+                # Distance minimale
+                distance = max(distance, atr * 0.8)
+                distance = min(distance, atr * 2.8)
+                distance = max(distance, pip_value * trailing_min_pips)
+                distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
 
-                            distance = max(distance, atr * 0.8)
-                            distance = min(distance, atr * 2.8)
-                            distance = max(distance, pip_value * trailing_min_pips)
-                            distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
-
-                            if distance > 0:
-                                logger.info(f"[TSL] Création du trailing stop optimisé pour trade {trade_id}, distance={distance:.5f} (ATR={atr:.5f}, R={r:.2f}, mult={trailing_mult:.2f}, activation={trailing_activation:.2f}R)")
-                                if create_oanda_trailing_stop_v981(trade_id, pair, distance):
-                                    logger.info(f"[TSL] ✅ Trailing stop créé")
-                                else:
-                                    logger.error(f"[TSL] ❌ ÉCHEC création trailing")
-                            else:
-                                logger.warning(f"[TSL] Distance invalide ({distance})")
-                        else:
-                            logger.info(f"[TSL] R={r:.2f} < seuil d'activation {trailing_activation:.2f}R - pas de trailing pour l'instant")
+                if distance > 0:
+                    logger.info(f"[TSL] Création du trailing stop (BE déjà déclenché ou non) pour trade {trade_id}, distance={distance:.5f}")
+                    if create_oanda_trailing_stop_v981(trade_id, pair, distance):
+                        logger.info(f"[TSL] ✅ Trailing stop créé")
                     else:
-                        logger.error(f"[BE] ❌ ÉCHEC modification SL")
+                        logger.error(f"[TSL] ❌ ÉCHEC création trailing")
+                else:
+                    logger.warning(f"[TSL] Distance invalide ({distance})")
+            else:
+                logger.debug(f"[TSL] R={r:.2f} < seuil d'activation {trailing_activation:.2f}R")
 
     except Exception as e:
         logger.error(f"Erreur check_breakeven_v981: {e}")
