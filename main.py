@@ -3990,6 +3990,94 @@ def calculate_sl_tp(
 
     return stop_loss, take_profit
 
+# ============================================================
+# V106 - FILTRE DE CONFIRMATION DE CLÔTURE M15
+# ============================================================
+def filter_close_confirmation(df_m15: pd.DataFrame, direction: str) -> Tuple[bool, str]:
+    """
+    Vérifie si la dernière bougie M15 confirme la direction du trade.
+    Retourne (passed: bool, message: str)
+    Ce n'est PAS un veto : attribue +1 au score si confirmé.
+    """
+    direction = direction.upper()
+    
+    if df_m15 is None or len(df_m15) < 2:
+        return False, "Données insuffisantes"
+    
+    try:
+        # Dernière bougie
+        last = df_m15.iloc[-1]
+        prev = df_m15.iloc[-2]
+        
+        open_price = float(last['open'])
+        high = float(last['high'])
+        low = float(last['low'])
+        close = float(last['close'])
+        
+        prev_close = float(prev['close'])
+        prev_high = float(prev['high'])
+        prev_low = float(prev['low'])
+        
+        total_range = high - low
+        if total_range <= 0:
+            return False, "Amplitude nulle"
+        
+        body = abs(close - open_price)
+        body_ratio = body / total_range
+        
+        if direction == "BUY":
+            # Conditions principales : bougie haussière avec corps solide
+            is_bullish = close > open_price
+            strong_body = body_ratio >= 0.45
+            upper_half = close > (high + low) / 2
+            
+            # Condition alternative : momentum haussier (close > close_prev ET high > high_prev)
+            momentum_confirm = (close > prev_close) and (high > prev_high)
+            
+            if is_bullish and strong_body and upper_half:
+                return True, f"Bougie haussière solide (body={body_ratio*100:.0f}%)"
+            elif is_bullish and momentum_confirm:
+                return True, f"Momentum haussier confirmé (close>{prev_close:.5f}, high>{prev_high:.5f})"
+            else:
+                details = []
+                if not is_bullish:
+                    details.append("bougie non haussière")
+                if not strong_body:
+                    details.append(f"corps faible ({body_ratio*100:.0f}%)")
+                if not upper_half:
+                    details.append("clôture dans moitié basse")
+                return False, f"Pas de confirmation BUY: {', '.join(details)}"
+        
+        elif direction == "SELL":
+            # Conditions principales : bougie baissière avec corps solide
+            is_bearish = close < open_price
+            strong_body = body_ratio >= 0.45
+            lower_half = close < (high + low) / 2
+            
+            # Condition alternative : momentum baissier (close < close_prev ET low < low_prev)
+            momentum_confirm = (close < prev_close) and (low < prev_low)
+            
+            if is_bearish and strong_body and lower_half:
+                return True, f"Bougie baissière solide (body={body_ratio*100:.0f}%)"
+            elif is_bearish and momentum_confirm:
+                return True, f"Momentum baissier confirmé (close<{prev_close:.5f}, low<{prev_low:.5f})"
+            else:
+                details = []
+                if not is_bearish:
+                    details.append("bougie non baissière")
+                if not strong_body:
+                    details.append(f"corps faible ({body_ratio*100:.0f}%)")
+                if not lower_half:
+                    details.append("clôture dans moitié haute")
+                return False, f"Pas de confirmation SELL: {', '.join(details)}"
+        
+        else:
+            return False, f"Direction {direction} invalide"
+            
+    except Exception as e:
+        logger.debug(f"[CONFIRM] Erreur: {e}")
+        return False, f"Erreur de calcul: {str(e)}"
+
 # ✅ V106 : calculate_signal_confidence transformée en score /100
 def calculate_signal_confidence(
     pair: str,
