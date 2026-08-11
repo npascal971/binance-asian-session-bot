@@ -4078,6 +4078,192 @@ def filter_close_confirmation(df_m15: pd.DataFrame, direction: str) -> Tuple[boo
         logger.debug(f"[CONFIRM] Erreur: {e}")
         return False, f"Erreur de calcul: {str(e)}"
 
+# ============================================================
+# V106 - FONCTIONS DE SCORING MANQUANTES
+# ============================================================
+
+def estimate_win_rate(entry_score: int, eqs_score: int, confluences: dict) -> str:
+    """
+    Estime le win rate en fonction du score et des confluences.
+    Retourne une chaîne comme "55-60%".
+    """
+    base = 45  # base minimale
+    
+    # Score d'entrée
+    if entry_score >= 80:
+        base += 15
+    elif entry_score >= 70:
+        base += 10
+    elif entry_score >= 65:
+        base += 5
+    
+    # EQS
+    if eqs_score >= 80:
+        base += 8
+    elif eqs_score >= 70:
+        base += 5
+    elif eqs_score >= 65:
+        base += 2
+    
+    # Confluences
+    if confluences.get("d1_aligned", False):
+        base += 5
+    if confluences.get("structure_ok", False):
+        base += 3
+    if confluences.get("pullback_ok", False):
+        base += 3
+    if confluences.get("macd_confirmed", False):
+        base += 3
+    if confluences.get("session_active", False):
+        base += 2
+    if confluences.get("bos_confirmed", False):
+        base += 2
+    if confluences.get("rsi_divergence", False):
+        base += 3
+    
+    # Limiter entre 35% et 75%
+    base = max(35, min(75, base))
+    
+    return f"{base-3}-{base+3}%"
+
+
+def get_signal_quality_label(entry_score: int, eqs_score: int) -> str:
+    """
+    Détermine la qualité du signal basée sur entry_score et EQS.
+    Retourne "SNIPER", "A+", "A", "B", "C", "D".
+    """
+    if entry_score >= 85 and eqs_score >= 80:
+        return "SNIPER"
+    elif entry_score >= 78 and eqs_score >= 75:
+        return "A+"
+    elif entry_score >= 70 and eqs_score >= 68:
+        return "A"
+    elif entry_score >= 65 and eqs_score >= 62:
+        return "B"
+    elif entry_score >= 55 and eqs_score >= 55:
+        return "C"
+    else:
+        return "D"
+
+
+def get_d1_trend_bonus(df_d1: pd.DataFrame, direction: str) -> Tuple[int, str]:
+    """
+    Vérifie si la tendance D1 est alignée avec la direction.
+    Retourne (bonus: int, label: str).
+    """
+    if df_d1 is None or len(df_d1) < 20:
+        return 0, "Données D1 insuffisantes"
+    
+    try:
+        # EMA50 D1
+        ema50_d1 = df_d1['close'].ewm(span=50, adjust=False).mean()
+        if len(ema50_d1.dropna()) < 2:
+            return 0, "EMA50 D1 indisponible"
+        
+        price = df_d1['close'].iloc[-1]
+        ema50 = ema50_d1.iloc[-1]
+        
+        # Pente EMA50
+        ema50_prev = ema50_d1.iloc[-5] if len(ema50_d1) > 5 else ema50
+        slope = ema50 - ema50_prev
+        
+        # MACD D1
+        macd_hist = calculate_macd_momentum(df_d1)
+        macd_last = macd_hist.iloc[-1] if len(macd_hist) > 0 else 0
+        macd_prev = macd_hist.iloc[-2] if len(macd_hist) > 1 else 0
+        
+        if direction == "BUY":
+            if price > ema50 and slope > 0 and macd_last > 0 and macd_last > macd_prev:
+                return 2, "Tendance D1 haussière forte"
+            elif price > ema50:
+                return 1, "Tendance D1 haussière"
+            else:
+                return 0, "D1 neutre ou baissière"
+        else:  # SELL
+            if price < ema50 and slope < 0 and macd_last < 0 and macd_last < macd_prev:
+                return 2, "Tendance D1 baissière forte"
+            elif price < ema50:
+                return 1, "Tendance D1 baissière"
+            else:
+                return 0, "D1 neutre ou haussière"
+                
+    except Exception as e:
+        logger.debug(f"[D1_TREND] Erreur: {e}")
+        return 0, f"Erreur D1: {str(e)[:30]}"
+
+
+def get_macd_h1_bonus(df_h1: pd.DataFrame, direction: str) -> Tuple[int, str]:
+    """
+    Vérifie si le MACD H1 confirme la direction.
+    Retourne (bonus: int, label: str).
+    """
+    if df_h1 is None or len(df_h1) < 26:
+        return 0, "Données H1 insuffisantes"
+    
+    try:
+        macd_hist = calculate_macd_momentum(df_h1)
+        if len(macd_hist.dropna()) < 2:
+            return 0, "MACD indisponible"
+        
+        macd_last = macd_hist.iloc[-1]
+        macd_prev = macd_hist.iloc[-2]
+        
+        if direction == "BUY":
+            if macd_last > 0 and macd_last > macd_prev:
+                return 1, "MACD haussier"
+            elif macd_last > 0:
+                return 0, "MACD positif mais non croissant"
+            else:
+                return 0, "MACD négatif"
+        else:  # SELL
+            if macd_last < 0 and macd_last < macd_prev:
+                return 1, "MACD baissier"
+            elif macd_last < 0:
+                return 0, "MACD négatif mais non décroissant"
+            else:
+                return 0, "MACD positif"
+                
+    except Exception as e:
+        logger.debug(f"[MACD] Erreur: {e}")
+        return 0, f"Erreur MACD: {str(e)[:30]}"
+
+
+def get_session_quality_bonus(pair: str) -> Tuple[int, str]:
+    """
+    Vérifie la qualité de la session actuelle pour la paire.
+    Retourne (bonus: int, label: str).
+    """
+    hour = datetime.utcnow().hour
+    
+    # Session ASIA (21h-7h UTC)
+    if 21 <= hour or hour < 7:
+        # Paires plus volatiles en ASIA
+        asia_quality_pairs = ["USD_JPY", "AUD_JPY", "AUD_USD", "AUD_CAD", "GBP_JPY"]
+        if pair in asia_quality_pairs:
+            return 1, f"ASIA - bonne pour {pair}"
+        else:
+            return 0, "ASIA - volatilité réduite"
+    
+    # Session LONDON (7h-16h UTC)
+    elif 7 <= hour < 16:
+        # Paires majeures très actives
+        london_pairs = ["EUR_USD", "GBP_USD", "USD_JPY", "GBP_JPY", "XAU_USD"]
+        if pair in london_pairs:
+            return 2, "LONDON - très actif"
+        else:
+            return 1, "LONDON - actif"
+    
+    # Session NY (12h-21h UTC)
+    elif 12 <= hour < 21:
+        # Paires actives en NY
+        ny_pairs = ["EUR_USD", "GBP_USD", "USD_CAD", "XAU_USD"]
+        if pair in ny_pairs:
+            return 2, "NY - très actif"
+        else:
+            return 1, "NY - actif"
+    
+    else:
+        return 0, "Session creuse"
 # ✅ V106 : calculate_signal_confidence transformée en score /100
 def calculate_signal_confidence(
     pair: str,
