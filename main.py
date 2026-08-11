@@ -5092,45 +5092,36 @@ def check_breakeven_v981():
             pair_params = stats.adaptive_state.get_pair_params(pair)
             effective_threshold = pair_params["be_trigger_r"]
             
-            # ✅ CORRECTION : Vérifier si le SL est déjà au BE
+            # ✅ V106 : Vérifier si le SL est déjà au BE
             is_already_be = (direction == "BUY" and current_sl >= entry) or (direction == "SELL" and current_sl <= entry)
             
-            if is_already_be:
-                logger.debug(f"[BE] Trade {trade_id} déjà au BE, on passe au trailing")
-                # ✅ Même si déjà BE, on vérifie le trailing
-            else:
-                # Vérifier si BE doit être déclenché
-                if r >= effective_threshold:
-                    logger.info(f"[BE] 🎯 Condition R>={effective_threshold:.2f} atteinte pour {trade_id}")
-                    if direction == "BUY":
-                        be_sl = entry + offset
+            if not is_already_be and r >= effective_threshold:
+                logger.info(f"[BE] 🎯 Condition R>={effective_threshold:.2f} atteinte pour {trade_id}")
+                if direction == "BUY":
+                    be_sl = entry + offset
+                else:
+                    be_sl = entry - offset
+
+                if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
+                    logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
+                    if modify_trade_sl_v981(trade_id, pair, be_sl, adjust_tp=True):
+                        logger.info(f"[BE] ✅ SL et TP ajustés avec succès pour {trade_id}")
+                        time.sleep(1)
+                        _OANDA_CACHE_V88.pop("open_trades_raw", None)
+                        # Mettre à jour current_sl pour le trailing
+                        current_sl = be_sl
                     else:
-                        be_sl = entry - offset
+                        logger.error(f"[BE] ❌ ÉCHEC modification SL")
+                        continue
 
-                    if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
-                        logger.info(f"[BE] {pair} id={trade_id} R={r:.2f} => SL {current_sl:.5f} -> {be_sl:.5f}")
-                        if modify_trade_sl_v981(trade_id, pair, be_sl, adjust_tp=True):
-                            logger.info(f"[BE] ✅ SL et TP ajustés avec succès pour {trade_id}")
-                            time.sleep(1)
-                            _OANDA_CACHE_V88.pop("open_trades_raw", None)
-                            # On continue pour vérifier le trailing
-                        else:
-                            logger.error(f"[BE] ❌ ÉCHEC modification SL")
-                            continue
-
-            # ✅ Vérifier le trailing (même si BE déjà déclenché)
+            # ✅ V106 : Vérifier le trailing (même si BE déjà déclenché)
+            # Vérifier d'abord si le trailing existe déjà
             trade_details = get_trade_details_v88(trade_id)
             if has_trailing_stop_v88(trade_details):
                 logger.debug(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
                 continue
 
-            # ✅ Récupérer le SL actuel après BE
-            trade_details = get_trade_details_v88(trade_id)
-            current_sl = get_stop_loss_v88(trade_details)
-            if current_sl <= 0:
-                continue
-
-            # Recalculer R avec le nouveau SL
+            # Recalculer R avec le SL actuel (si BE vient d'être déclenché, current_sl a été mis à jour)
             if direction == "BUY":
                 risk = entry - current_sl
                 profit = current_price - entry
@@ -5143,30 +5134,25 @@ def check_breakeven_v981():
 
             trailing_activation = pair_params.get("trailing_activation_r", 0.80)
             
-            # ✅ Trailing avec activation progressive
             if r >= trailing_activation:
-                logger.info(f"[TSL] R={r:.2f} >= seuil d'activation {trailing_activation:.2f}R")
+                logger.info(f"[TSL] R={r:.2f} >= seuil d'activation {trailing_activation:.2f}R - création du trailing")
                 
                 atr = get_atr_m15_v88(pair)
                 pip_value = get_pip_value_for_pair(pair)
                 trailing_mult = pair_params["trailing_atr_mult"]
                 trailing_min_pips = pair_params["trailing_min_pips"]
 
-                # Calcul de la distance
                 base_distance = atr * trailing_mult
-                
-                # Ajustement volatilité
                 r_factor = max(0.6, min(1.4, 1.0 / (1.0 + abs(r) * 0.3)))
                 distance = base_distance * r_factor
                 
-                # Distance minimale
                 distance = max(distance, atr * 0.8)
                 distance = min(distance, atr * 2.8)
                 distance = max(distance, pip_value * trailing_min_pips)
                 distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
 
                 if distance > 0:
-                    logger.info(f"[TSL] Création du trailing stop (BE déjà déclenché ou non) pour trade {trade_id}, distance={distance:.5f}")
+                    logger.info(f"[TSL] Création du trailing stop pour trade {trade_id}, distance={distance:.5f}")
                     if create_oanda_trailing_stop_v981(trade_id, pair, distance):
                         logger.info(f"[TSL] ✅ Trailing stop créé")
                     else:
@@ -5174,12 +5160,11 @@ def check_breakeven_v981():
                 else:
                     logger.warning(f"[TSL] Distance invalide ({distance})")
             else:
-                logger.debug(f"[TSL] R={r:.2f} < seuil d'activation {trailing_activation:.2f}R")
+                logger.debug(f"[TSL] R={r:.2f} < seuil d'activation {trailing_activation:.2f}R - pas de trailing pour l'instant")
 
     except Exception as e:
         logger.error(f"Erreur check_breakeven_v981: {e}")
         logger.error(traceback.format_exc())
-
 # ============================================================
 # STRICT FILTERS - inchangé
 # ============================================================
