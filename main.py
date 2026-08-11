@@ -76,7 +76,7 @@ BASE_TRAILING_STOP_MIN_DISTANCE_PIPS = float(os.getenv("TRAILING_STOP_MIN_DISTAN
 BASE_TRAILING_ACTIVATION_R = float(os.getenv("TRAILING_ACTIVATION_R", "0.80"))
 
 # ✅ V106 : Seuil de score d'entrée /100 pour accepter un signal
-MIN_ENTRY_SCORE = int(os.getenv("MIN_ENTRY_SCORE", "65"))
+MIN_ENTRY_SCORE = int(os.getenv("MIN_ENTRY_SCORE", "55"))
 
 BASE_ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "23.0"))
 BASE_MOMENTUM_MIN_PERCENT = float(os.getenv("MOMENTUM_MIN_PERCENT", "0.15"))
