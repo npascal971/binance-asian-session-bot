@@ -4417,18 +4417,46 @@ def calculate_signal_confidence(
     # --- 5. Structure H1 ---
     struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
 
-    # ✅ V108 : Pour les setups forts uniquement, on accepte les structures partiellement alignées
-    # Setup forts : FVG_RETEST_PERFECT, NESTED_FVG
-    # Condition : EQS >= 75 ET (HH=True OU HL=True)
+    # V109 - Assouplissement contrôlé de la structure H1
+    # Les setups forts peuvent passer une structure H1 NEUTRE uniquement si:
+    #   - FVG_RETEST_PERFECT ou NESTED_FVG
+    #   - EQS >= 80
+    #   - ADX >= 28
+    # Une structure franchement opposée reste bloquée.
     strong_setups = ["FVG_RETEST_PERFECT", "NESTED_FVG"]
     is_strong_setup = entry_type in strong_setups
 
-    if not struct_passed and is_strong_setup and eqs_score >= 75 and "partiellement" in struct_msg:
+    structure_neutral = (
+        (direction == "BUY" and "HH=False, HL=False" in struct_msg)
+        or (direction == "SELL" and "LH=False, LL=False" in struct_msg)
+    )
+
+    structure_override = (
+        not struct_passed
+        and is_strong_setup
+        and structure_neutral
+        and eqs_score >= 80
+        and adx >= 28
+    )
+
+    if structure_override:
+        logger.info(
+            f"[STRUCTURE_OVERRIDE] {pair} | {direction} | {entry_type} | "
+            f"Structure neutre acceptée | EQS={eqs_score} | ADX={adx:.1f}"
+        )
+        score_components["Structure"] += 1
+        details["Structure_OVERRIDE"] = (
+            f"+1 (structure neutre acceptée | EQS={eqs_score} | ADX={adx:.1f})"
+        )
+        struct_passed = True
+
+    elif not struct_passed and is_strong_setup and eqs_score >= 75 and "partiellement" in struct_msg:
         # Structure partiellement alignée acceptée pour setup fort
         logger.info(f"[STRUCTURE] {pair} | {direction} | {entry_type} | Structure partiellement alignée, acceptée car EQS={eqs_score} >= 75 et setup fort")
         score_components["Structure"] += 1
         details["Structure_V98.1"] = f"+1 ({struct_msg}, accepté pour setup fort)"
         struct_passed = True
+
     elif not struct_passed:
         # Rejet normal
         rejection_logs.append(struct_msg)
@@ -4449,7 +4477,7 @@ def calculate_signal_confidence(
             "metrics": metrics
         }
 
-    if "partiellement" not in struct_msg:
+    if "partiellement" not in struct_msg and not structure_override:
         score_components["Structure"] += 2
         details["Structure_V98.1"] = f"+2 ({struct_msg})"
 
@@ -4810,7 +4838,6 @@ def calculate_signal_confidence(
         "rejection_logs": rejection_logs,
         "metrics": metrics
     }
-
 # =============================
 # DÉTECTION BIAS-FIRST - inchangé
 # =============================
