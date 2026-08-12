@@ -56,11 +56,11 @@ BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {
 # V90 - Pullback minimum (en pips) pour confirmer un retracement
 PULLBACK_MIN_PIPS_BY_PAIR = {
     "EUR_USD": 4.0,
-    "GBP_USD": 5.0,
+    "GBP_USD": 4.0,
     "USD_CAD": 3.5,
-    "AUD_USD": 3.5,  # ✅ V105.1 : Corrigé (était à 0)
+    "AUD_USD": 4.5,  # ✅ V105.1 : Corrigé (était à 0)
     "AUD_CAD": 4.0,
-    "XAU_USD": 25.0,
+    "XAU_USD": 30.0,
     "USD_JPY": 5.0,
     "GBP_JPY": 5.0,
     "DEFAULT": 4.0
@@ -98,16 +98,16 @@ MIN_ATR_PIPS_BY_PAIR = {
 
 # ✅ V105 : Seuils ATR réduits de 30% pour la session ASIA
 MIN_ATR_PIPS_BY_PAIR_ASIA = {
-    "EUR_USD": 3.0,
+    "EUR_USD": 2.5,
     "AUD_JPY": 3.5,
     "GBP_USD": 3.5,
     "USD_CAD": 3.5,
-    "AUD_USD": 3.0,
+    "AUD_USD": 3.5,
     "AUD_CAD": 3.5,
     "XAU_USD": 24.0,
-    "GBP_JPY": 7.0,
-    "USD_JPY": 5.0,
-    "DEFAULT": 4.5,
+    "GBP_JPY": 6.0,
+    "USD_JPY": 4.5,
+    "DEFAULT": 3.5,
 }
 
 # ============================================================
