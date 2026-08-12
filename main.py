@@ -4811,7 +4811,6 @@ def calculate_signal_confidence(
         "metrics": metrics
     }
 
-
 # =============================
 # DÉTECTION BIAS-FIRST - inchangé
 # =============================
