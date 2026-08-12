@@ -100,14 +100,14 @@ MIN_ATR_PIPS_BY_PAIR = {
 MIN_ATR_PIPS_BY_PAIR_ASIA = {
     "EUR_USD": 2.5,
     "AUD_JPY": 3.5,
-    "GBP_USD": 3.5,
-    "USD_CAD": 3.5,
-    "AUD_USD": 3.5,
-    "AUD_CAD": 3.5,
+    "GBP_USD": 2.5,
+    "USD_CAD": 3.0,
+    "AUD_USD": 3.0,
+    "AUD_CAD": 3.0,
     "XAU_USD": 24.0,
-    "GBP_JPY": 6.0,
+    "GBP_JPY": 5.0,
     "USD_JPY": 4.5,
-    "DEFAULT": 3.5,
+    "DEFAULT": 3.0,
 }
 
 # ============================================================
