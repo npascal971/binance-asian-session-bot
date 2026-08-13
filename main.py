@@ -4229,7 +4229,7 @@ def get_macd_h1_bonus(df_h1: pd.DataFrame, direction: str) -> Tuple[int, str]:
 
 
 # ============================================================
-# V106 - CALCUL DU SCORE DE CONFIANCE
+# V109.1 - CALCUL DU SCORE DE CONFIANCE
 # ============================================================
 def calculate_signal_confidence(
     pair: str,
@@ -4245,7 +4245,9 @@ def calculate_signal_confidence(
     df_d1: pd.DataFrame = None,
 ) -> dict:
     """
-    V108 : Assouplissement de la structure H1 pour les setups forts uniquement.
+    V109.1 : 
+    - Structure H1 : neutre acceptée pour setups forts (FVG_RETEST_PERFECT/NESTED_FVG) si EQS >=75, opposée rejetée.
+    - HTF 1/3 bypassé pour setups forts si EQS >=80, ADX >=28 et structure non opposée.
     """
     score_components = {
         "ICT": 0,
@@ -4414,51 +4416,25 @@ def calculate_signal_confidence(
     details["Volatility"] = f"{atr_msg} (score {atr_score}/10)"
     score_components["Momentum"] += atr_score
 
-    # --- 5. Structure H1 ---
+    # --- 5. Structure H1 (V109.1) ---
     struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
 
-    # V109 - Assouplissement contrôlé de la structure H1
-    # Les setups forts peuvent passer une structure H1 NEUTRE uniquement si:
-    #   - FVG_RETEST_PERFECT ou NESTED_FVG
-    #   - EQS >= 80
-    #   - ADX >= 28
-    # Une structure franchement opposée reste bloquée.
+    # ✅ V109.1 : Pour les setups forts, on accepte les structures NEUTRES (partiellement alignées)
+    # mais on rejette les structures OPPOSÉES (HH=False ET HL=False pour BUY)
     strong_setups = ["FVG_RETEST_PERFECT", "NESTED_FVG"]
     is_strong_setup = entry_type in strong_setups
 
-    structure_neutral = (
-        (direction == "BUY" and "HH=False, HL=False" in struct_msg)
-        or (direction == "SELL" and "LH=False, LL=False" in struct_msg)
-    )
+    # Détecter si la structure est totalement opposée
+    is_opposed = "non haussière" in struct_msg or "non baissière" in struct_msg
 
-    structure_override = (
-        not struct_passed
-        and is_strong_setup
-        and structure_neutral
-        and eqs_score >= 80
-        and adx >= 28
-    )
-
-    if structure_override:
-        logger.info(
-            f"[STRUCTURE_OVERRIDE] {pair} | {direction} | {entry_type} | "
-            f"Structure neutre acceptée | EQS={eqs_score} | ADX={adx:.1f}"
-        )
+    if not struct_passed and is_strong_setup and eqs_score >= 75 and not is_opposed:
+        # Structure neutre acceptée pour setup fort
+        logger.info(f"[STRUCTURE] {pair} | {direction} | {entry_type} | Structure neutre acceptée (EQS={eqs_score}>=75, setup fort)")
         score_components["Structure"] += 1
-        details["Structure_OVERRIDE"] = (
-            f"+1 (structure neutre acceptée | EQS={eqs_score} | ADX={adx:.1f})"
-        )
+        details["Structure_V98.1"] = f"+1 ({struct_msg}, neutre acceptée pour setup fort)"
         struct_passed = True
-
-    elif not struct_passed and is_strong_setup and eqs_score >= 75 and "partiellement" in struct_msg:
-        # Structure partiellement alignée acceptée pour setup fort
-        logger.info(f"[STRUCTURE] {pair} | {direction} | {entry_type} | Structure partiellement alignée, acceptée car EQS={eqs_score} >= 75 et setup fort")
-        score_components["Structure"] += 1
-        details["Structure_V98.1"] = f"+1 ({struct_msg}, accepté pour setup fort)"
-        struct_passed = True
-
     elif not struct_passed:
-        # Rejet normal
+        # Rejet normal (structure opposée ou setup non fort)
         rejection_logs.append(struct_msg)
         details["VETO"] = f"STRUCTURE: {struct_msg}"
         return {
@@ -4477,7 +4453,8 @@ def calculate_signal_confidence(
             "metrics": metrics
         }
 
-    if "partiellement" not in struct_msg and not structure_override:
+    if "partiellement" not in struct_msg and "neutre" not in struct_msg:
+        # Structure pleinement alignée → bonus +2
         score_components["Structure"] += 2
         details["Structure_V98.1"] = f"+2 ({struct_msg})"
 
@@ -4598,10 +4575,21 @@ def calculate_signal_confidence(
         }
     details["H1_Structure"] = f"OK ({h1_structure:+d})"
 
-    # --- 11. Confluence HTF ---
+    # --- 11. Confluence HTF (V109.1) ---
     htf_score, htf_str, htf_details, htf_bonus = check_htf_confluence(direction, df_h1, df_h4)
-    if htf_score < 2:
-        rejection_logs.append(f"Confluence HTF insuffisante ({htf_score}/3)")
+
+    # ✅ V109.1 : Bypass HTF 1/3 pour setups forts avec EQS>=80 et ADX>=28
+    bypass_htf = False
+    if htf_score == 1 and is_strong_setup and eqs_score >= 80 and adx >= 28:
+        # Vérifier que la structure n'est pas opposée (on utilise struct_passed qui est déjà vrai)
+        if struct_passed:
+            bypass_htf = True
+            logger.info(f"[HTF_BYPASS] {pair} | {direction} | {entry_type} | HTF 1/3 bypassé car EQS={eqs_score}>=80, ADX={adx:.1f}>=28, setup fort")
+            # On garde le score de base sans bonus
+            htf_score = 2  # pour ne pas déclencher le rejet
+
+    if htf_score < 2 and not bypass_htf:
+        rejection_logs.append(f"Confluence HTF: {htf_score}/3 (requis 2/3)")
         details["VETO"] = f"Confluence HTF: {htf_score}/3 (requis 2/3)"
         return {
             "passed": False,
@@ -4618,8 +4606,14 @@ def calculate_signal_confidence(
             "rejection_logs": rejection_logs,
             "metrics": metrics
         }
-    score_components["HTF_Alignment"] += htf_score + htf_bonus
-    details["HTF_Confluence"] = f"{htf_str} ({' | '.join(htf_details)}) (bonus {htf_bonus})"
+
+    # Ajouter les bonus HTF (si bypass, on garde le bonus 0)
+    if not bypass_htf:
+        score_components["HTF_Alignment"] += htf_score + htf_bonus
+        details["HTF_Confluence"] = f"{htf_str} ({' | '.join(htf_details)}) (bonus {htf_bonus})"
+    else:
+        score_components["HTF_Alignment"] += 0
+        details["HTF_Confluence"] = f"1/3 (BYPASS pour setup fort)"
 
     # --- 12. Bias / tendance H4 ---
     if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
