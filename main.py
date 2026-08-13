@@ -3655,14 +3655,20 @@ def calculate_entry_quality_score(
 
 
 def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple:
+    """
+    V106.1 : Version corrigée du filtre structure H1.
+    - BUY : rejeter uniquement si structure BEARISH confirmée (LH et LL)
+    - SELL : rejeter uniquement si structure BULLISH confirmée (HH et HL)
+    - Les structures neutres ou partiellement alignées sont acceptées
+    """
     if len(df) < lookback * 2 + 2:
-        return False, "Données insuffisantes"
+        return True, "Données insuffisantes, structure acceptée par défaut"
 
     direction = direction.upper()
     swing_highs, swing_lows = detect_swing_points(df, lookback=3)
 
     if len(swing_highs) < 2 or len(swing_lows) < 2:
-        return False, "Pas assez de swing points"
+        return True, "Pas assez de swing points, structure acceptée par défaut"
 
     last_highs = sorted(swing_highs, key=lambda x: x['index'])[-2:]
     last_lows = sorted(swing_lows, key=lambda x: x['index'])[-2:]
@@ -3670,25 +3676,28 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
     if direction == "BUY":
         hh = last_highs[-1]['price'] > last_highs[-2]['price']
         hl = last_lows[-1]['price'] > last_lows[-2]['price']
-        if hh and hl:
-            return True, "Structure haussière (HH/HL)"
-        elif hh or hl:
-            return True, "Structure partiellement haussière"
-        else:
-            return False, f"Structure non haussière (HH={hh}, HL={hl})"
-
-    elif direction == "SELL":
         lh = last_highs[-1]['price'] < last_highs[-2]['price']
         ll = last_lows[-1]['price'] < last_lows[-2]['price']
+        
+        # ✅ V106.1 : Rejeter UNIQUEMENT si structure BEARISH confirmée (LH ET LL)
         if lh and ll:
-            return True, "Structure baissière (LH/LL)"
-        elif lh or ll:
-            return True, "Structure partiellement baissière"
+            return False, f"Structure BEARISH confirmée (LH={lh}, LL={ll})"
         else:
-            return False, f"Structure non baissière (LH={lh}, LL={ll})"
+            return True, f"Structure non-bearish (HH={hh}, HL={hl})"
+
+    elif direction == "SELL":
+        hh = last_highs[-1]['price'] > last_highs[-2]['price']
+        hl = last_lows[-1]['price'] > last_lows[-2]['price']
+        lh = last_highs[-1]['price'] < last_highs[-2]['price']
+        ll = last_lows[-1]['price'] < last_lows[-2]['price']
+        
+        # ✅ V106.1 : Rejeter UNIQUEMENT si structure BULLISH confirmée (HH ET HL)
+        if hh and hl:
+            return False, f"Structure BULLISH confirmée (HH={hh}, HL={hl})"
+        else:
+            return True, f"Structure non-bullish (LH={lh}, LL={ll})"
 
     return False, f"Direction {direction} invalide"
-
 
 def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, current_price: float, pair: str) -> tuple:
     direction = direction.upper()
@@ -4302,7 +4311,8 @@ def calculate_signal_confidence(
             "total_score": 0,
             "final_confidence": "LOW",
             "details": {"VETO": "Entrée/direction invalide"},
-            "metrics": {}
+            "metrics": {},
+            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
 
     entry_level = float(entry_level)
@@ -4388,7 +4398,8 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics
+            "metrics": metrics,
+            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "PASS", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
 
     details["EQS"] = f"{eqs_score}/100"
@@ -4411,30 +4422,20 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics
+            "metrics": metrics,
+            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "PASS", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
     details["Volatility"] = f"{atr_msg} (score {atr_score}/10)"
     score_components["Momentum"] += atr_score
 
-    # --- 5. Structure H1 (V109.1) ---
-    struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
-
-    # ✅ V109.1 : Pour les setups forts, on accepte les structures NEUTRES (partiellement alignées)
-    # mais on rejette les structures OPPOSÉES (HH=False ET HL=False pour BUY)
-    strong_setups = ["FVG_RETEST_PERFECT", "NESTED_FVG"]
-    is_strong_setup = entry_type in strong_setups
+    # --- 5. Structure H1 (V106.1 - plus permissif) ---
+    struct_passed, struct_msg = filter_market_structure_v1061(df_h1, direction, lookback=5)
 
     # Détecter si la structure est totalement opposée
-    is_opposed = "non haussière" in struct_msg or "non baissière" in struct_msg
+    is_opposed = "BEARISH" in struct_msg or "BULLISH" in struct_msg
 
-    if not struct_passed and is_strong_setup and eqs_score >= 75 and not is_opposed:
-        # Structure neutre acceptée pour setup fort
-        logger.info(f"[STRUCTURE] {pair} | {direction} | {entry_type} | Structure neutre acceptée (EQS={eqs_score}>=75, setup fort)")
-        score_components["Structure"] += 1
-        details["Structure_V98.1"] = f"+1 ({struct_msg}, neutre acceptée pour setup fort)"
-        struct_passed = True
-    elif not struct_passed:
-        # Rejet normal (structure opposée ou setup non fort)
+    if not struct_passed:
+        # Rejet normal (structure opposée)
         rejection_logs.append(struct_msg)
         details["VETO"] = f"STRUCTURE: {struct_msg}"
         return {
@@ -4450,10 +4451,15 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics
+            "metrics": metrics,
+            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
 
-    if "partiellement" not in struct_msg and "neutre" not in struct_msg:
+    if "non-bearish" in struct_msg or "non-bullish" in struct_msg:
+        # Structure neutre ou partiellement alignée → bonus +1
+        score_components["Structure"] += 1
+        details["Structure_V98.1"] = f"+1 ({struct_msg}, neutre acceptée)"
+    else:
         # Structure pleinement alignée → bonus +2
         score_components["Structure"] += 2
         details["Structure_V98.1"] = f"+2 ({struct_msg})"
@@ -4476,7 +4482,8 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics
+            "metrics": metrics,
+            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "PASS", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
     score_components["Pullback"] += 2
     details["Pullback_V98.1"] = f"+2 ({pullback_msg})"
@@ -4507,7 +4514,8 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics
+            "metrics": metrics,
+            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "PASS", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
     score_components["Momentum"] += mom_score
     details["Momentum"] = f"{mom_msg} (score {mom_score}/15)"
@@ -4530,14 +4538,16 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics
+            "metrics": metrics,
+            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "PASS", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
     score_components["Momentum"] += adx_score
     details["ADX"] = f"{adx_msg} (score {adx_score}/10)"
 
-    # --- 10. Filtre structure H1 (veto dur) - CONSERVÉ ---
+    # --- 10. Filtre structure H1 (veto dur) - CONSERVÉ mais assoupli ---
     h1_structure = score_market_structure(df_h1)
     if direction == "BUY" and h1_structure < 0:
+        # Structure baissière confirmée
         rejection_logs.append(f"Structure H1 baissière ({h1_structure}) contre BUY")
         details["VETO"] = f"Structure H1: {h1_structure} (baissière)"
         return {
@@ -4553,9 +4563,11 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics
+            "metrics": metrics,
+            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
     if direction == "SELL" and h1_structure > 0:
+        # Structure haussière confirmée
         rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL")
         details["VETO"] = f"Structure H1: {h1_structure} (haussière)"
         return {
@@ -4571,7 +4583,8 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics
+            "metrics": metrics,
+            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
     details["H1_Structure"] = f"OK ({h1_structure:+d})"
 
@@ -4579,7 +4592,10 @@ def calculate_signal_confidence(
     htf_score, htf_str, htf_details, htf_bonus = check_htf_confluence(direction, df_h1, df_h4)
 
     # ✅ V109.1 : Bypass HTF 1/3 pour setups forts avec EQS>=80 et ADX>=28
+    strong_setups = ["FVG_RETEST_PERFECT", "NESTED_FVG"]
+    is_strong_setup = entry_type in strong_setups
     bypass_htf = False
+    
     if htf_score == 1 and is_strong_setup and eqs_score >= 80 and adx >= 28:
         # Vérifier que la structure n'est pas opposée (on utilise struct_passed qui est déjà vrai)
         if struct_passed:
@@ -4604,7 +4620,8 @@ def calculate_signal_confidence(
             "eqs_details": eqs_result,
             "eqs_components": eqs_components,
             "rejection_logs": rejection_logs,
-            "metrics": metrics
+            "metrics": metrics,
+            "filter_diag": {"HTF_BYPASS": "NO" if not bypass_htf else "YES", "STRUCTURE_FILTER": "PASS", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
 
     # Ajouter les bonus HTF (si bypass, on garde le bonus 0)
@@ -4640,7 +4657,8 @@ def calculate_signal_confidence(
                 "eqs_details": eqs_result,
                 "eqs_components": eqs_components,
                 "rejection_logs": rejection_logs,
-                "metrics": metrics
+                "metrics": metrics,
+                "filter_diag": {"HTF_BYPASS": "NO" if not bypass_htf else "YES", "STRUCTURE_FILTER": "PASS", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
             }
         else:
             score_components["ICT"] -= 2
@@ -4680,7 +4698,8 @@ def calculate_signal_confidence(
                 "eqs_details": eqs_result,
                 "eqs_components": eqs_components,
                 "rejection_logs": rejection_logs,
-                "metrics": metrics
+                "metrics": metrics,
+                "filter_diag": {"HTF_BYPASS": "NO" if not bypass_htf else "YES", "STRUCTURE_FILTER": "PASS", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
             }
     except Exception as exc:
         details["Distance_Error"] = str(exc)
@@ -4811,6 +4830,24 @@ def calculate_signal_confidence(
         decision_line += f" | REJECT={rejection_logs[0][:80]}"
     logger.info(decision_line)
 
+    # ✅ V106.1 : Logs détaillés pour diagnostic
+    filter_diag = {
+        "HTF_BYPASS": "YES" if bypass_htf else "NO",
+        "STRUCTURE_FILTER": "PASS" if struct_passed else "FAIL",
+        "SCORE_FILTER": "PASS" if passed else "FAIL",
+        "FINAL_DECISION": "PASS" if passed else "REJECT"
+    }
+
+    # Log structuré des filtres
+    logger.info(
+        f"[FILTER_DIAG] {pair} | {direction} | {entry_type} | "
+        f"HTF_BYPASS={filter_diag['HTF_BYPASS']} | "
+        f"STRUCTURE_FILTER={filter_diag['STRUCTURE_FILTER']} | "
+        f"SCORE_FILTER={filter_diag['SCORE_FILTER']} | "
+        f"FINAL_DECISION={filter_diag['FINAL_DECISION']} | "
+        f"Score={entry_score}/{MIN_ENTRY_SCORE} | EQS={eqs_score} | ADX={adx:.1f}"
+    )
+
     # --- 22. Retour final ---
     return {
         "total_score": entry_score,
@@ -4830,7 +4867,8 @@ def calculate_signal_confidence(
         "eqs_details": eqs_result,
         "eqs_components": eqs_components,
         "rejection_logs": rejection_logs,
-        "metrics": metrics
+        "metrics": metrics,
+        "filter_diag": filter_diag  # ✅ V106.1 : Ajout des logs de diagnostic
     }
 # =============================
 # DÉTECTION BIAS-FIRST - inchangé
