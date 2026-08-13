@@ -5999,7 +5999,7 @@ def calculate_signal_confidence(
     score_components["Momentum"] += atr_score
 
     # --- 5. Structure H1 (V106.1 - plus permissif) ---
-    struct_passed, struct_msg = filter_market_structure_v1061(df_h1, direction, lookback=5)
+    struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
 
     # Détecter si la structure est totalement opposée
     is_opposed = "BEARISH" in struct_msg or "BULLISH" in struct_msg
