@@ -5008,6 +5008,8 @@ def advanced_main_v981():
         logger.info("✅ V106 : ADX dynamique avec pente")
         logger.info("✅ V106 : Poids initiaux des setups ajustés")
         logger.info("✅ V106 : Correction RR après BE (TP réajusté)")
+        logger.info("✅ V106.1 : Filtre STRUCTURE H1 assoupli (rejet uniquement structure opposée)")
+        logger.info("✅ V106.1 : Logs FILTER_DIAG et REJECT_DIAG pour diagnostic")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -5116,6 +5118,19 @@ def advanced_main_v981():
                 
                 if DEBUG_MODE:
                     logger.debug(f"📊 {pair} {direction} | Score: {score} | EQS: {eqs}/100 | Passed: {passed}")
+
+                # ✅ V106.1 : Log détaillé du rejet pour diagnostic
+                if not passed:
+                    filter_diag = confidence_result.get("filter_diag", {})
+                    if filter_diag:
+                        logger.info(
+                            f"[REJECT_DIAG] {pair} | {direction} | {entry_type} | "
+                            f"HTF_BYPASS={filter_diag.get('HTF_BYPASS', 'NO')} | "
+                            f"STRUCTURE={filter_diag.get('STRUCTURE_FILTER', 'UNKNOWN')} | "
+                            f"SCORE={filter_diag.get('SCORE_FILTER', 'UNKNOWN')} | "
+                            f"FINAL={filter_diag.get('FINAL_DECISION', 'UNKNOWN')} | "
+                            f"Score={score} | EQS={eqs} | ADX={metrics.get('adx', 'NA')}"
+                        )
 
                 if passed:
                     scored_entries.append({"entry": entry, "confidence": confidence_result})
@@ -5248,7 +5263,6 @@ def advanced_main_v981():
             continue
             
     stats.log_summary()
-
 # ============================================================
 # V106 - CORRECTION DU TRAILING APRÈS BE
 # ============================================================
