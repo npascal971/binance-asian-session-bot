@@ -4907,42 +4907,310 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
 
     return False, f"Direction {direction} invalide"
 
-def filter_pullback(df: pd.DataFrame, direction: str, entry_level: float, current_price: float, pair: str) -> tuple:
-    direction = direction.upper()
-    pip_value = get_pip_value_for_pair(pair)
-    min_pullback_pips = PULLBACK_MIN_PIPS_BY_PAIR.get(pair, PULLBACK_MIN_PIPS_BY_PAIR["DEFAULT"])
-    # Tolérance de 0.5 pip
-    tolerance_pips = 0.5
-    min_pullback_price = max(
-        0,
-        (min_pullback_pips - tolerance_pips) * pip_value
-    )
+def filter_pullback(
+    df: pd.DataFrame,
+    direction: str,
+    entry_level: float,
+    current_price: float,
+    pair: str
+) -> tuple:
+    """
+    V106.2 - Pullback dynamique basé sur l'ATR.
 
-    if len(df) < 8:
-        return False, "Données insuffisantes pour pullback"
+    Objectif :
+    - Remplacer le seuil fixe de pullback par un seuil adaptatif
+      à la volatilité réelle du marché.
+    - Conserver un filtre suffisamment strict pour éviter les
+      entrées sans véritable retracement.
+    - Être plus permissif lorsque l'ATR est faible, notamment
+      pendant la session ASIA.
 
-    recent = df.iloc[-8:]
+    Logique :
+        seuil_ATR = ATR(M15) × 0.75
 
-    if direction == "BUY":
-        recent_high = recent['high'].max()
-        pullback_depth = recent_high - current_price
-        pullback_pips = price_to_pips(pullback_depth, pair)
-        if pullback_depth >= min_pullback_price:
-            return True, f"Pullback OK ({pullback_pips:.1f} pips >= {min_pullback_pips})"
+        seuil_effectif =
+            max(minimum absolu,
+                min(seuil maximum, seuil_ATR))
+
+    Puis application d'une tolérance de 0.5 pip.
+
+    Exemples EUR/USD :
+        ATR 3.0 pips  → seuil = 2.25 pips
+        ATR 4.0 pips  → seuil = 3.00 pips
+        ATR 5.0 pips  → seuil = 3.75 pips
+        ATR 6.0+ pips → seuil plafonné à 4.00 pips
+
+    Important :
+    - On ne supprime PAS le filtre pullback.
+    - On ne force PAS une entrée.
+    - Le pullback doit toujours exister.
+    - Le seuil reste borné pour éviter les retracements
+      artificiellement faibles ou excessivement importants.
+    """
+
+    try:
+        direction = str(direction).upper()
+        pair = str(pair).upper()
+
+        # ============================================================
+        # 1. VALIDATION DES DONNÉES
+        # ============================================================
+
+        if df is None or len(df) < max(8, ATR_PERIOD):
+            return False, "Données insuffisantes pour pullback"
+
+        if current_price is None or float(current_price) <= 0:
+            return False, "Prix courant invalide"
+
+        current_price = float(current_price)
+
+        # ============================================================
+        # 2. PIP VALUE
+        # ============================================================
+
+        pip_value = get_pip_value_for_pair(pair)
+
+        if pip_value is None or pip_value <= 0:
+            return False, f"Valeur pip invalide pour {pair}"
+
+        pip_value = float(pip_value)
+
+        # ============================================================
+        # 3. ATR M15
+        # ============================================================
+
+        try:
+            atr_price = calculate_atr(df, period=ATR_PERIOD)
+            atr_pips = price_to_pips(atr_price, pair)
+
+            atr_pips = float(atr_pips)
+
+        except Exception as e:
+            logger.warning(
+                f"[PULLBACK_ATR] {pair} | "
+                f"Impossible de calculer ATR: {e}"
+            )
+
+            atr_pips = 0.0
+
+        # ============================================================
+        # 4. SEUIL DE BASE
+        # ============================================================
+
+        base_min_pullback = PULLBACK_MIN_PIPS_BY_PAIR.get(
+            pair,
+            PULLBACK_MIN_PIPS_BY_PAIR["DEFAULT"]
+        )
+
+        base_min_pullback = float(base_min_pullback)
+
+        # ============================================================
+        # 5. SEUIL DYNAMIQUE ATR
+        # ============================================================
+
+        if atr_pips > 0:
+
+            # 75 % de l'ATR M15
+            atr_based_threshold = atr_pips * 0.75
+
+            # --------------------------------------------------------
+            # Bornes de sécurité
+            # --------------------------------------------------------
+
+            # Minimum absolu :
+            # on ne veut jamais accepter un pullback ridicule.
+            min_absolute_pips = min(
+                2.0,
+                base_min_pullback * 0.75
+            )
+
+            # Maximum :
+            # on conserve l'ancien seuil comme plafond.
+            max_pullback_pips = base_min_pullback
+
+            dynamic_min_pullback = max(
+                min_absolute_pips,
+                min(
+                    max_pullback_pips,
+                    atr_based_threshold
+                )
+            )
+
         else:
-            return False, f"Pullback insuffisant ({pullback_pips:.1f} pips < {min_pullback_pips})"
+            # Si ATR indisponible → fallback ancien système
+            dynamic_min_pullback = base_min_pullback
 
-    elif direction == "SELL":
-        recent_low = recent['low'].min()
-        pullback_depth = current_price - recent_low
-        pullback_pips = price_to_pips(pullback_depth, pair)
-        if pullback_depth >= min_pullback_price:
-            return True, f"Pullback OK ({pullback_pips:.1f} pips >= {min_pullback_pips})"
-        else:
-            return False, f"Pullback insuffisant ({pullback_pips:.1f} pips < {min_pullback_pips})"
+        # ============================================================
+        # 6. ADAPTATION ASIA
+        # ============================================================
 
-    return False, f"Direction {direction} invalide"
+        try:
+            hour = datetime.utcnow().hour
+            is_asia = hour >= 21 or hour < 7
+        except Exception:
+            is_asia = False
 
+        if is_asia:
+
+            # En ASIA, on autorise une réduction supplémentaire
+            # de 10 %, mais sans jamais passer sous 2 pips.
+            dynamic_min_pullback = max(
+                2.0,
+                dynamic_min_pullback * 0.90
+            )
+
+        # ============================================================
+        # 7. TOLÉRANCE
+        # ============================================================
+
+        tolerance_pips = 0.5
+
+        effective_threshold_pips = max(
+            0.0,
+            dynamic_min_pullback - tolerance_pips
+        )
+
+        min_pullback_price = (
+            effective_threshold_pips * pip_value
+        )
+
+        # ============================================================
+        # 8. FENÊTRE D'ANALYSE
+        # ============================================================
+
+        recent = df.iloc[-8:]
+
+        # ============================================================
+        # 9. CALCUL DU PULLBACK BUY
+        # ============================================================
+
+        if direction == "BUY":
+
+            recent_high = float(recent["high"].max())
+
+            pullback_depth = recent_high - current_price
+
+            pullback_pips = price_to_pips(
+                pullback_depth,
+                pair
+            )
+
+            pullback_pips = max(
+                0.0,
+                float(pullback_pips)
+            )
+
+            # --------------------------------------------------------
+            # Validation
+            # --------------------------------------------------------
+
+            if pullback_depth >= min_pullback_price:
+
+                logger.info(
+                    f"[PULLBACK_DYNAMIC] {pair} | BUY | "
+                    f"Pullback={pullback_pips:.1f}p | "
+                    f"Seuil={dynamic_min_pullback:.1f}p | "
+                    f"ATR={atr_pips:.1f}p | "
+                    f"Asia={is_asia} | PASSED"
+                )
+
+                return True, (
+                    f"Pullback OK "
+                    f"({pullback_pips:.1f} pips >= "
+                    f"{dynamic_min_pullback:.1f} pips | "
+                    f"ATR={atr_pips:.1f})"
+                )
+
+            else:
+
+                logger.info(
+                    f"[PULLBACK_DYNAMIC] {pair} | BUY | "
+                    f"Pullback={pullback_pips:.1f}p | "
+                    f"Seuil={dynamic_min_pullback:.1f}p | "
+                    f"ATR={atr_pips:.1f}p | "
+                    f"Asia={is_asia} | REJECT"
+                )
+
+                return False, (
+                    f"Pullback insuffisant "
+                    f"({pullback_pips:.1f} pips < "
+                    f"{dynamic_min_pullback:.1f} pips | "
+                    f"ATR={atr_pips:.1f})"
+                )
+
+        # ============================================================
+        # 10. CALCUL DU PULLBACK SELL
+        # ============================================================
+
+        elif direction == "SELL":
+
+            recent_low = float(recent["low"].min())
+
+            pullback_depth = current_price - recent_low
+
+            pullback_pips = price_to_pips(
+                pullback_depth,
+                pair
+            )
+
+            pullback_pips = max(
+                0.0,
+                float(pullback_pips)
+            )
+
+            # --------------------------------------------------------
+            # Validation
+            # --------------------------------------------------------
+
+            if pullback_depth >= min_pullback_price:
+
+                logger.info(
+                    f"[PULLBACK_DYNAMIC] {pair} | SELL | "
+                    f"Pullback={pullback_pips:.1f}p | "
+                    f"Seuil={dynamic_min_pullback:.1f}p | "
+                    f"ATR={atr_pips:.1f}p | "
+                    f"Asia={is_asia} | PASSED"
+                )
+
+                return True, (
+                    f"Pullback OK "
+                    f"({pullback_pips:.1f} pips >= "
+                    f"{dynamic_min_pullback:.1f} pips | "
+                    f"ATR={atr_pips:.1f})"
+                )
+
+            else:
+
+                logger.info(
+                    f"[PULLBACK_DYNAMIC] {pair} | SELL | "
+                    f"Pullback={pullback_pips:.1f}p | "
+                    f"Seuil={dynamic_min_pullback:.1f}p | "
+                    f"ATR={atr_pips:.1f}p | "
+                    f"Asia={is_asia} | REJECT"
+                )
+
+                return False, (
+                    f"Pullback insuffisant "
+                    f"({pullback_pips:.1f} pips < "
+                    f"{dynamic_min_pullback:.1f} pips | "
+                    f"ATR={atr_pips:.1f})"
+                )
+
+        # ============================================================
+        # 11. DIRECTION INVALIDE
+        # ============================================================
+
+        return False, f"Direction {direction} invalide"
+
+    except Exception as e:
+
+        logger.error(
+            f"[PULLBACK_DYNAMIC] {pair} | "
+            f"Erreur: {e}",
+            exc_info=True
+        )
+
+        return False, f"Erreur filtre pullback: {e}"
 
 # ✅ V106 : Fonction de score ATR / volatilité (remplace filter_min_volatility)
 def score_atr_volatility(df: pd.DataFrame, pair: str) -> tuple:
