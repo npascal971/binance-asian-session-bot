@@ -887,29 +887,34 @@ open_trade_details = {}
 # ============================================================
 # V110 - RÉCUPÉRATION DU VRAI TRADE FERMÉ
 # ============================================================
-
 def get_closed_trade_details_v110(
     trade_id: str
 ) -> dict | None:
     """
-    V110 - Cherche les informations réelles
-    d'un trade fermé.
+    V110 - Récupère les informations réelles d'un trade fermé.
 
     Priorité :
         1. TradeDetails
         2. TradesList state=CLOSED
 
-    Retourne None uniquement si OANDA
-    ne permet pas de récupérer les données.
+    Retourne :
+        dict du trade si trouvé
+        None si impossible à récupérer
     """
+
+    api = None
 
     try:
 
+        # ========================================================
+        # INITIALISATION CLIENT OANDA
+        # ========================================================
+
         api = v88_client()
 
-        # ----------------------------------------------------
-        # 1. TradeDetails
-        # ----------------------------------------------------
+        # ========================================================
+        # 1. TRADEDETAILS
+        # ========================================================
 
         try:
 
@@ -920,9 +925,9 @@ def get_closed_trade_details_v110(
 
             resp = api.request(r)
 
-            trade_data = resp.get(
-                "trade",
-                {}
+            trade_data = (
+                resp.get("trade", {})
+                or {}
             )
 
             if trade_data:
@@ -943,13 +948,11 @@ def get_closed_trade_details_v110(
                 f"{trade_id}: {e}"
             )
 
-        # ----------------------------------------------------
-        # 2. TradesList CLOSED
-        # ----------------------------------------------------
+        # ========================================================
+        # 2. FALLBACK : TRADES LIST CLOSED
+        # ========================================================
 
         try:
-
-            from oandapyV20.endpoints import trades
 
             params = {
                 "state": "CLOSED",
@@ -963,9 +966,9 @@ def get_closed_trade_details_v110(
 
             resp = api.request(r)
 
-            closed_trades = resp.get(
-                "trades",
-                []
+            closed_trades = (
+                resp.get("trades", [])
+                or []
             )
 
             for trade in closed_trades:
@@ -991,6 +994,16 @@ def get_closed_trade_details_v110(
                 f"indisponible: {e}"
             )
 
+        # ========================================================
+        # 3. RIEN TROUVÉ
+        # ========================================================
+
+        logger.warning(
+            f"[CLOSE_API] "
+            f"Trade {trade_id} "
+            f"non trouvé chez OANDA"
+        )
+
         return None
 
     except Exception as e:
@@ -998,7 +1011,7 @@ def get_closed_trade_details_v110(
         logger.error(
             f"[CLOSE_API] "
             f"Erreur récupération "
-            f"{trade_id}: {e}"
+            f"trade {trade_id}: {e}"
         )
 
         return None
