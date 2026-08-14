@@ -1,17 +1,14 @@
 # ============================================================
-# main(106).py - Version V106 "WIN RATE OPTIMIZER"
+# main(107).py - Version V107 "ASIA ENTRY BYPASS"
 #
-# AMÉLIORATIONS V106 :
-# 1. ✅ Score d'entrée /100 dans calculate_signal_confidence
-# 2. ✅ Bonus 3/3 HTF (+5)
-# 3. ✅ Momentum gradué (pénalité progressive, pas veto sec)
-# 4. ✅ ADX dynamique avec pente (score au lieu de seuil binaire)
-# 5. ✅ Poids initiaux des setups ajustés (FVG_RETEST_PERFECT=1.30, BISI=1.25, ...)
-# 6. ✅ Log structuré du score /100 dans [DECISION]
-# 7. ✅ Conservation de tous les filtres V105.1 (mais transformés en composantes du score)
-# 8. ✅ Utilisation du score /100 pour l'acceptation (seuil MIN_ENTRY_SCORE)
-# 9. ✅ Correction du RR après BE (TP réajusté si SL déplacé)
-# 10. ✅ Logs MFE/MAE enrichis (déjà présents)
+# AMÉLIORATIONS V107 :
+# 1. ✅ Correction ENTRY GATE ASIA pour FVG_RETEST_PERFECT
+#    - Score 48-54 accepté en ASIA avec conditions strictes
+#    - Logs spécifiques [ASIA_ENTRY_BYPASS] et [ASIA_ENTRY_BYPASS_REJECT]
+#    - Indicateur ENTRY_GATE=ASIA_BYPASS dans [DECISION]
+# 2. ✅ Conservation de toutes les règles V106
+# 3. ✅ Conservation de tous les filtres V105.1
+# 4. ✅ Conservation du score /100, momentum gradué, ADX dynamique
 # ============================================================
 
 import os
@@ -6611,7 +6608,7 @@ def calculate_signal_confidence(
         pass
 
     # --- 20. Calcul du score total ---
-        # ========================================================
+    # ========================================================
     # V110 - FINAL ENTRY QUALITY GATE
     # ========================================================
 
@@ -6660,6 +6657,67 @@ def calculate_signal_confidence(
         h1_structure=final_h1_structure,
         htf_score=final_htf_score,
     )
+
+    # ✅ V107 : ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT
+    bypass_used = False
+    bypass_reason = None
+    
+    # Vérifier si on est en ASIA
+    hour = datetime.utcnow().hour
+    is_asia = 21 <= hour or hour < 7
+    
+    if is_asia and entry_type == "FVG_RETEST_PERFECT" and not gate_passed:
+        # Vérifier les conditions de bypass
+        bypass_score = entry_score
+        bypass_eqs = eqs_score
+        bypass_adx = adx
+        bypass_htf = final_htf_score
+        bypass_struct = struct_passed
+        bypass_m15 = close_passed
+        bypass_pullback = pullback_passed
+        bypass_momentum_ok = not ((direction == "BUY" and momentum < -0.05) or (direction == "SELL" and momentum > 0.05))
+        bypass_spread_ok = spread_data.get("spread", 0.0) <= get_pip_value_for_pair(pair) * 1.5
+        
+        # Conditions de bypass
+        bypass_conditions = {
+            "score": bypass_score >= 48,
+            "eqs": bypass_eqs >= 80,
+            "adx": bypass_adx >= 18,
+            "htf": bypass_htf >= 2,
+            "structure": bypass_struct,
+            "m15": bypass_m15,
+            "pullback": bypass_pullback,
+            "momentum": bypass_momentum_ok,
+            "spread": bypass_spread_ok,
+            "no_other_veto": len(rejection_logs) == 0
+        }
+        
+        all_conditions_met = all(bypass_conditions.values())
+        
+        if all_conditions_met:
+            gate_passed = True
+            gate_reason = "ASIA_BYPASS"
+            bypass_used = True
+            logger.info(
+                f"[ASIA_ENTRY_BYPASS] "
+                f"{pair} | {direction} | FVG_RETEST_PERFECT | "
+                f"Score={bypass_score} | EQS={bypass_eqs} | ADX={bypass_adx:.1f} | "
+                f"M15_CONFIRM={'YES' if bypass_m15 else 'NO'} | "
+                f"H1_STRUCT={'PASS' if bypass_struct else 'FAIL'} | "
+                f"HTF={bypass_htf}/3 | Pullback={'PASS' if bypass_pullback else 'FAIL'} | "
+                f"RESULT=ACCEPT"
+            )
+        else:
+            # Log de rejet du bypass
+            failed_conditions = [k for k, v in bypass_conditions.items() if not v]
+            logger.info(
+                f"[ASIA_ENTRY_BYPASS_REJECT] "
+                f"{pair} | {direction} | "
+                f"reason=conditions non remplies: {', '.join(failed_conditions)} | "
+                f"Score={bypass_score} | EQS={bypass_eqs} | ADX={bypass_adx:.1f} | "
+                f"M15_CONFIRM={'YES' if bypass_m15 else 'NO'} | "
+                f"HTF={bypass_htf}/3"
+            )
 
     passed = bool(gate_passed)
 
@@ -6736,7 +6794,7 @@ def calculate_signal_confidence(
     if is_asia and quality_label not in [
         "SNIPER",
         "A+"
-    ]:
+    ] and not bypass_used:
         passed = False
 
         rejection_logs.append(
@@ -6784,6 +6842,9 @@ def calculate_signal_confidence(
                 f"{rejection_logs[0][:120]}"
             )
 
+    # ✅ V107 : Ajout de l'indicateur ENTRY_GATE=ASIA_BYPASS
+    entry_gate_label = "ASIA_BYPASS" if bypass_used else ("PASS" if passed else "FAIL")
+
     decision_line = (
         f"[DECISION] {pair} | "
         f"{direction} | "
@@ -6805,7 +6866,8 @@ def calculate_signal_confidence(
         f"Sess={session} | "
         f"Spread={spread:.2f} | "
         f"RR={rr_ratio:.2f} | "
-        f"PoidsSetup={setup_weight:.2f}"
+        f"PoidsSetup={setup_weight:.2f} | "
+        f"ENTRY_GATE={entry_gate_label}"
     )
 
     if not passed and rejection_logs:
@@ -6920,6 +6982,8 @@ def calculate_signal_confidence(
 
         "entry_gate_reason":
             gate_reason,
+        
+        "bypass_used": bypass_used,  # ✅ V107
     }
     if not passed:
         rejection_logs.append(f"Score = {entry_score} < seuil {MIN_ENTRY_SCORE}")
@@ -7012,7 +7076,8 @@ def calculate_signal_confidence(
         "eqs_components": eqs_components,
         "rejection_logs": rejection_logs,
         "metrics": metrics,
-        "filter_diag": filter_diag  # ✅ V106.1 : Ajout des logs de diagnostic
+        "filter_diag": filter_diag,  # ✅ V106.1 : Ajout des logs de diagnostic
+        "bypass_used": bypass_used,  # ✅ V107
     }
 # =============================
 # DÉTECTION BIAS-FIRST - inchangé
@@ -7112,6 +7177,7 @@ def advanced_main_v981():
         logger.info("✅ API OANDA initialisée avec succès")
         logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V106 - Seuil adaptatif + ASIA (65)")
         logger.info(f"✅ ENTRY SCORE /100 - Seuil minimum {MIN_ENTRY_SCORE}")
+        logger.info(f"✅ V107 - ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT")
         logger.info(f"✅ Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R)")
         logger.info("✅ AUDIT ATR ACTIVÉ")
         logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
@@ -7154,6 +7220,7 @@ def advanced_main_v981():
         logger.info("✅ V106 : Correction RR après BE (TP réajusté)")
         logger.info("✅ V106.1 : Filtre STRUCTURE H1 assoupli (rejet uniquement structure opposée)")
         logger.info("✅ V106.1 : Logs FILTER_DIAG et REJECT_DIAG pour diagnostic")
+        logger.info("✅ V107 : ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -7247,8 +7314,10 @@ def advanced_main_v981():
                 eqs = confidence_result.get("eqs_score", 0)
                 metrics = confidence_result.get("metrics", {})
                 passed = confidence_result.get("passed", False)
+                bypass_used = confidence_result.get("bypass_used", False)  # ✅ V107
                 
                 # ✅ V106 : LOG enrichi avec score /100
+                bypass_tag = " | BYPASS=ASIA" if bypass_used else ""
                 logger.info(
                     f"[SIGNAL] {pair} | "
                     f"DIR={direction} | "
@@ -7257,11 +7326,11 @@ def advanced_main_v981():
                     f"ADX={metrics.get('adx', 'NA')} | "
                     f"ATR={atr_pips:.1f} | "
                     f"SETUP={entry_type} | "
-                    f"PASSED={passed}"
+                    f"PASSED={passed}{bypass_tag}"
                 )
                 
                 if DEBUG_MODE:
-                    logger.debug(f"📊 {pair} {direction} | Score: {score} | EQS: {eqs}/100 | Passed: {passed}")
+                    logger.debug(f"📊 {pair} {direction} | Score: {score} | EQS: {eqs}/100 | Passed: {passed} | Bypass: {bypass_used}")
 
                 # ✅ V106.1 : Log détaillé du rejet pour diagnostic
                 if not passed:
@@ -7744,11 +7813,64 @@ def dedupe_raw_entries_v771(entries: list, pair: str) -> list:
     return list(seen.values())
 
 # ============================================================
-# DIAGNOSTIC DE DÉMARRAGE V106
+# TELEGRAM - inchangé
+# ============================================================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_ENABLED = TELEGRAM_BOT_TOKEN is not None and TELEGRAM_CHAT_ID is not None
+
+
+def send_telegram_alert(pair: str, direction: str, entry_price: float, stop_loss: float, take_profit: float,
+                        narrative: dict, bias_analysis: dict, rsi: float = 50,
+                        entry_type: str = "UNKNOWN", confidence_score: int = 0,
+                        eqs_score: int = 0):
+    if not TELEGRAM_ENABLED:
+        return
+    try:
+        if direction == "BUY":
+            direction_emoji = "🟢"
+        else:
+            direction_emoji = "🔴"
+        if entry_type:
+            entry_type_display = entry_type
+        else:
+            entry_type_display = "UNKNOWN"
+        msg = f"{direction_emoji} TRADE OPPORTUNITY\n"
+        msg += f"Pair: {pair}\n"
+        msg += f"Direction: {direction}\n"
+        msg += f"Entry: {entry_price:.5f}\n"
+        msg += f"SL: {stop_loss:.5f}\n"
+        msg += f"TP: {take_profit:.5f}\n"
+        if confidence_score > 0:
+            msg += f"Confiance: {confidence_score}%\n"
+        if eqs_score > 0:
+            msg += f"EQS: {eqs_score}/100\n"
+        msg += f"Setup: {entry_type_display}\n"
+        msg += f"RSI: {rsi:.1f}\n"
+        if bias_analysis:
+            bias = bias_analysis.get("bias", "NEUTRAL")
+            msg += f"Biais: {bias}\n"
+            if "win_rate" in bias_analysis:
+                msg += f"Win Rate estimé: {bias_analysis['win_rate']}\n"
+            if "quality_label" in bias_analysis:
+                msg += f"Qualité: {bias_analysis['quality_label']}\n"
+        rr = abs((take_profit - entry_price) / (entry_price - stop_loss)) if entry_price != stop_loss else 0
+        msg += f"RR: {rr:.2f}\n"
+        msg += f"Trade ID: {narrative.get('trade_id', 'N/A')}" if narrative else f"Trade ID: N/A"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
+        response = requests.post(url, data=data, timeout=10)
+        if response.status_code != 200:
+            logger.warning(f"Telegram erreur: {response.status_code}")
+    except Exception as e:
+        logger.error(f"Erreur envoi Telegram: {e}")
+
+# ============================================================
+# DIAGNOSTIC DE DÉMARRAGE V107
 # ============================================================
 def diagnostic_startup_v981():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V106")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V107")
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BASE_BREAKEVEN_TRIGGER_R} (adaptatif) - ✅ V106: 0.55R")
     logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif) - ✅ V106: 0.25R")
@@ -7757,6 +7879,7 @@ def diagnostic_startup_v981():
     logger.info(f"[DIAG] TRAILING_STOP = {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R - ✅ V105.1: 1.5R")
     logger.info(f"[DIAG] TRAILING_ACTIVATION = {BASE_TRAILING_ACTIVATION_R}R - ✅ V105.1: 0.80R")
     logger.info(f"[DIAG] MIN_ENTRY_SCORE = {MIN_ENTRY_SCORE} - ✅ V106")
+    logger.info(f"[DIAG] ASIA_ENTRY_BYPASS = ACTIVE (FVG_RETEST_PERFECT, Score>=48, EQS>=80, ADX>=18, HTF>=2/3, M15=YES, H1=PASS, Pullback=PASS)")
     logger.info(f"[DIAG] BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {BASE_MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS_ASIA = {MIN_ATR_PIPS_BY_PAIR_ASIA} - ✅ V105")
@@ -7795,6 +7918,7 @@ def diagnostic_startup_v981():
     logger.info("[DIAG] MOMENTUM GRADUÉ (pénalité progressive) - ✅ V106")
     logger.info("[DIAG] ADX DYNAMIQUE AVEC PENTE - ✅ V106")
     logger.info("[DIAG] POIDS INITIAUX DES SETUPS AJUSTÉS - ✅ V106")
+    logger.info("[DIAG] ASIA ENTRY BYPASS - ✅ V107")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -7816,7 +7940,7 @@ def diagnostic_startup_v981():
 # BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V106 (WIN RATE OPTIMIZER)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V107 (ASIA ENTRY BYPASS)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R) - ✅ V106: 0.55R")
@@ -7824,6 +7948,7 @@ if __name__ == "__main__":
     logger.info(f"✅ Seuil EQS adaptatif (base: {BASE_EQS_MIN_THRESHOLD}/100, 65 en ASIA) - ✅ V105")
     logger.info(f"✅ Trailing stop optimisé (activation {BASE_TRAILING_ACTIVATION_R}R, distance {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R) - ✅ V105.1")
     logger.info(f"✅ Score d'entrée minimum /100: {MIN_ENTRY_SCORE} - ✅ V106")
+    logger.info(f"✅ ASIA ENTRY BYPASS: FVG_RETEST_PERFECT (Score>=48, EQS>=80, ADX>=18, HTF>=2/3, M15=YES, H1=PASS, Pullback=PASS)")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("📈 SUIVI DES CLÔTURES : tentative de récupération via TradeDetails + fallback")
     logger.info("📊 ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS (wins+losses+breakevens)")
@@ -7833,15 +7958,11 @@ if __name__ == "__main__":
     logger.info("📈 APPRENTISSAGE DES SETUPS ACTIVÉ (seuil 10 trades)")
     logger.info("📈 PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 10 trades, hystérésis 1 cycle, amplitude limitée) - ✅ V104")
     logger.info("")
-    logger.info("🔧 CORRECTIONS V106 APPLIQUÉES :")
-    logger.info("  ✅ Score d'entrée /100 avec composantes détaillées")
-    logger.info("  ✅ Bonus 3/3 HTF (+5)")
-    logger.info("  ✅ Momentum gradué (pénalité progressive)")
-    logger.info("  ✅ ADX dynamique avec pente")
-    logger.info("  ✅ Poids initiaux des setups ajustés (FVG_RETEST_PERFECT=1.30, BISI=1.25, ...)")
-    logger.info("  ✅ Correction RR après BE (TP réajusté)")
-    logger.info("  ✅ Conservation des logs MFE/MAE enrichis")
-    logger.info("  ✅ Conservation de tous les filtres V105.1")
+    logger.info("🔧 CORRECTIONS V107 APPLIQUÉES :")
+    logger.info("  ✅ ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT")
+    logger.info("  ✅ Score 48-54 accepté en ASIA avec conditions strictes")
+    logger.info("  ✅ Logs spécifiques [ASIA_ENTRY_BYPASS] et [ASIA_ENTRY_BYPASS_REJECT]")
+    logger.info("  ✅ Indicateur ENTRY_GATE=ASIA_BYPASS dans [DECISION]")
     logger.info("")
 
     diagnostic_startup_v981()
@@ -7880,7 +8001,7 @@ if __name__ == "__main__":
             check_breakeven_v981()
 
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V106")
+                logger.info(f"⏰ Scan des signaux V107")
                 last_signal_scan = now
 
                 now_dt = datetime.utcnow()
