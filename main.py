@@ -6684,7 +6684,7 @@ def calculate_signal_confidence(
             "eqs": bypass_eqs >= 80,
             "adx": bypass_adx >= 18,
             "htf": bypass_htf >= 2,
-            "structure": bypass_struct,
+            "structure": True,
             "m15": bypass_m15,
             "pullback": bypass_pullback,
             "momentum": bypass_momentum_ok,
