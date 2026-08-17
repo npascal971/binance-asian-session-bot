@@ -6683,9 +6683,7 @@ def calculate_signal_confidence(
             "score": bypass_score >= 48,
             "eqs": bypass_eqs >= 80,
             "adx": bypass_adx >= 18,
-            "htf": bypass_htf >= 2,
             "structure": True,
-            "m15": bypass_m15,
             "pullback": bypass_pullback,
             "momentum": bypass_momentum_ok,
             "spread": bypass_spread_ok,
@@ -6703,7 +6701,7 @@ def calculate_signal_confidence(
                 f"{pair} | {direction} | FVG_RETEST_PERFECT | "
                 f"Score={bypass_score} | EQS={bypass_eqs} | ADX={bypass_adx:.1f} | "
                 f"M15_CONFIRM={'YES' if bypass_m15 else 'NO'} | "
-                f"H1_STRUCT={'PASS' if bypass_struct else 'FAIL'} | "
+                f"H1_STRUCT=BYPASS | "
                 f"HTF={bypass_htf}/3 | Pullback={'PASS' if bypass_pullback else 'FAIL'} | "
                 f"RESULT=ACCEPT"
             )
