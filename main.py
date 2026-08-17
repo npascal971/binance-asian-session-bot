@@ -3369,26 +3369,46 @@ def execute_oanda_trade_v981(
 def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float, adjust_tp: bool = True) -> bool:
     """
     Modifie le SL et ajuste le TP pour maintenir RR >= 2.
+    Correction : currentUnits est explicitement converti en float.
     """
     try:
         if is_maintenance_suspended():
-            logger.warning(f"[BE] OANDA en maintenance - modification SL suspendue pour {trade_id}")
+            logger.warning(
+                f"[BE] OANDA en maintenance - modification SL suspendue pour {trade_id}"
+            )
             return False
 
         # Récupérer les détails du trade
         trade_details = get_trade_details_v88(trade_id)
+
         if not trade_details:
             logger.error(f"[BE] Impossible de récupérer le trade {trade_id}")
             return False
-        
+
         entry = float(trade_details.get("price", 0))
-        current_tp = float(trade_details.get("takeProfitOrder", {}).get("price", 0))
+
+        current_tp = float(
+            trade_details.get("takeProfitOrder", {}).get("price", 0)
+        )
+
+        # CORRECTION : OANDA peut retourner currentUnits sous forme de string
+        current_units = float(
+            trade_details.get("currentUnits", 0)
+        )
+
         if entry == 0 or current_tp == 0:
-            logger.warning(f"[BE] Pas de TP pour trade {trade_id}, on modifie SL seulement")
+            logger.warning(
+                f"[BE] Pas de TP pour trade {trade_id}, "
+                f"on modifie SL seulement"
+            )
             adjust_tp = False
-        
+
         api = v88_client()
-        logger.info(f"[BE] Modification SL via TradeCRCDO pour trade {trade_id} -> {new_sl:.5f}")
+
+        logger.info(
+            f"[BE] Modification SL via TradeCRCDO "
+            f"pour trade {trade_id} -> {new_sl:.5f}"
+        )
 
         # Préparer la mise à jour du SL
         data = {
@@ -3398,54 +3418,118 @@ def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float, adjust_tp: boo
             }
         }
 
-        # ✅ V106 : Si on ajuste le TP, calculer le nouveau TP pour RR >= 2
+        # Ajustement du TP pour maintenir RR >= 2
         if adjust_tp and current_tp > 0:
+
             risk = abs(entry - new_sl)
+
             if risk > 0:
-                new_tp = entry + (2.0 * risk) if trade_details.get("currentUnits", 0) > 0 else entry - (2.0 * risk)
-                # S'assurer que le TP est dans la bonne direction
-                if (trade_details.get("currentUnits", 0) > 0 and new_tp > entry) or (trade_details.get("currentUnits", 0) < 0 and new_tp < entry):
+
+                # BUY = TP au-dessus de l'entrée
+                # SELL = TP en-dessous de l'entrée
+                new_tp = (
+                    entry + (2.0 * risk)
+                    if current_units > 0
+                    else entry - (2.0 * risk)
+                )
+
+                # Vérification de la direction du TP
+                if (
+                    current_units > 0 and new_tp > entry
+                ) or (
+                    current_units < 0 and new_tp < entry
+                ):
+
                     data["takeProfit"] = {
                         "price": round_price_v88(pair, new_tp),
                         "timeInForce": "GTC"
                     }
-                    logger.info(f"[BE] TP ajusté à {new_tp:.5f} pour maintenir RR=2.0")
-                else:
-                    logger.warning(f"[BE] TP ajusté invalide, on le laisse inchangé")
 
-        r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
+                    logger.info(
+                        f"[BE] TP ajusté à {new_tp:.5f} "
+                        f"pour maintenir RR=2.0"
+                    )
+
+                else:
+                    logger.warning(
+                        f"[BE] TP ajusté invalide, "
+                        f"on le laisse inchangé"
+                    )
+
+        # Envoi de la modification à OANDA
+        r = trades.TradeCRCDO(
+            accountID=OANDA_ACCOUNT_ID,
+            tradeID=trade_id,
+            data=data
+        )
+
         resp = api.request(r)
 
+        # Vérifier un rejet OANDA
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
-            logger.error(f"[BE] Rejeté pour trade {trade_id}: {reject.get('rejectReason', 'unknown')}")
+
+            logger.error(
+                f"[BE] Rejeté pour trade {trade_id}: "
+                f"{reject.get('rejectReason', 'unknown')}"
+            )
+
             return False
 
-        logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
+        logger.info(
+            f"[BE] SUCCESS: SL modifié pour trade {trade_id} "
+            f"-> {new_sl:.5f}"
+        )
 
+        # Attendre la propagation OANDA
         time.sleep(1)
+
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
 
+        # Vérification réelle du SL côté OANDA
         trade_details = get_trade_details_v88(trade_id)
+
         if trade_details:
+
             actual_sl = get_stop_loss_v88(trade_details)
+
             if abs(actual_sl - new_sl) <= 0.0001:
-                logger.info(f"[CONFIRM] ✅ SL confirmé: {actual_sl:.5f}")
+
+                logger.info(
+                    f"[CONFIRM] ✅ SL confirmé: {actual_sl:.5f}"
+                )
+
                 return True
+
             else:
-                logger.warning(f"[CONFIRM] SL non confirmé: attendu {new_sl:.5f}, reçu {actual_sl:.5f}")
+
+                logger.warning(
+                    f"[CONFIRM] SL non confirmé: "
+                    f"attendu {new_sl:.5f}, "
+                    f"reçu {actual_sl:.5f}"
+                )
+
                 return True
+
         else:
-            logger.warning(f"[CONFIRM] Impossible de confirmer le SL pour {trade_id}")
+
+            logger.warning(
+                f"[CONFIRM] Impossible de confirmer le SL "
+                f"pour {trade_id}"
+            )
+
             return True
 
     except Exception as e:
-        logger.error(f"[BE] Erreur modification SL trade {trade_id}: {e}")
+
+        logger.error(
+            f"[BE] Erreur modification SL trade {trade_id}: {e}"
+        )
+
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
+
         return False
-
-
 # ============================================================
 # V106 - CRÉATION TRAILING STOP (optimisé avec activation à 0.80R)
 # ============================================================
