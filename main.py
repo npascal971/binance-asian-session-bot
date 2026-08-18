@@ -6741,121 +6741,345 @@ def calculate_signal_confidence(
         h1_structure=final_h1_structure,
         htf_score=final_htf_score,
     )
+# ========================================================
+# V108 - ASIA + LONDON ENTRY BYPASS
+# ========================================================
 
-    # ✅ V107 : ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT
-    bypass_used = False
-    bypass_reason = None
-    
-    # Vérifier si on est en ASIA
-    hour = datetime.utcnow().hour
-    is_asia = 21 <= hour or hour < 7
-    
-    if is_asia and entry_type == "FVG_RETEST_PERFECT" and not gate_passed:
-        # Vérifier les conditions de bypass
-        bypass_score = entry_score
-        bypass_eqs = eqs_score
-        bypass_adx = adx
-        bypass_htf = final_htf_score
-        bypass_struct = struct_passed
-        bypass_m15 = close_passed
-        bypass_pullback = pullback_passed
-        bypass_momentum_ok = not ((direction == "BUY" and momentum < -0.05) or (direction == "SELL" and momentum > 0.05))
-        bypass_spread_ok = spread_data.get("spread", 0.0) <= get_pip_value_for_pair(pair) * 1.5
-        
-        # Conditions de bypass
-        bypass_conditions = {
-            "score": bypass_score >= 48,
-            "eqs": bypass_eqs >= 80,
-            "adx": bypass_adx >= 18,
-            "structure": True,
-            "pullback": bypass_pullback,
-            "momentum": bypass_momentum_ok,
-            "spread": bypass_spread_ok,
-            "no_other_veto": len(rejection_logs) == 0
-        }
-        
-        all_conditions_met = all(bypass_conditions.values())
-        
-        if all_conditions_met:
-            gate_passed = True
-            gate_reason = "ASIA_BYPASS"
-            bypass_used = True
-            logger.info(
-                f"[ASIA_ENTRY_BYPASS] "
-                f"{pair} | {direction} | FVG_RETEST_PERFECT | "
-                f"Score={bypass_score} | EQS={bypass_eqs} | ADX={bypass_adx:.1f} | "
-                f"M15_CONFIRM={'YES' if bypass_m15 else 'NO'} | "
-                f"H1_STRUCT=BYPASS | "
-                f"HTF={bypass_htf}/3 | Pullback={'PASS' if bypass_pullback else 'FAIL'} | "
-                f"RESULT=ACCEPT"
-            )
-        else:
-            # Log de rejet du bypass
-            failed_conditions = [k for k, v in bypass_conditions.items() if not v]
-            logger.info(
-                f"[ASIA_ENTRY_BYPASS_REJECT] "
-                f"{pair} | {direction} | "
-                f"reason=conditions non remplies: {', '.join(failed_conditions)} | "
-                f"Score={bypass_score} | EQS={bypass_eqs} | ADX={bypass_adx:.1f} | "
-                f"M15_CONFIRM={'YES' if bypass_m15 else 'NO'} | "
-                f"HTF={bypass_htf}/3"
-            )
+bypass_used = False
+bypass_reason = None
 
-    passed = bool(gate_passed)
+# --------------------------------------------------------
+# Détection des sessions
+# --------------------------------------------------------
 
-    if not passed:
-        rejection_logs.append(
-            f"ENTRY_GATE: {gate_reason}"
-        )
+hour = datetime.utcnow().hour
 
-    # --------------------------------------------------------
-    # CONFIDENCE
-    # --------------------------------------------------------
+# ASIA : 21:00 -> 07:00 UTC
+is_asia = (
+    hour >= 21 or
+    hour < 7
+)
 
-    if passed and entry_score >= 80:
-        final_confidence = "HIGH"
-    elif passed and entry_score >= 65:
-        final_confidence = "MEDIUM"
-    else:
-        final_confidence = "LOW"
+# LONDON : 07:00 -> 12:00 UTC
+is_london = (
+    7 <= hour < 12
+)
 
-    # --------------------------------------------------------
-    # CONFLUENCES
-    # --------------------------------------------------------
+# --------------------------------------------------------
+# Setup autorisé pour le bypass
+# --------------------------------------------------------
 
-    confluences = {
-        "d1_aligned": details.get(
-            "D1_Trend", ""
+is_fvg_retest = (
+    str(entry_type).upper() == "FVG_RETEST_PERFECT"
+)
+
+# --------------------------------------------------------
+# Conditions communes
+# --------------------------------------------------------
+
+bypass_score = float(entry_score)
+bypass_eqs = float(eqs_score)
+bypass_adx = float(adx or 0.0)
+
+bypass_struct = bool(struct_passed)
+bypass_pullback = bool(pullback_passed)
+
+bypass_momentum_ok = not (
+    (direction == "BUY" and momentum < -0.05)
+    or
+    (direction == "SELL" and momentum > 0.05)
+)
+
+# --------------------------------------------------------
+# Vérification du spread
+# --------------------------------------------------------
+
+try:
+
+    pip_value = float(
+        get_pip_value_for_pair(pair)
+    )
+
+    spread_value = float(
+        spread_data.get("spread", 0.0)
+    )
+
+    bypass_spread_ok = (
+        spread_value <= pip_value * 1.5
+    )
+
+except Exception as e:
+
+    logger.warning(
+        f"[BYPASS] Erreur calcul spread "
+        f"{pair}: {e}"
+    )
+
+    bypass_spread_ok = False
+
+
+# ========================================================
+# ASIA
+# ========================================================
+
+asia_conditions = {
+    "score":
+        bypass_score >= ASIA_BYPASS_MIN_SCORE,
+
+    "eqs":
+        bypass_eqs >= ASIA_BYPASS_MIN_EQS,
+
+    "adx":
+        bypass_adx >= ASIA_BYPASS_MIN_ADX,
+
+    # Protection structure H1 conservée
+    "structure":
+        bypass_struct,
+
+    "pullback":
+        bypass_pullback,
+
+    "momentum":
+        bypass_momentum_ok,
+
+    "spread":
+        bypass_spread_ok,
+}
+
+asia_all_conditions_met = (
+    is_asia
+    and is_fvg_retest
+    and not gate_passed
+    and all(
+        asia_conditions.values()
+    )
+)
+
+
+# ========================================================
+# LONDON
+# ========================================================
+
+london_conditions = {
+    "score":
+        bypass_score >= LONDON_BYPASS_MIN_SCORE,
+
+    "eqs":
+        bypass_eqs >= LONDON_BYPASS_MIN_EQS,
+
+    "adx":
+        bypass_adx >= LONDON_BYPASS_MIN_ADX,
+
+    # Protection structure H1 conservée
+    "structure":
+        bypass_struct,
+
+    "pullback":
+        bypass_pullback,
+
+    "momentum":
+        bypass_momentum_ok,
+
+    "spread":
+        bypass_spread_ok,
+}
+
+london_all_conditions_met = (
+    is_london
+    and is_fvg_retest
+    and not gate_passed
+    and all(
+        london_conditions.values()
+    )
+)
+
+
+# ========================================================
+# ACCEPTATION ASIA
+# ========================================================
+
+if asia_all_conditions_met:
+
+    gate_passed = True
+    gate_reason = "ASIA_BYPASS"
+    bypass_used = True
+
+    logger.info(
+        f"[ASIA_ENTRY_BYPASS] "
+        f"{pair} | {direction} | "
+        f"FVG_RETEST_PERFECT | "
+        f"Score={bypass_score:.1f} | "
+        f"EQS={bypass_eqs:.1f} | "
+        f"ADX={bypass_adx:.1f} | "
+        f"H1_STRUCT=PASS | "
+        f"Pullback=PASS | "
+        f"RESULT=ACCEPT"
+    )
+
+
+# ========================================================
+# ACCEPTATION LONDON
+# ========================================================
+
+elif london_all_conditions_met:
+
+    gate_passed = True
+    gate_reason = "LONDON_BYPASS"
+    bypass_used = True
+
+    logger.info(
+        f"[LONDON_ENTRY_BYPASS] "
+        f"{pair} | {direction} | "
+        f"FVG_RETEST_PERFECT | "
+        f"Score={bypass_score:.1f} | "
+        f"EQS={bypass_eqs:.1f} | "
+        f"ADX={bypass_adx:.1f} | "
+        f"H1_STRUCT=PASS | "
+        f"Pullback=PASS | "
+        f"RESULT=ACCEPT"
+    )
+
+
+# ========================================================
+# REJET ASIA - DIAGNOSTIC
+# ========================================================
+
+elif (
+    is_asia
+    and is_fvg_retest
+    and not gate_passed
+):
+
+    failed_conditions = [
+        key
+        for key, value in asia_conditions.items()
+        if not value
+    ]
+
+    logger.info(
+        f"[ASIA_ENTRY_BYPASS_REJECT] "
+        f"{pair} | {direction} | "
+        f"reason="
+        f"{', '.join(failed_conditions)} | "
+        f"Score={bypass_score:.1f} | "
+        f"EQS={bypass_eqs:.1f} | "
+        f"ADX={bypass_adx:.1f} | "
+        f"H1_STRUCT="
+        f"{'PASS' if bypass_struct else 'FAIL'} | "
+        f"Pullback="
+        f"{'PASS' if bypass_pullback else 'FAIL'}"
+    )
+
+
+# ========================================================
+# REJET LONDON - DIAGNOSTIC
+# ========================================================
+
+elif (
+    is_london
+    and is_fvg_retest
+    and not gate_passed
+):
+
+    failed_conditions = [
+        key
+        for key, value in london_conditions.items()
+        if not value
+    ]
+
+    logger.info(
+        f"[LONDON_ENTRY_BYPASS_REJECT] "
+        f"{pair} | {direction} | "
+        f"reason="
+        f"{', '.join(failed_conditions)} | "
+        f"Score={bypass_score:.1f} | "
+        f"EQS={bypass_eqs:.1f} | "
+        f"ADX={bypass_adx:.1f} | "
+        f"H1_STRUCT="
+        f"{'PASS' if bypass_struct else 'FAIL'} | "
+        f"Pullback="
+        f"{'PASS' if bypass_pullback else 'FAIL'}"
+    )
+
+
+# ========================================================
+# RESULTAT FINAL DU GATE
+# ========================================================
+
+passed = bool(gate_passed)
+
+if not passed:
+
+    rejection_logs.append(
+        f"ENTRY_GATE: {gate_reason}"
+    )
+
+
+# ========================================================
+# CONFIDENCE
+# ========================================================
+
+if passed and entry_score >= 80:
+
+    final_confidence = "HIGH"
+
+elif passed and entry_score >= 65:
+
+    final_confidence = "MEDIUM"
+
+else:
+
+    final_confidence = "LOW"
+
+
+# ========================================================
+# CONFLUENCES
+# ========================================================
+
+confluences = {
+
+    "d1_aligned":
+        details.get(
+            "D1_Trend",
+            ""
         ).startswith("+"),
 
-        "rsi_divergence": False,
+    "rsi_divergence":
+        False,
 
-        "session_active": details.get(
-            "Session", ""
+    "session_active":
+        details.get(
+            "Session",
+            ""
         ).startswith("+"),
 
-        "macd_confirmed": details.get(
-            "MACD_H1", ""
+    "macd_confirmed":
+        details.get(
+            "MACD_H1",
+            ""
         ).startswith("+"),
 
-        "bos_confirmed": "BOS" in str(details),
+    "bos_confirmed":
+        "BOS" in str(details),
 
-        "structure_ok":
-            score_components.get(
-                "Structure", 0
-            ) >= 1,
+    "structure_ok":
+        score_components.get(
+            "Structure",
+            0
+        ) >= 1,
 
-        "pullback_ok":
-            score_components.get(
-                "Pullback", 0
-            ) >= 2,
+    "pullback_ok":
+        score_components.get(
+            "Pullback",
+            0
+        ) >= 2,
 
-        "m15_confirmation":
-            close_passed,
+    "m15_confirmation":
+        close_passed,
 
-        "entry_gate":
-            passed,
-    }
+    "entry_gate":
+        passed,
+}
 
     # --------------------------------------------------------
     # QUALITÉ
