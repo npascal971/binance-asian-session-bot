@@ -4314,7 +4314,12 @@ def validate_entry_quality_gate(
     close_confirmed: bool,
     h1_structure: int,
     htf_score: int,
+    min_score: int = 55,      # ✅ V112 : ajouté
+    is_asia: bool = False,    # ✅ V112 : ajouté
 ) -> tuple:
+    """
+    V112 - Entry Quality Gate avec seuil adaptatif selon la session.
+    """
     try:
         pair = str(pair).upper()
         direction = str(direction).upper()
@@ -4327,11 +4332,13 @@ def validate_entry_quality_gate(
         h1_structure = int(h1_structure)
         htf_score = int(htf_score)
 
-        if entry_score < 55:
-            return False, f"Score trop faible: {entry_score}/100 < 55"
+        # ✅ V112 : Seuil adaptatif
+        if entry_score < min_score:
+            return False, f"Score trop faible: {entry_score}/{min_score} < {min_score}"
 
-        if 55 <= entry_score <= 59:
-            return False, f"Score limite {entry_score}/100: zone 55-59 interdite"
+        # ✅ V112 : Zone 55-59 interdite uniquement en ASIA (sinon, on garde min_score)
+        if is_asia and 55 <= entry_score <= 59:
+            return False, f"Score limite {entry_score}/100: zone 55-59 interdite en ASIA"
 
         if direction == "BUY" and h1_structure < 0:
             return False, f"Structure H1 baissière ({h1_structure}) contre BUY"
