@@ -3699,7 +3699,7 @@ def calculate_entry_quality_score(
     return details
 
 
-def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple:
+def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5, score: int = 0, eqs: int = 0, is_asia: bool = False) -> tuple:
     if len(df) < lookback * 2 + 2:
         return True, "Données insuffisantes, structure acceptée par défaut"
 
@@ -3717,8 +3717,17 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
         hl = last_lows[-1]['price'] > last_lows[-2]['price']
         lh = last_highs[-1]['price'] < last_highs[-2]['price']
         ll = last_lows[-1]['price'] < last_lows[-2]['price']
+        
+        # ✅ V112 : Structure BEARISH confirmée (LH + LL)
         if lh and ll:
-            return False, f"Structure BEARISH confirmée (LH={lh}, LL={ll})"
+            # En ASIA : veto strict
+            if is_asia:
+                return False, f"Structure BEARISH confirmée en ASIA (LH={lh}, LL={ll})"
+            # En NY/LONDON : accepté si score >= 70 et EQS >= 75
+            elif score >= 70 and eqs >= 75:
+                return True, f"Structure BEARISH acceptée en session active (score={score}, EQS={eqs})"
+            else:
+                return False, f"Structure BEARISH confirmée (score={score}, EQS={eqs} < seuil 70/75)"
         else:
             return True, f"Structure non-bearish (HH={hh}, HL={hl})"
 
@@ -3727,8 +3736,17 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
         hl = last_lows[-1]['price'] > last_lows[-2]['price']
         lh = last_highs[-1]['price'] < last_highs[-2]['price']
         ll = last_lows[-1]['price'] < last_lows[-2]['price']
+        
+        # ✅ V112 : Structure BULLISH confirmée (HH + HL)
         if hh and hl:
-            return False, f"Structure BULLISH confirmée (HH={hh}, HL={hl})"
+            # En ASIA : veto strict
+            if is_asia:
+                return False, f"Structure BULLISH confirmée en ASIA (HH={hh}, HL={hl})"
+            # En NY/LONDON : accepté si score >= 70 et EQS >= 75
+            elif score >= 70 and eqs >= 75:
+                return True, f"Structure BULLISH acceptée en session active (score={score}, EQS={eqs})"
+            else:
+                return False, f"Structure BULLISH confirmée (score={score}, EQS={eqs} < seuil 70/75)"
         else:
             return True, f"Structure non-bullish (LH={lh}, LL={ll})"
 
@@ -3957,35 +3975,54 @@ def score_adx_dynamic(df_h1: pd.DataFrame) -> tuple:
     return score, msg
 
 
-def check_htf_confluence(direction: str, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> tuple:
-    score = 0
+def check_htf_confluence(direction: str, df_h1: pd.DataFrame, df_h4: pd.DataFrame, is_asia: bool = False, score: int = 0, eqs: int = 0) -> tuple:
+    score_htf = 0
     details = []
 
     h1_trend = score_ema_trend(df_h1)
     if (direction == "BUY" and h1_trend > 0) or (direction == "SELL" and h1_trend < 0):
-        score += 1
+        score_htf += 1
         details.append("Tendance H1 alignée")
     else:
         details.append("Tendance H1 neutre/opposée")
 
     h4_trend = score_ema_trend(df_h4)
     if (direction == "BUY" and h4_trend > 0) or (direction == "SELL" and h4_trend < 0):
-        score += 1
+        score_htf += 1
         details.append("Tendance H4 alignée")
     else:
         details.append("Tendance H4 neutre/opposée")
 
     h1_structure = score_market_structure(df_h1)
     if (direction == "BUY" and h1_structure > 0) or (direction == "SELL" and h1_structure < 0):
-        score += 1
+        score_htf += 1
         details.append("Structure H1 alignée")
     else:
         details.append("Structure H1 neutre/opposée")
 
-    bonus = 5 if score == 3 else 0
-    if bonus:
-        details.append("BONUS 3/3 +5")
-    return score, f"{score}/3", details, bonus
+    # ✅ V112 : Seuil HTF adaptatif selon la session
+    if is_asia:
+        required_htf = 2  # ASIA : 2/3 exigé
+        min_score_for_bypass = 999  # jamais bypassé en ASIA
+    else:
+        # NY/LONDON : 1/3 accepté si score >= 70 et EQS >= 80
+        if score_htf >= 2:
+            required_htf = 2
+            min_score_for_bypass = 0  # déjà >=2, pas besoin de bypass
+        elif score_htf == 1 and score >= 70 and eqs >= 80:
+            required_htf = 1  # accepté avec bypass
+            details.append(f"HTF=1/3 accepté en session active (score={score}, EQS={eqs})")
+        else:
+            required_htf = 2  # rejet si 1/3 sans conditions
+
+    # Vérification finale
+    if score_htf >= required_htf:
+        bonus = 5 if score_htf == 3 else 0
+        if bonus:
+            details.append("BONUS 3/3 +5")
+        return score_htf, f"{score_htf}/3", details, bonus
+    else:
+        return score_htf, f"{score_htf}/3 (requis {required_htf}/3)", details, 0
 
 
 def get_effective_atr_threshold(pair: str) -> float:
@@ -4529,8 +4566,18 @@ def calculate_signal_confidence(
     details["Volatility"] = f"{atr_msg} (score {atr_score}/10)"
     score_components["Momentum"] += atr_score
 
-    # --- 5. Structure H1 (V106.1 - plus permissif) ---
-    struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
+    # --- 5. Structure H1 (V112 - veto uniquement ASIA) ---
+    # On calcule d'abord le score brut pour l'utiliser dans les conditions
+    # Mais on a besoin de entry_score qui n'est pas encore calculé
+    # On fait une première passe avec un score provisoire pour la structure
+    temp_score = compute_final_score(score_components) + 10  # approximation
+    
+    struct_passed, struct_msg = filter_market_structure(
+        df_h1, direction, lookback=5,
+        score=temp_score,
+        eqs=eqs_score,
+        is_asia=is_asia
+    )
 
     is_opposed = "BEARISH" in struct_msg or "BULLISH" in struct_msg
 
@@ -4554,7 +4601,11 @@ def calculate_signal_confidence(
             "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
 
-    if "non-bearish" in struct_msg or "non-bullish" in struct_msg:
+    if "acceptée en session active" in struct_msg:
+        # Structure opposée mais acceptée en NY/LONDON avec score élevé
+        score_components["Structure"] += 0  # pas de bonus, mais pas de pénalité
+        details["Structure_V98.1"] = f"0 ({struct_msg}, opposée acceptée)"
+    elif "non-bearish" in struct_msg or "non-bullish" in struct_msg:
         score_components["Structure"] += 1
         details["Structure_V98.1"] = f"+1 ({struct_msg}, neutre acceptée)"
     else:
@@ -4643,57 +4694,121 @@ def calculate_signal_confidence(
 
     # --- 10. Filtre structure H1 (veto dur) - CONSERVÉ mais assoupli ---
     h1_structure = score_market_structure(df_h1)
-    if direction == "BUY" and h1_structure < 0:
-        rejection_logs.append(f"Structure H1 baissière ({h1_structure}) contre BUY")
-        details["VETO"] = f"Structure H1: {h1_structure} (baissière)"
-        return {
-            "passed": False,
-            "entry_score": 0,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs,
-            "metrics": metrics,
-            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
-        }
-    if direction == "SELL" and h1_structure > 0:
-        rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL")
-        details["VETO"] = f"Structure H1: {h1_structure} (haussière)"
-        return {
-            "passed": False,
-            "entry_score": 0,
-            "total_score": 0,
-            "final_confidence": "LOW",
-            "details": details,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "atr_value": atr_value,
-            "eqs_score": eqs_score,
-            "eqs_details": eqs_result,
-            "eqs_components": eqs_components,
-            "rejection_logs": rejection_logs,
-            "metrics": metrics,
-            "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
-        }
+    
+    # ✅ V112 : En ASIA, veto strict sur structure opposée
+    if is_asia:
+        if direction == "BUY" and h1_structure < 0:
+            rejection_logs.append(f"Structure H1 baissière ({h1_structure}) contre BUY en ASIA")
+            details["VETO"] = f"Structure H1: {h1_structure} (baissière) en ASIA"
+            return {
+                "passed": False,
+                "entry_score": 0,
+                "total_score": 0,
+                "final_confidence": "LOW",
+                "details": details,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "atr_value": atr_value,
+                "eqs_score": eqs_score,
+                "eqs_details": eqs_result,
+                "eqs_components": eqs_components,
+                "rejection_logs": rejection_logs,
+                "metrics": metrics,
+                "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
+            }
+        if direction == "SELL" and h1_structure > 0:
+            rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL en ASIA")
+            details["VETO"] = f"Structure H1: {h1_structure} (haussière) en ASIA"
+            return {
+                "passed": False,
+                "entry_score": 0,
+                "total_score": 0,
+                "final_confidence": "LOW",
+                "details": details,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "atr_value": atr_value,
+                "eqs_score": eqs_score,
+                "eqs_details": eqs_result,
+                "eqs_components": eqs_components,
+                "rejection_logs": rejection_logs,
+                "metrics": metrics,
+                "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
+            }
+    else:
+        # ✅ V112 : En NY/LONDON, on accepte la structure opposée si score>=70 et EQS>=75
+        # (déjà géré par filter_market_structure, mais on garde une sécurité)
+        if direction == "BUY" and h1_structure < 0:
+            if temp_score >= 70 and eqs_score >= 75:
+                details["H1_Structure"] = f"OK (opposée acceptée, score={temp_score}, EQS={eqs_score})"
+            else:
+                rejection_logs.append(f"Structure H1 baissière ({h1_structure}) contre BUY (score={temp_score}, EQS={eqs_score})")
+                details["VETO"] = f"Structure H1: {h1_structure} (baissière)"
+                return {
+                    "passed": False,
+                    "entry_score": 0,
+                    "total_score": 0,
+                    "final_confidence": "LOW",
+                    "details": details,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "atr_value": atr_value,
+                    "eqs_score": eqs_score,
+                    "eqs_details": eqs_result,
+                    "eqs_components": eqs_components,
+                    "rejection_logs": rejection_logs,
+                    "metrics": metrics,
+                    "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
+                }
+        if direction == "SELL" and h1_structure > 0:
+            if temp_score >= 70 and eqs_score >= 75:
+                details["H1_Structure"] = f"OK (opposée acceptée, score={temp_score}, EQS={eqs_score})"
+            else:
+                rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL (score={temp_score}, EQS={eqs_score})")
+                details["VETO"] = f"Structure H1: {h1_structure} (haussière)"
+                return {
+                    "passed": False,
+                    "entry_score": 0,
+                    "total_score": 0,
+                    "final_confidence": "LOW",
+                    "details": details,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "atr_value": atr_value,
+                    "eqs_score": eqs_score,
+                    "eqs_details": eqs_result,
+                    "eqs_components": eqs_components,
+                    "rejection_logs": rejection_logs,
+                    "metrics": metrics,
+                    "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
+                }
+
     details["H1_Structure"] = f"OK ({h1_structure:+d})"
 
-    # --- 11. Confluence HTF (V109.1) ---
-    htf_score, htf_str, htf_details, htf_bonus = check_htf_confluence(direction, df_h1, df_h4)
+    # --- 11. Confluence HTF (V112 - seuil adaptatif) ---
+    htf_score, htf_str, htf_details, htf_bonus = check_htf_confluence(
+        direction, df_h1, df_h4,
+        is_asia=is_asia,
+        score=temp_score,
+        eqs=eqs_score
+    )
 
     strong_setups = ["FVG_RETEST_PERFECT", "NESTED_FVG"]
     is_strong_setup = entry_type in strong_setups
     bypass_htf = False
 
-    if htf_score == 1 and is_strong_setup and eqs_score >= 80 and adx >= 28:
+    # ✅ V112 : HTF 1/3 accepté en NY/LONDON si score>=70 et EQS>=80
+    if htf_score == 1 and not is_asia and temp_score >= 70 and eqs_score >= 80:
         if struct_passed:
             bypass_htf = True
-            logger.info(f"[HTF_BYPASS] {pair} | {direction} | {entry_type} | HTF 1/3 bypassé car EQS={eqs_score}>=80, ADX={adx:.1f}>=28, setup fort")
+            logger.info(f"[HTF_BYPASS] {pair} | {direction} | {entry_type} | HTF 1/3 accepté en session active (score={temp_score}, EQS={eqs_score})")
+            htf_score = 2
+
+    # ✅ V112 : En ASIA, on garde l'ancien bypass uniquement pour les setups forts
+    if htf_score == 1 and is_asia and is_strong_setup and eqs_score >= 80 and adx >= 28:
+        if struct_passed:
+            bypass_htf = True
+            logger.info(f"[HTF_BYPASS] {pair} | {direction} | {entry_type} | HTF 1/3 bypassé en ASIA car EQS={eqs_score}>=80, ADX={adx:.1f}>=28, setup fort")
             htf_score = 2
 
     if htf_score < 2 and not bypass_htf:
@@ -4721,7 +4836,7 @@ def calculate_signal_confidence(
         details["HTF_Confluence"] = f"{htf_str} ({' | '.join(htf_details)}) (bonus {htf_bonus})"
     else:
         score_components["HTF_Alignment"] += 0
-        details["HTF_Confluence"] = f"1/3 (BYPASS pour setup fort)"
+        details["HTF_Confluence"] = f"{htf_str} (BYPASS accepté)"
 
     # --- 12. Bias / tendance H4 ---
     if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
@@ -4765,6 +4880,11 @@ def calculate_signal_confidence(
             "BISI": 18.0, "BREAKER": 15.0,
         }
         max_pips = entry_type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]))
+        
+        # ✅ V112 : Distance plus tolérante en session active (+30%)
+        if is_active:
+            max_pips *= 1.3
+            
         max_distance_price = max(float(atr_value) * 1.20, pip * max_pips)
         if distance <= max_distance_price * 0.50:
             score_components["Risk_RR_Distance"] += 2
@@ -4882,7 +5002,10 @@ def calculate_signal_confidence(
     except Exception:
         final_htf_score = 0
 
-    # --- ENTRY QUALITY GATE ---
+    # --- ENTRY QUALITY GATE (V112 - seuil adaptatif) ---
+    # ✅ V112 : Score minimum adapté à la session
+    min_score_gate = 55 if is_asia else 50
+    
     gate_passed, gate_reason = validate_entry_quality_gate(
         pair=pair,
         direction=direction,
@@ -4894,6 +5017,8 @@ def calculate_signal_confidence(
         close_confirmed=close_passed,
         h1_structure=final_h1_structure,
         htf_score=final_htf_score,
+        min_score=min_score_gate,
+        is_asia=is_asia
     )
 
     # ============================================================
@@ -5866,7 +5991,7 @@ def diagnostic_startup_v981():
     logger.info("=" * 60)
     logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BASE_BREAKEVEN_TRIGGER_R} (adaptatif)")
     logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif)")
-    logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {BASE_EQS_MIN_THRESHOLD} (adaptatif, 65 en ASIA)")
+    logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {BASE_EQS_MIN_THRESHOLD} (adaptatif, 60 en ASIA)")
     logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {BASE_ADX_MIN_THRESHOLD} (adaptatif, 20 en ASIA, 25 en session active)")
     logger.info(f"[DIAG] TRAILING_STOP = {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R")
     logger.info(f"[DIAG] TRAILING_ACTIVATION = {BASE_TRAILING_ACTIVATION_R}R")
@@ -5939,7 +6064,7 @@ if __name__ == "__main__":
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
     logger.info(f"✅ Seuil Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R)")
     logger.info(f"✅ Seuil Break Even anticipé adaptatif (base: {BASE_BREAKEVEN_EARLY_R}R)")
-    logger.info(f"✅ Seuil EQS adaptatif (base: {BASE_EQS_MIN_THRESHOLD}/100, 65 en ASIA)")
+    logger.info(f"✅ Seuil EQS adaptatif (base: {BASE_EQS_MIN_THRESHOLD}/100, 60 en ASIA)")
     logger.info(f"✅ Trailing stop optimisé (activation {BASE_TRAILING_ACTIVATION_R}R, distance {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R)")
     logger.info(f"✅ Score d'entrée minimum /100: {MIN_ENTRY_SCORE}")
     logger.info(f"✅ ASIA BYPASS: FVG_RETEST_PERFECT (Score>={ASIA_BYPASS_MIN_SCORE}, EQS>={ASIA_BYPASS_MIN_EQS}, ADX>={ASIA_BYPASS_MIN_ADX}, HTF bypassé)")
