@@ -1,14 +1,14 @@
 # ============================================================
-# main(107).py - Version V107 "ASIA ENTRY BYPASS"
+# main(115).py - Version V111 "ASIA/LONDON ENTRY BYPASS FIX"
 #
-# AMÉLIORATIONS V107 :
-# 1. ✅ Correction ENTRY GATE ASIA pour FVG_RETEST_PERFECT
-#    - Score 48-54 accepté en ASIA avec conditions strictes
-#    - Logs spécifiques [ASIA_ENTRY_BYPASS] et [ASIA_ENTRY_BYPASS_REJECT]
-#    - Indicateur ENTRY_GATE=ASIA_BYPASS dans [DECISION]
-# 2. ✅ Conservation de toutes les règles V106
-# 3. ✅ Conservation de tous les filtres V105.1
-# 4. ✅ Conservation du score /100, momentum gradué, ADX dynamique
+# AMÉLIORATIONS V111 :
+# 1. ✅ Ajout des constantes manquantes pour le bypass ASIA/LONDON
+#    - ASIA_BYPASS_MIN_SCORE, ASIA_BYPASS_MIN_EQS, ASIA_BYPASS_MIN_ADX
+#    - LONDON_BYPASS_MIN_SCORE, LONDON_BYPASS_MIN_EQS, LONDON_BYPASS_MIN_ADX
+# 2. ✅ Correction du calcul du R après Break Even (utilisation du risque initial)
+# 3. ✅ Adaptation dynamique moins agressive (20 trades, 2 cycles d'hystérésis)
+# 4. ✅ Nettoyage des logs de démarrage (version unifiée V111)
+# 5. ✅ Conservation de toutes les règles V106/V107/V109.1/V110
 # ============================================================
 
 import os
@@ -55,7 +55,7 @@ PULLBACK_MIN_PIPS_BY_PAIR = {
     "EUR_USD": 4.0,
     "GBP_USD": 4.0,
     "USD_CAD": 3.5,
-    "AUD_USD": 4.5,  # ✅ V105.1 : Corrigé (était à 0)
+    "AUD_USD": 4.5,
     "AUD_CAD": 4.0,
     "XAU_USD": 30.0,
     "USD_JPY": 5.0,
@@ -87,7 +87,7 @@ MIN_ATR_PIPS_BY_PAIR = {
     "USD_CAD": 3.9,
     "AUD_USD": 3.0,
     "AUD_CAD": 3.9,
-    "XAU_USD": 34.0,    
+    "XAU_USD": 34.0,
     "GBP_JPY": 7.0,
     "USD_JPY": 5.0,
     "DEFAULT": 4.0
@@ -108,12 +108,22 @@ MIN_ATR_PIPS_BY_PAIR_ASIA = {
 }
 
 # ============================================================
-# CONFIGURATION ADAPTATIVE (V105 - accélérée)
+# V111 - PARAMÈTRES DU BYPASS ASIA/LONDON
+# ============================================================
+ASIA_BYPASS_MIN_SCORE = 48
+ASIA_BYPASS_MIN_EQS = 80
+ASIA_BYPASS_MIN_ADX = 18
+LONDON_BYPASS_MIN_SCORE = 48
+LONDON_BYPASS_MIN_EQS = 80
+LONDON_BYPASS_MIN_ADX = 18
+
+# ============================================================
+# CONFIGURATION ADAPTATIVE (V111 - moins agressive)
 # ============================================================
 # Fenêtre d'apprentissage
 LEARNING_WINDOW = int(os.getenv("LEARNING_WINDOW", "50"))  # 50 derniers trades
-# ✅ V104 : Adaptation encore plus rapide (10 trades au lieu de 15)
-ADAPTATION_MIN_TRADES = int(os.getenv("ADAPTATION_MIN_TRADES", "5"))
+# ✅ V111 : Adaptation plus robuste (20 trades au lieu de 5)
+ADAPTATION_MIN_TRADES = int(os.getenv("ADAPTATION_MIN_TRADES", "20"))
 ADAPTATION_INTERVAL = int(os.getenv("ADAPTATION_INTERVAL", "300"))  # 5 minutes
 
 # Seuils d'adaptation (V102 : combinaison de critères)
@@ -121,11 +131,11 @@ PF_GOOD_THRESHOLD = 1.3
 PF_BAD_THRESHOLD = 0.9
 WR_GOOD_THRESHOLD = 0.55
 WR_BAD_THRESHOLD = 0.40
-EXPECTANCY_GOOD_THRESHOLD = 0.0   # expectancy positive en $
-EXPECTANCY_BAD_THRESHOLD = -5.0   # expectancy négative
+EXPECTANCY_GOOD_THRESHOLD = 0.0
+EXPECTANCY_BAD_THRESHOLD = -5.0
 
-# ✅ V104 : Hystérésis réduite à 1 cycle (inchangé)
-HYSTERESIS_CYCLES_REQUIRED = int(os.getenv("HYSTERESIS_CYCLES", "1"))
+# ✅ V111 : Hystérésis à 2 cycles pour plus de stabilité
+HYSTERESIS_CYCLES_REQUIRED = int(os.getenv("HYSTERESIS_CYCLES", "2"))
 
 # Amplitude maximale de changement par cycle
 MAX_ADX_CHANGE = 0.5
@@ -157,7 +167,7 @@ SETUP_WEIGHTS_DEFAULT = {
 }
 
 # ============================================================
-# ÉTAT ADAPTATIF (V105 - réactivité accrue + cooldown 2h)
+# ÉTAT ADAPTATIF (V111 - cooldown 2h, adaptation moins agressive)
 # ============================================================
 class AdaptiveState:
     """État adaptatif du bot : paramètres dynamiques, qualité du marché, apprentissage"""
@@ -168,12 +178,9 @@ class AdaptiveState:
         self.consecutive_losses = defaultdict(int)
         self.last_adaptation = time.time()
         self.adaptation_history = []
-        # V101 : Hystérésis
         self.adaptation_counters = defaultdict(lambda: {"good": 0, "bad": 0})
-        # ✅ V105 : Cooldown après une perte (2 heures)
         self.last_loss_time = defaultdict(float)
-        self.loss_cooldown = 3600  # 1 heures
-        # ✅ V105 : Adaptation des poids des setups
+        self.loss_cooldown = 3600  # 1 heure
         self.setup_performance = defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0})
 
     def get_pair_params(self, pair: str) -> dict:
@@ -202,7 +209,6 @@ class AdaptiveState:
         logger.info(f"[SETUP_WEIGHT] {pair} | {setup_type} | Nouveau poids: {new_weight:.2f}")
 
     def record_setup_performance(self, pair: str, setup_type: str, result: str, r: float):
-        """Enregistre la performance d'un setup pour adaptation"""
         key = f"{pair}_{setup_type}"
         perf = self.setup_performance[key]
         if result == "WIN":
@@ -210,20 +216,15 @@ class AdaptiveState:
         elif result == "LOSS":
             perf["losses"] += 1
         perf["total_r"] += r
-        
-        # Adaptation du poids si assez de trades
         total = perf["wins"] + perf["losses"]
         if total >= 5:
             win_rate = perf["wins"] / total if total > 0 else 0.5
             avg_r = perf["total_r"] / total if total > 0 else 0
             raw_performance = (win_rate * 0.6) + (avg_r * 0.4)
-            
-            # Régression vers la moyenne
             if total < 20:
                 performance_score = 0.5 + raw_performance * 0.5
             else:
                 performance_score = raw_performance
-            
             new_weight = max(0.5, min(1.5, performance_score * 1.2))
             self.update_setup_weight(pair, setup_type, new_weight)
 
@@ -240,9 +241,7 @@ class AdaptiveState:
         self.suspended_pairs[pair] = time.time()
         logger.warning(f"[SUSPEND] {pair} suspendu pour 1 heure | Raison: {reason}")
 
-    # ✅ V104 : Cooldown après une perte
     def can_trade(self, pair: str) -> bool:
-        """Vérifie si on peut trader sur cette paire (pas en cooldown après une perte)"""
         if pair in self.last_loss_time:
             elapsed = time.time() - self.last_loss_time[pair]
             if elapsed < self.loss_cooldown:
@@ -252,10 +251,7 @@ class AdaptiveState:
 
     def record_loss(self, pair: str):
         self.consecutive_losses[pair] += 1
-        # ✅ V104 : Enregistrer l'heure de la perte pour le cooldown
         self.last_loss_time[pair] = time.time()
-        
-        # V101 : suspension renforcée (pertes consécutives + PF bas)
         stats_pair = stats.stats[pair]
         total_closed = stats_pair.get("wins", 0) + stats_pair.get("losses", 0)
         if total_closed >= 10:
@@ -264,20 +260,15 @@ class AdaptiveState:
                 self.suspend_pair(pair, f"pertes consécutives ({self.consecutive_losses[pair]}) + PF={pf:.2f}")
                 self.consecutive_losses[pair] = 0
         elif self.consecutive_losses[pair] >= CONSECUTIVE_LOSSES_SUSPEND * 1.5:
-            # même sans PF, si trop de pertes
             self.suspend_pair(pair, f"{self.consecutive_losses[pair]} pertes consécutives")
             self.consecutive_losses[pair] = 0
 
     def record_win(self, pair: str):
         self.consecutive_losses[pair] = 0
-        # ✅ V104 : Réinitialiser le cooldown après un gain
         if pair in self.last_loss_time:
             del self.last_loss_time[pair]
 
     def adapt_parameters(self, pair: str, stats: dict):
-        """
-        V104 : Adaptation robuste basée sur PF + WR + Expectance, avec hystérésis réduite.
-        """
         total_trades = stats.get("wins", 0) + stats.get("losses", 0) + stats.get("breakevens", 0)
         if total_trades < ADAPTATION_MIN_TRADES:
             logger.debug(f"[ADAPT] {pair} : pas assez de trades ({total_trades} < {ADAPTATION_MIN_TRADES})")
@@ -295,7 +286,6 @@ class AdaptiveState:
         total_loss = stats.get("total_loss", 0)
         expectancy = (total_profit - total_loss) / max(total_closed, 1)
 
-        # Évaluation combinée
         good_conditions = 0
         bad_conditions = 0
         if profit_factor > PF_GOOD_THRESHOLD:
@@ -313,7 +303,6 @@ class AdaptiveState:
         elif expectancy < EXPECTANCY_BAD_THRESHOLD:
             bad_conditions += 1
 
-        # Hystérésis : incrémenter le compteur approprié
         counter = self.adaptation_counters[pair]
         if good_conditions >= 2 and bad_conditions == 0:
             counter["good"] += 1
@@ -322,12 +311,10 @@ class AdaptiveState:
             counter["bad"] += 1
             counter["good"] = 0
         else:
-            # Conditions mitigées : réinitialiser les compteurs
             counter["good"] = 0
             counter["bad"] = 0
             return
 
-        # Vérifier si on a atteint le nombre de cycles requis
         if counter["good"] >= HYSTERESIS_CYCLES_REQUIRED:
             direction = "good"
             counter["good"] = 0
@@ -338,10 +325,7 @@ class AdaptiveState:
             self._apply_adaptation(pair, stats, direction)
 
     def _apply_adaptation(self, pair: str, stats: dict, direction: str):
-        """Applique les changements avec amplitude limitée"""
         params = self.get_pair_params(pair)
-
-        # Récupérer les métriques
         wins = stats.get("wins", 0)
         losses = stats.get("losses", 0)
         total_closed = wins + losses
@@ -350,24 +334,19 @@ class AdaptiveState:
         win_rate = wins / total_closed
         profit_factor = stats.get("total_profit", 0) / max(stats.get("total_loss", 0), 0.01)
 
-        # Déterminer le signe
         sign = 1 if direction == "good" else -1
 
-        # ADX
         new_adx = params["adx_min"] - sign * MAX_ADX_CHANGE
         params["adx_min"] = max(ADX_MIN_RANGE[0], min(ADX_MIN_RANGE[1], new_adx))
 
-        # EQS
         new_eqs = params["eqs_min"] - sign * MAX_EQS_CHANGE
         params["eqs_min"] = max(EQS_MIN_RANGE[0], min(EQS_MIN_RANGE[1], new_eqs))
 
-        # Break Even (basé sur MFE/MAE si disponible)
         mfe_mae_list = stats.get("mfe_mae", [])
         if len(mfe_mae_list) >= 10:
             avg_mfe = sum(item["mfe"] for item in mfe_mae_list) / len(mfe_mae_list)
             avg_mae = sum(item["mae"] for item in mfe_mae_list) / len(mfe_mae_list)
             avg_r = sum(item["r"] for item in mfe_mae_list) / len(mfe_mae_list)
-            # Si MFE > MAE * 2 et R moyen > 0.3 => on peut décaler le BE (plus loin)
             if direction == "good" and avg_mfe > avg_mae * 2 and avg_r > 0.3:
                 new_be = params["be_trigger_r"] + MAX_BE_CHANGE
             elif direction == "bad" or avg_mfe < avg_mae * 1.2:
@@ -375,21 +354,18 @@ class AdaptiveState:
             else:
                 new_be = params["be_trigger_r"]
         else:
-            # Pas assez de MFE/MAE : on utilise PF et WR
             if direction == "good":
                 new_be = params["be_trigger_r"] + MAX_BE_CHANGE
             else:
                 new_be = params["be_trigger_r"] - MAX_BE_CHANGE
         params["be_trigger_r"] = max(BE_TRIGGER_R_RANGE[0], min(BE_TRIGGER_R_RANGE[1], new_be))
 
-        # Trailing
         if direction == "good":
             new_trail = params["trailing_atr_mult"] + MAX_TRAILING_CHANGE
         else:
             new_trail = params["trailing_atr_mult"] - MAX_TRAILING_CHANGE
         params["trailing_atr_mult"] = max(TRAILING_ATR_RANGE[0], min(TRAILING_ATR_RANGE[1], new_trail))
 
-        # Log
         adaptation_log = {
             "timestamp": datetime.utcnow().isoformat(),
             "pair": pair,
@@ -450,7 +426,6 @@ class TradingStatsV101:
         self.adaptive_state = AdaptiveState()
         self._load_last_id()
         self.last_daily_summary = time.time()
-        # ✅ V105 : Suivi des rejets
         self.rejection_stats = defaultdict(lambda: defaultdict(int))
 
     def _load_last_id(self):
@@ -469,17 +444,14 @@ class TradingStatsV101:
             pass
 
     def record_rejection(self, pair: str, filter_name: str, reason: str):
-        """Enregistre un rejet pour analyse statistique"""
         self.rejection_stats[pair][filter_name] += 1
         if DEBUG_MODE:
             logger.debug(f"[REJECT] {pair} | {filter_name}: {reason}")
 
     def get_rejection_summary(self, pair: str) -> dict:
-        """Retourne le résumé des rejets pour une paire"""
         return dict(self.rejection_stats.get(pair, {}))
 
     def log_rejection_summary(self):
-        """Log un résumé des rejets par paire"""
         logger.info("=" * 60)
         logger.info("📊 RÉSUMÉ DES REJETS")
         logger.info("=" * 60)
@@ -534,12 +506,10 @@ class TradingStatsV101:
             }
             stats["trades"].append(trade_record)
 
-    # ✅ V102 : CORRECTION MAJEURE - Utilisation du P&L réel pour classifier les trades
     def record_close(self, trade_id: str, pair: str, setup_type: str, eqs: int, r: float, profit_loss: float,
                      close_price: float = None, is_estimate: bool = False, trade_info: dict = None):
         stats = self.stats[pair]
         
-        # ✅ CORRECTION : Utiliser le P&L réel pour décider du résultat
         if profit_loss > 0:
             stats["wins"] += 1
             stats["total_profit"] += profit_loss
@@ -553,11 +523,9 @@ class TradingStatsV101:
         else:
             stats["breakevens"] += 1
             result = "BREAKEVEN"
-            # Cas particulier : R positif mais P&L nul (frais exacts)
             if r > 0.02:
                 logger.warning(f"[CLOSE_AMBIGUOUS] {pair} | R={r:.2f} | P&L={profit_loss:+.2f} | Frais ont mangé le profit")
 
-        # ✅ V105 : Enregistrer la performance du setup pour adaptation
         self.adaptive_state.record_setup_performance(pair, setup_type, result, r)
 
         setup_stats = stats["by_setup"][setup_type]
@@ -626,16 +594,13 @@ class TradingStatsV101:
             metrics_str = f" | ATR={trade_info.get('atr',0):.1f} | ADX={trade_info.get('adx',0):.1f} | RSI={trade_info.get('rsi',0):.1f} | H={trade_info.get('hour',0)} | Sess={trade_info.get('session','UNKNOWN')}"
         logger.info(f"[CLOSE] {pair} | {setup_type} | {result}{estimate_tag} | R={r:.2f} | P&L={profit_loss:+.2f} | EQS={eqs}{price_str}{metrics_str}")
 
-        # ✅ V102 : Mise à jour des poids des setups (seuil baissé à 10)
         if setup_perf["wins"] + setup_perf["losses"] >= 10:
             self._update_setup_weight(pair, setup_type)
 
-        # Adaptation toutes les 5 minutes
         if time.time() - self.adaptive_state.last_adaptation > ADAPTATION_INTERVAL:
             self.adaptive_state.adapt_parameters(pair, stats)
             self.adaptive_state.last_adaptation = time.time()
 
-        # Mettre à jour le trade avec MFE/MAE
         for trade in stats["trades"]:
             if trade.get("close_price") is None and trade.get("entry") == trade_info.get("entry"):
                 trade["result"] = result
@@ -647,26 +612,20 @@ class TradingStatsV101:
                     trade["mae"] = tracker_trade.get("max_adverse_pips")
                 break
 
-    # ✅ V102 : Pondération des setups améliorée avec régression vers la moyenne
     def _update_setup_weight(self, pair: str, setup_type: str):
-        """V102 : Mise à jour robuste du poids d'un setup (seuil 10 trades, régression vers la moyenne)"""
         stats = self.stats[pair]
         setup_perf = stats["setup_performance"].get(setup_type)
         if not setup_perf:
             return
         total = setup_perf["wins"] + setup_perf["losses"]
-        if total < 10:  # ✅ V102 : seuil baissé de 20 à 10
+        if total < 10:
             return
 
         win_rate = setup_perf["wins"] / total if total > 0 else 0.5
         avg_r = setup_perf["total_r"] / total if total > 0 else 0
 
-        # Performance brute
         raw_performance = (win_rate * 0.6) + (avg_r * 0.4)
-        
-        # ✅ V102 : Régression vers la moyenne
         if total < 20:
-            # Moins de confiance → on tire vers 1.0
             performance_score = 0.5 + raw_performance * 0.5
         else:
             performance_score = raw_performance
@@ -714,18 +673,15 @@ class TradingStatsV101:
         }
 
     def log_daily_summary(self):
-        """Résumé quotidien compact des statistiques"""
         logger.info("=" * 60)
-        logger.info("📊 RÉSUMÉ QUOTIDIEN V106")
+        logger.info("📊 RÉSUMÉ QUOTIDIEN V111")
         logger.info("=" * 60)
-        
         total_signals = 0
         total_accepted = 0
         total_rejected = 0
         total_wins = 0
         total_losses = 0
         total_be = 0
-        
         for pair in sorted(self.stats.keys()):
             summary = self.get_summary(pair)
             total_signals += summary["total_signals"]
@@ -734,31 +690,22 @@ class TradingStatsV101:
             total_wins += summary["wins"]
             total_losses += summary["losses"]
             total_be += summary["breakevens"]
-            
             logger.info(f"{pair:10} | Signaux:{summary['total_signals']:3} | Acceptés:{summary['accepted']:3} | Rejetés:{summary['rejected']:3} | Clôturés:{summary['total_closed']:3} | WR:{summary['win_rate']:>6} | PF:{summary['profit_factor']:>6} | Esp:{summary['expectancy']:>8}")
-        
         if total_signals > 0:
             logger.info("-" * 60)
             logger.info(f"TOTAL      | Signaux:{total_signals:3} | Acceptés:{total_accepted:3} | Rejetés:{total_rejected:3} | Clôturés:{total_wins + total_losses + total_be:3}")
-            
             if total_wins + total_losses > 0:
                 global_wr = total_wins / (total_wins + total_losses) * 100
                 logger.info(f"Win Rate global: {global_wr:.1f}% | Wins:{total_wins} | Losses:{total_losses} | BE:{total_be}")
-        
-        # ✅ V105 : Log des rejets
         self.log_rejection_summary()
-        
         logger.info("=" * 60)
 
     def log_summary(self):
-        """Résumé complet (appelé à chaque scan)"""
-        # Vérifier si on doit faire un résumé quotidien
-        if time.time() - self.last_daily_summary >= 86400:  # 24h
+        if time.time() - self.last_daily_summary >= 86400:
             self.log_daily_summary()
             self.last_daily_summary = time.time()
-        
         logger.info("=" * 80)
-        logger.info("📊 STATISTIQUES GLOBALES V106")
+        logger.info("📊 STATISTIQUES GLOBALES V111")
         logger.info("=" * 80)
         logger.info(f"{'Paire':10} | {'Signaux':>7} | {'Acceptés':>7} | {'Rejetés':>7} | {'Clôturés':>7} | {'Win Rate':>9} | {'PF':>6} | {'Espérance':>10}")
         logger.info("-" * 80)
@@ -879,7 +826,6 @@ stats = TradingStatsV101()
 # SUIVI DES CLÔTURES
 # ============================================================
 open_trade_details = {}
-  # défini plus bas
 
 # ============================================================
 # V110 - RÉCUPÉRATION DU VRAI TRADE FERMÉ
@@ -889,862 +835,220 @@ def get_closed_trade_details_v110(
 ) -> dict | None:
     """
     V110 - Récupère les informations réelles d'un trade fermé.
-
-    Priorité :
-        1. TradeDetails
-        2. TradesList state=CLOSED
-
-    Retourne :
-        dict du trade si trouvé
-        None si impossible à récupérer
+    Priorité : 1. TradeDetails, 2. TradesList state=CLOSED
+    Retourne : dict du trade si trouvé, None sinon.
     """
-
     api = None
-
     try:
-
-        # ========================================================
-        # INITIALISATION CLIENT OANDA
-        # ========================================================
-
         api = v88_client()
-
-        # ========================================================
-        # 1. TRADEDETAILS
-        # ========================================================
-
         try:
-
             r = trades.TradeDetails(
                 accountID=OANDA_ACCOUNT_ID,
                 tradeID=str(trade_id)
             )
-
             resp = api.request(r)
-
-            trade_data = (
-                resp.get("trade", {})
-                or {}
-            )
-
+            trade_data = resp.get("trade", {}) or {}
             if trade_data:
-
-                logger.info(
-                    f"[CLOSE_API] "
-                    f"Trade {trade_id} "
-                    f"récupéré via TradeDetails"
-                )
-
+                logger.info(f"[CLOSE_API] Trade {trade_id} récupéré via TradeDetails")
                 return trade_data
-
         except Exception as e:
-
-            logger.debug(
-                f"[CLOSE_API] "
-                f"TradeDetails indisponible "
-                f"{trade_id}: {e}"
-            )
-
-        # ========================================================
-        # 2. FALLBACK : TRADES LIST CLOSED
-        # ========================================================
+            logger.debug(f"[CLOSE_API] TradeDetails indisponible {trade_id}: {e}")
 
         try:
-
-            params = {
-                "state": "CLOSED",
-                "count": 100
-            }
-
-            r = trades.TradesList(
-                accountID=OANDA_ACCOUNT_ID,
-                params=params
-            )
-
+            params = {"state": "CLOSED", "count": 100}
+            r = trades.TradesList(accountID=OANDA_ACCOUNT_ID, params=params)
             resp = api.request(r)
-
-            closed_trades = (
-                resp.get("trades", [])
-                or []
-            )
-
+            closed_trades = resp.get("trades", []) or []
             for trade in closed_trades:
-
-                if str(
-                    trade.get("id")
-                ) == str(trade_id):
-
-                    logger.info(
-                        f"[CLOSE_API] "
-                        f"Trade {trade_id} "
-                        f"récupéré via "
-                        f"TradesList CLOSED"
-                    )
-
+                if str(trade.get("id")) == str(trade_id):
+                    logger.info(f"[CLOSE_API] Trade {trade_id} récupéré via TradesList CLOSED")
                     return trade
-
         except Exception as e:
+            logger.debug(f"[CLOSE_API] TradesList CLOSED indisponible: {e}")
 
-            logger.debug(
-                f"[CLOSE_API] "
-                f"TradesList CLOSED "
-                f"indisponible: {e}"
-            )
-
-        # ========================================================
-        # 3. RIEN TROUVÉ
-        # ========================================================
-
-        logger.warning(
-            f"[CLOSE_API] "
-            f"Trade {trade_id} "
-            f"non trouvé chez OANDA"
-        )
-
+        logger.warning(f"[CLOSE_API] Trade {trade_id} non trouvé chez OANDA")
         return None
-
     except Exception as e:
-
-        logger.error(
-            f"[CLOSE_API] "
-            f"Erreur récupération "
-            f"trade {trade_id}: {e}"
-        )
-
+        logger.error(f"[CLOSE_API] Erreur récupération trade {trade_id}: {e}")
         return None
 
 # ============================================================
 # V110 - SUIVI DES TRADES FERMÉS
 # ============================================================
-
 def check_closed_trades():
     """
     V110 - Détection et traitement des trades fermés.
-
-    Corrections principales :
-        1. Ne plus utiliser trade_data["price"] comme prix de clôture.
-           Ce champ correspond au prix d'entrée du trade.
-
-        2. Utiliser averageClosePrice pour récupérer le vrai prix
-           moyen de clôture OANDA.
-
-        3. Utiliser realizedPL pour le vrai P/L OANDA.
-
-        4. Calculer le R avec le prix de clôture réel.
-
-        5. Le fallback M5 est explicitement marqué ESTIMATED.
-
-        6. Détection du type de sortie :
-              - TRAILING
-              - BE_TRAILING
-              - SL_INITIAL
-              - CLOSE_MANUAL
-              - UNKNOWN
+    Corrections : utilisation de averageClosePrice et realizedPL.
     """
-
     global stats, open_trade_details
-
     try:
-
-        # ====================================================
-        # 1. OANDA MAINTENANCE
-        # ====================================================
-
         if is_maintenance_suspended():
-            logger.debug(
-                "OANDA en maintenance - "
-                "check_closed_trades suspendu"
-            )
+            logger.debug("OANDA en maintenance - check_closed_trades suspendu")
             return
-
-        # ====================================================
-        # 2. RÉCUPÉRATION DES TRADES OUVERTS
-        # ====================================================
 
         current_open_trades = get_open_trades_v88(
             skip_maintenance_check=True,
             force_refresh=True
         )
-
-        current_open_ids = {
-            str(t.get("id"))
-            for t in current_open_trades
-            if t.get("id") is not None
-        }
-
-        # ====================================================
-        # 3. PARCOURIR NOS TRADES TRACKÉS
-        # ====================================================
+        current_open_ids = {str(t.get("id")) for t in current_open_trades if t.get("id") is not None}
 
         for trade_id in list(open_trade_details.keys()):
-
             trade_id = str(trade_id)
-
-            # ------------------------------------------------
-            # Toujours ouvert chez OANDA
-            # ------------------------------------------------
-
             if trade_id in current_open_ids:
                 continue
 
-            # ------------------------------------------------
-            # Trade absent des trades ouverts
-            # ------------------------------------------------
-
-            trade_info = open_trade_details.pop(
-                trade_id,
-                None
-            )
-
+            trade_info = open_trade_details.pop(trade_id, None)
             if not trade_info:
                 continue
 
-            # =================================================
-            # 4. INFORMATIONS DU TRADE
-            # =================================================
-
-            pair = trade_info.get(
-                "pair",
-                "UNKNOWN"
-            )
-
-            setup_type = trade_info.get(
-                "setup_type",
-                "UNKNOWN"
-            )
-
-            eqs = trade_info.get(
-                "eqs",
-                0
-            )
-
-            direction = (
-                trade_info.get(
-                    "direction",
-                    ""
-                )
-                .upper()
-            )
-
-            entry = trade_info.get(
-                "entry"
-            )
-
-            sl = trade_info.get(
-                "sl"
-            )
-
-            units = trade_info.get(
-                "units",
-                0
-            )
-
-            # ------------------------------------------------
-            # Validation
-            # ------------------------------------------------
+            pair = trade_info.get("pair", "UNKNOWN")
+            setup_type = trade_info.get("setup_type", "UNKNOWN")
+            eqs = trade_info.get("eqs", 0)
+            direction = trade_info.get("direction", "").upper()
+            entry = trade_info.get("entry")
+            sl = trade_info.get("sl")
+            units = trade_info.get("units", 0)
 
             try:
                 entry = float(entry)
             except Exception:
-                logger.error(
-                    f"[CLOSE] Trade {trade_id}: "
-                    f"entry invalide={entry}"
-                )
+                logger.error(f"[CLOSE] Trade {trade_id}: entry invalide={entry}")
                 continue
-
             try:
                 sl = float(sl)
             except Exception:
                 sl = 0.0
-
             try:
-                units = abs(
-                    float(units)
-                )
+                units = abs(float(units))
             except Exception:
                 units = 0.0
 
-            pip_val = get_pip_value_for_pair(
-                pair
-            )
-
-            # =================================================
-            # 5. RISQUE INITIAL
-            # =================================================
-
-            risk = (
-                abs(entry - sl)
-                if entry > 0 and sl > 0
-                else 0.0
-            )
-
-            risk_pips = (
-                risk / pip_val
-                if risk > 0 and pip_val > 0
-                else 0.0
-            )
-
-            # =================================================
-            # 6. VARIABLES DE CLÔTURE
-            # =================================================
+            pip_val = get_pip_value_for_pair(pair)
+            risk = abs(entry - sl) if entry > 0 and sl > 0 else 0.0
+            risk_pips = risk / pip_val if risk > 0 and pip_val > 0 else 0.0
 
             close_price = None
             pl = 0.0
-
-            # IMPORTANT :
-            # False = clôture réellement récupérée chez OANDA
-            # True  = estimation locale
             is_estimate = True
-
             trade_data = {}
 
-            # =================================================
-            # 7. RÉCUPÉRATION OANDA DU TRADE FERMÉ
-            # =================================================
-
             try:
-
                 api = v88_client()
-
-                r = trades.TradeDetails(
-                    accountID=OANDA_ACCOUNT_ID,
-                    tradeID=trade_id
-                )
-
+                r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
                 resp = api.request(r)
-
-                trade_data = resp.get(
-                    "trade",
-                    {}
-                ) or {}
-
+                trade_data = resp.get("trade", {}) or {}
                 if trade_data:
-
-                    # ------------------------------------------------
-                    # IMPORTANT :
-                    #
-                    # trade_data["price"] = PRIX D'ENTRÉE
-                    #
-                    # Il ne faut PAS l'utiliser comme close_price.
-                    #
-                    # averageClosePrice = vrai prix moyen de clôture.
-                    # ------------------------------------------------
-
-                    average_close_price = (
-                        trade_data.get(
-                            "averageClosePrice"
-                        )
-                    )
-
-                    realized_pl = (
-                        trade_data.get(
-                            "realizedPL"
-                        )
-                    )
-
-                    # ------------------------------------------------
-                    # Prix de clôture réel
-                    # ------------------------------------------------
-
-                    if (
-                        average_close_price is not None
-                    ):
-
+                    average_close_price = trade_data.get("averageClosePrice")
+                    realized_pl = trade_data.get("realizedPL")
+                    if average_close_price is not None:
                         try:
-
-                            candidate_close = float(
-                                average_close_price
-                            )
-
+                            candidate_close = float(average_close_price)
                             if candidate_close > 0:
-
-                                close_price = (
-                                    candidate_close
-                                )
-
+                                close_price = candidate_close
                                 is_estimate = False
-
-                        except (
-                            TypeError,
-                            ValueError
-                        ):
+                        except (TypeError, ValueError):
                             pass
-
-                    # ------------------------------------------------
-                    # P/L réel OANDA
-                    # ------------------------------------------------
-
                     if realized_pl is not None:
-
                         try:
-
-                            pl = float(
-                                realized_pl
-                            )
-
-                        except (
-                            TypeError,
-                            ValueError
-                        ):
-
-                            logger.warning(
-                                f"[CLOSE] "
-                                f"realizedPL invalide "
-                                f"pour {trade_id}: "
-                                f"{realized_pl}"
-                            )
-
-                    # ------------------------------------------------
-                    # Log API
-                    # ------------------------------------------------
-
-                    if (
-                        close_price is not None
-                        and not is_estimate
-                    ):
-
-                        logger.info(
-                            f"[CLOSE_DETAILS] "
-                            f"{pair} | "
-                            f"Trade={trade_id} | "
-                            f"ENTRY_API="
-                            f"{float(trade_data.get('price', 0)):.5f} | "
-                            f"CLOSE_API="
-                            f"{close_price:.5f} | "
-                            f"PL="
-                            f"{pl:.2f}"
-                        )
-
+                            pl = float(realized_pl)
+                        except (TypeError, ValueError):
+                            logger.warning(f"[CLOSE] realizedPL invalide pour {trade_id}: {realized_pl}")
+                    if close_price is not None and not is_estimate:
+                        logger.info(f"[CLOSE_DETAILS] {pair} | Trade={trade_id} | ENTRY_API={float(trade_data.get('price', 0)):.5f} | CLOSE_API={close_price:.5f} | PL={pl:.2f}")
                     else:
-
-                        logger.warning(
-                            f"[CLOSE_API] "
-                            f"Trade {trade_id} "
-                            f"récupéré mais "
-                            f"averageClosePrice "
-                            f"indisponible"
-                        )
-
+                        logger.warning(f"[CLOSE_API] Trade {trade_id} récupéré mais averageClosePrice indisponible")
             except Exception as e:
+                logger.warning(f"[CLOSE_API] Impossible de récupérer les détails du trade {trade_id}: {e}")
 
-                logger.warning(
-                    f"[CLOSE_API] "
-                    f"Impossible de récupérer "
-                    f"les détails du trade "
-                    f"{trade_id}: {e}"
-                )
-
-            # =================================================
-            # 8. FALLBACK M5
-            # =================================================
-            #
-            # ATTENTION :
-            # ce fallback n'est PAS considéré comme confirmé.
-            #
-            # Il est explicitement marqué ESTIMATED.
-            # =================================================
-
-            if (
-                close_price is None
-                or close_price <= 0
-            ):
-
+            if close_price is None or close_price <= 0:
                 try:
-
-                    current_price = (
-                        get_recent_m5_price_v88(
-                            pair
-                        )
-                    )
-
+                    current_price = get_recent_m5_price_v88(pair)
                 except Exception as e:
-
-                    logger.error(
-                        f"[CLOSE] "
-                        f"Impossible de récupérer "
-                        f"prix M5 {pair}: {e}"
-                    )
-
+                    logger.error(f"[CLOSE] Impossible de récupérer prix M5 {pair}: {e}")
                     current_price = 0.0
-
-                if (
-                    current_price is None
-                    or current_price <= 0
-                ):
-
-                    logger.error(
-                        f"[CLOSE] "
-                        f"Trade {trade_id} fermé "
-                        f"mais impossible de "
-                        f"déterminer le prix de sortie"
-                    )
-
+                if current_price is None or current_price <= 0:
+                    logger.error(f"[CLOSE] Trade {trade_id} fermé mais impossible de déterminer le prix de sortie")
                     continue
-
-                close_price = float(
-                    current_price
-                )
-
-                # ------------------------------------------------
-                # P/L ESTIMÉ
-                # ------------------------------------------------
-
+                close_price = float(current_price)
                 if direction == "BUY":
-
-                    price_move = (
-                        close_price
-                        - entry
-                    )
-
+                    price_move = close_price - entry
                 else:
-
-                    price_move = (
-                        entry
-                        - close_price
-                    )
-
-                pl = (
-                    price_move * units
-                    if units > 0
-                    else 0.0
-                )
-
+                    price_move = entry - close_price
+                pl = price_move * units if units > 0 else 0.0
                 is_estimate = True
+                logger.warning(f"[CLOSE_ESTIMATED] {pair} | Trade={trade_id} | Prix M5={close_price:.5f} | PL_ESTIME={pl:.2f} | ATTENTION: sortie OANDA non récupérée")
 
-                logger.warning(
-                    f"[CLOSE_ESTIMATED] "
-                    f"{pair} | "
-                    f"Trade={trade_id} | "
-                    f"Prix M5={close_price:.5f} | "
-                    f"PL_ESTIME={pl:.2f} | "
-                    f"ATTENTION: "
-                    f"sortie OANDA non récupérée"
-                )
-
-            # =================================================
-            # 9. CALCUL DU R RÉEL
-            # =================================================
-
-            if (
-                pip_val <= 0
-                or risk_pips <= 0
-            ):
-
+            if pip_val <= 0 or risk_pips <= 0:
                 r_multiple = 0.0
-
-                logger.warning(
-                    f"[CLOSE] "
-                    f"Trade {trade_id}: "
-                    f"R impossible "
-                    f"(risk_pips={risk_pips}, "
-                    f"pip={pip_val})"
-                )
-
+                logger.warning(f"[CLOSE] Trade {trade_id}: R impossible (risk_pips={risk_pips}, pip={pip_val})")
             else:
-
                 if direction == "BUY":
-
-                    price_move_pips = (
-                        close_price
-                        - entry
-                    ) / pip_val
-
+                    price_move_pips = (close_price - entry) / pip_val
                 else:
-
-                    price_move_pips = (
-                        entry
-                        - close_price
-                    ) / pip_val
-
-                r_multiple = (
-                    price_move_pips
-                    / risk_pips
-                )
-
-            # =================================================
-            # 10. DÉTERMINER LE TYPE DE SORTIE
-            # =================================================
+                    price_move_pips = (entry - close_price) / pip_val
+                r_multiple = price_move_pips / risk_pips
 
             exit_type = "UNKNOWN"
-
             try:
-
-                # ------------------------------------------------
-                # Le TradeDetails récupéré plus haut est utilisé.
-                # On ne fait pas un deuxième appel inutile.
-                # ------------------------------------------------
-
                 if trade_data:
-
-                    # --------------------------------------------
-                    # Trailing stop
-                    # --------------------------------------------
-
-                    if trade_data.get(
-                        "trailingStopLossOrder"
-                    ):
-
+                    if trade_data.get("trailingStopLossOrder"):
                         exit_type = "TRAILING"
-
-                    # --------------------------------------------
-                    # Stop Loss
-                    # --------------------------------------------
-
-                    elif trade_data.get(
-                        "stopLossOrder"
-                    ):
-
-                        sl_order = (
-                            trade_data.get(
-                                "stopLossOrder",
-                                {}
-                            )
-                            or {}
-                        )
-
-                        current_sl = (
-                            sl_order.get(
-                                "price"
-                            )
-                        )
-
-                        initial_sl = (
-                            trade_info.get(
-                                "sl"
-                            )
-                        )
-
-                        if (
-                            current_sl is not None
-                            and initial_sl is not None
-                        ):
-
+                    elif trade_data.get("stopLossOrder"):
+                        sl_order = trade_data.get("stopLossOrder", {}) or {}
+                        current_sl = sl_order.get("price")
+                        initial_sl = trade_info.get("sl")
+                        if current_sl is not None and initial_sl is not None:
                             try:
-
-                                current_sl = float(
-                                    current_sl
-                                )
-
-                                initial_sl = float(
-                                    initial_sl
-                                )
-
-                                # --------------------------------
-                                # SL déplacé
-                                # --------------------------------
-
-                                tolerance = max(
-                                    pip_val * 0.5,
-                                    0.00001
-                                )
-
-                                if abs(
-                                    current_sl
-                                    - initial_sl
-                                ) > tolerance:
-
-                                    exit_type = (
-                                        "BE_TRAILING"
-                                    )
-
+                                current_sl = float(current_sl)
+                                initial_sl = float(initial_sl)
+                                tolerance = max(pip_val * 0.5, 0.00001)
+                                if abs(current_sl - initial_sl) > tolerance:
+                                    exit_type = "BE_TRAILING"
                                 else:
-
-                                    exit_type = (
-                                        "SL_INITIAL"
-                                    )
-
-                            except (
-                                TypeError,
-                                ValueError
-                            ):
-
-                                exit_type = (
-                                    "SL_INITIAL"
-                                )
-
+                                    exit_type = "SL_INITIAL"
+                            except (TypeError, ValueError):
+                                exit_type = "SL_INITIAL"
                         else:
-
-                            exit_type = (
-                                "SL_INITIAL"
-                            )
-
-                    # --------------------------------------------
-                    # Aucun SL / trailing détecté
-                    # --------------------------------------------
-
+                            exit_type = "SL_INITIAL"
                     else:
-
-                        exit_type = (
-                            "CLOSE_MANUAL"
-                        )
-
+                        exit_type = "CLOSE_MANUAL"
             except Exception as e:
-
-                logger.debug(
-                    f"[CLOSE] "
-                    f"Impossible de déterminer "
-                    f"le type de sortie "
-                    f"{trade_id}: {e}"
-                )
-
+                logger.debug(f"[CLOSE] Impossible de déterminer le type de sortie {trade_id}: {e}")
                 exit_type = "UNKNOWN"
 
-            # =================================================
-            # 11. LOG RÉCAPITULATIF
-            # =================================================
-
-            logger.info(
-                f"[CLOSE] "
-                f"{pair} | "
-                f"{direction} | "
-                f"Trade={trade_id} | "
-                f"ENTRY={entry:.5f} | "
-                f"CLOSE={close_price:.5f} | "
-                f"R={r_multiple:.2f} | "
-                f"PL={pl:.2f} | "
-                f"Exit={exit_type} | "
-                f"EQS={eqs} | "
-                f"{'ESTIMATED' if is_estimate else 'CONFIRMED'}"
-            )
-
-            # =================================================
-            # 12. ENREGISTREMENT STATS
-            # =================================================
+            logger.info(f"[CLOSE] {pair} | {direction} | Trade={trade_id} | ENTRY={entry:.5f} | CLOSE={close_price:.5f} | R={r_multiple:.2f} | PL={pl:.2f} | Exit={exit_type} | EQS={eqs} | {'ESTIMATED' if is_estimate else 'CONFIRMED'}")
 
             try:
-
-                stats.record_close(
-                    trade_id,
-                    pair,
-                    setup_type,
-                    eqs,
-                    r_multiple,
-                    pl,
-                    close_price,
-                    is_estimate,
-                    trade_info
-                )
-
+                stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl, close_price, is_estimate, trade_info)
             except Exception as e:
-
-                logger.error(
-                    f"[CLOSE] "
-                    f"Erreur stats.record_close "
-                    f"{trade_id}: {e}"
-                )
-
-            # =================================================
-            # 13. FERMETURE DU TRACKER
-            # =================================================
+                logger.error(f"[CLOSE] Erreur stats.record_close {trade_id}: {e}")
 
             try:
-
-                trade_tracker.close_trade(
-                    trade_id,
-                    close_price,
-                    r_multiple
-                )
-
+                trade_tracker.close_trade(trade_id, close_price, r_multiple)
             except Exception as e:
-
-                logger.error(
-                    f"[CLOSE] "
-                    f"Erreur trade_tracker "
-                    f"{trade_id}: {e}"
-                )
-
-            # =================================================
-            # 14. MFE / MAE
-            # =================================================
+                logger.error(f"[CLOSE] Erreur trade_tracker {trade_id}: {e}")
 
             try:
-
-                tracker_trade = (
-                    trade_tracker.get_trade(
-                        trade_id
-                    )
-                )
-
+                tracker_trade = trade_tracker.get_trade(trade_id)
                 if tracker_trade:
-
-                    mfe = float(
-                        tracker_trade.get(
-                            "max_favorable_pips",
-                            0
-                        )
-                    )
-
-                    mae = float(
-                        tracker_trade.get(
-                            "max_adverse_pips",
-                            0
-                        )
-                    )
-
-                    logger.info(
-                        f"[MFE_MAE_DIAG] "
-                        f"{pair} | "
-                        f"{setup_type} | "
-                        f"MFE={mfe:.1f}pips | "
-                        f"MAE={mae:.1f}pips | "
-                        f"R_sortie={r_multiple:.2f} | "
-                        f"Sortie={exit_type} | "
-                        f"EQS={eqs}"
-                    )
-
+                    mfe = float(tracker_trade.get("max_favorable_pips", 0))
+                    mae = float(tracker_trade.get("max_adverse_pips", 0))
+                    logger.info(f"[MFE_MAE_DIAG] {pair} | {setup_type} | MFE={mfe:.1f}pips | MAE={mae:.1f}pips | R_sortie={r_multiple:.2f} | Sortie={exit_type} | EQS={eqs}")
             except Exception as e:
-
-                logger.debug(
-                    f"[MFE_MAE] "
-                    f"Erreur tracker "
-                    f"{trade_id}: {e}"
-                )
-
-            # =================================================
-            # 15. LOG FINAL CONFIRMÉ / ESTIMÉ
-            # =================================================
+                logger.debug(f"[MFE_MAE] Erreur tracker {trade_id}: {e}")
 
             if is_estimate:
-
-                logger.warning(
-                    f"[CLOSE_ESTIMATED] "
-                    f"Trade {trade_id} fermé "
-                    f"(ESTIMATION) | "
-                    f"prix={close_price:.5f} | "
-                    f"R={r_multiple:.2f} | "
-                    f"PL={pl:.2f}"
-                )
-
+                logger.warning(f"[CLOSE_ESTIMATED] Trade {trade_id} fermé (ESTIMATION) | prix={close_price:.5f} | R={r_multiple:.2f} | PL={pl:.2f}")
             else:
-
-                logger.info(
-                    f"[CLOSE_CONFIRMED] "
-                    f"Trade {trade_id} fermé "
-                    f"(OANDA CONFIRMÉ) | "
-                    f"prix={close_price:.5f} | "
-                    f"R={r_multiple:.2f} | "
-                    f"PL={pl:.2f}"
-                )
-
-    # ========================================================
-    # ERREUR GLOBALE
-    # ========================================================
+                logger.info(f"[CLOSE_CONFIRMED] Trade {trade_id} fermé (OANDA CONFIRMÉ) | prix={close_price:.5f} | R={r_multiple:.2f} | PL={pl:.2f}")
 
     except Exception as e:
-
-        logger.error(
-            f"Erreur lors du check "
-            f"des trades fermés: {e}"
-        )
-
-        logger.error(
-            traceback.format_exc()
-        )
+        logger.error(f"Erreur lors du check des trades fermés: {e}")
+        logger.error(traceback.format_exc())
 
 # =============================
 # FONCTIONS OANDA (inchangées)
 # =============================
-
 def v88_client():
     token = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN")
     environment = os.getenv("OANDA_ENVIRONMENT", "practice")
@@ -1900,7 +1204,6 @@ def get_atr_m15_v88(pair: str) -> float:
 
 def get_open_trades_v88(log_raw: bool = False, skip_maintenance_check: bool = False, force_refresh: bool = False) -> list:
     cache_key = "open_trades_raw"
-
     if force_refresh:
         _OANDA_CACHE_V88.pop(cache_key, None)
         logger.debug("[CACHE] Force refresh - cache invalidé")
@@ -1910,33 +1213,26 @@ def get_open_trades_v88(log_raw: bool = False, skip_maintenance_check: bool = Fa
         return []
 
     resp = _cache_get_v88(cache_key)
-
     if resp is None:
         try:
             api = v88_client()
             r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
             resp = api.request(r)
-
             reset_maintenance_state()
-
             if resp:
                 _cache_set_v88(cache_key, resp)
-
         except oandapyV20.exceptions.V20Error as e:
             should_suspend, duration, log_level = handle_api_error(e)
-
             if log_level == "WARNING":
                 logger.warning(f"⚠️ Erreur OpenTrades: {e}")
             else:
                 logger.error(f"❌ Erreur OpenTrades: {e}")
-
             cached_resp = _cache_get_v88(cache_key, ttl_seconds=10.0)
             if cached_resp is not None:
                 logger.debug("📦 Utilisation du cache pour OpenTrades")
                 resp = cached_resp
             else:
                 return []
-
         except Exception as e:
             logger.error(f"Erreur OpenTrades: {e}")
             return []
@@ -2442,11 +1738,6 @@ def should_early_breakeven(trade_info: dict, df_h1: pd.DataFrame, df_h4: pd.Data
 # ✅ V103 : SORTIE ANTICIPÉE SUR RETOURNEMENT - PLUS STRICTE (4 signaux)
 # ============================================================
 def check_indicator_reversal(pair: str, direction: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, current_r: float) -> bool:
-    """
-    V103 : Ne se déclenche que si le trade est en perte significative (R < -0.30)
-    Conditions plus strictes : 4 signaux au lieu de 3
-    """
-    # ✅ V103 : Ne sortir que si le trade est en perte
     if current_r > -0.30:
         return False
     
@@ -2466,7 +1757,6 @@ def check_indicator_reversal(pair: str, direction: str, df_m15: pd.DataFrame, df
         if direction == "BUY":
             if close < close_prev:
                 signals_against += 1
-            # RSI plus strict (40)
             if rsi_m15 < 40:
                 signals_against += 1
             if macd_last < macd_prev:
@@ -2476,7 +1766,6 @@ def check_indicator_reversal(pair: str, direction: str, df_m15: pd.DataFrame, df
         else:
             if close > close_prev:
                 signals_against += 1
-            # RSI plus strict (60)
             if rsi_m15 > 60:
                 signals_against += 1
             if macd_last > macd_prev:
@@ -2484,7 +1773,6 @@ def check_indicator_reversal(pair: str, direction: str, df_m15: pd.DataFrame, df
             if adx_h1 < 20:
                 signals_against += 1
 
-        # ✅ V103 : Exiger 4 signaux (au lieu de 3)
         return signals_against >= 4
     except Exception:
         return False
@@ -2699,7 +1987,6 @@ EXECUTION_COOLDOWN_SECONDS = 60
 # ============================================================
 # V110 - EXÉCUTION OANDA AVEC PRIX DE FILL RÉEL
 # ============================================================
-
 def execute_oanda_trade_v981(
     pair: str,
     direction: str,
@@ -2720,502 +2007,174 @@ def execute_oanda_trade_v981(
 
     now = time.time()
 
-    # --------------------------------------------------------
-    # COOLDOWN
-    # --------------------------------------------------------
-
     if (
         pair_upper in last_execution_attempt
         and now - last_execution_attempt[pair_upper]
         < EXECUTION_COOLDOWN_SECONDS
     ):
-        logger.warning(
-            f"[ORDER] Cooldown actif pour "
-            f"{pair_upper}"
-        )
+        logger.warning(f"[ORDER] Cooldown actif pour {pair_upper}")
         return None
 
     last_execution_attempt[pair_upper] = now
 
     expected_entry = float(entry_price)
 
-    logger.info(
-        f"[ORDER] V110 EXECUTION START "
-        f"{pair} {direction} "
-        f"type={entry_type} "
-        f"score={score}"
-    )
+    logger.info(f"[ORDER] V110 EXECUTION START {pair} {direction} type={entry_type} score={score}")
 
-    # --------------------------------------------------------
-    # RR
-    # --------------------------------------------------------
-
-    risk = abs(
-        expected_entry - stop_loss
-    )
-
-    reward = abs(
-        take_profit - expected_entry
-    )
+    risk = abs(expected_entry - stop_loss)
+    reward = abs(take_profit - expected_entry)
 
     if risk <= 0:
-        logger.error(
-            "[ORDER] Risque nul"
-        )
+        logger.error("[ORDER] Risque nul")
         return None
 
     rr = reward / risk
 
     if rr < 1.8:
-
         if direction == "BUY":
-            take_profit = (
-                expected_entry
-                + risk * 2.0
-            )
+            take_profit = expected_entry + risk * 2.0
         else:
-            take_profit = (
-                expected_entry
-                - risk * 2.0
-            )
+            take_profit = expected_entry - risk * 2.0
+        logger.info(f"[ORDER] TP ajusté pour RR=2.0: {take_profit:.5f}")
 
-        logger.info(
-            f"[ORDER] TP ajusté "
-            f"pour RR=2.0: {take_profit:.5f}"
-        )
-
-    # --------------------------------------------------------
-    # TRADE LIMITS
-    # --------------------------------------------------------
-
-    if (
-        ONE_TRADE_PER_PAIR
-        and has_open_trade_v88(pair)
-    ):
-        logger.info(
-            f"{pair}: trade déjà ouvert"
-        )
+    if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
+        logger.info(f"{pair}: trade déjà ouvert")
         return None
 
-    if (
-        open_trade_count_v88()
-        >= MAX_TRADES_TOTAL
-    ):
-        logger.info(
-            f"Limite trades atteinte"
-        )
+    if open_trade_count_v88() >= MAX_TRADES_TOTAL:
+        logger.info(f"Limite trades atteinte")
         return None
 
     if is_maintenance_suspended():
-        logger.warning(
-            f"[ORDER] OANDA maintenance"
-        )
+        logger.warning(f"[ORDER] OANDA maintenance")
         return None
-
-    # --------------------------------------------------------
-    # BALANCE
-    # --------------------------------------------------------
 
     balance = get_balance_v88()
-
     if balance <= 0:
-        logger.error(
-            "Balance invalide"
-        )
+        logger.error("Balance invalide")
         return None
-
-    # --------------------------------------------------------
-    # SL MINIMUM
-    # --------------------------------------------------------
 
     pip_value = get_pip_value_for_pair(pair)
-
     min_sl_distance = pip_value * 10
-
-    risk = abs(
-        expected_entry - stop_loss
-    )
+    risk = abs(expected_entry - stop_loss)
 
     if risk < min_sl_distance:
-
-        logger.warning(
-            f"[ORDER] SL trop proche: "
-            f"{risk:.5f} < "
-            f"{min_sl_distance:.5f}"
-        )
-
+        logger.warning(f"[ORDER] SL trop proche: {risk:.5f} < {min_sl_distance:.5f}")
         if direction == "BUY":
-            stop_loss = (
-                expected_entry
-                - min_sl_distance
-            )
+            stop_loss = expected_entry - min_sl_distance
         else:
-            stop_loss = (
-                expected_entry
-                + min_sl_distance
-            )
-
+            stop_loss = expected_entry + min_sl_distance
         risk = min_sl_distance
-
         if direction == "BUY":
-            take_profit = (
-                expected_entry
-                + risk * 2.0
-            )
+            take_profit = expected_entry + risk * 2.0
         else:
-            take_profit = (
-                expected_entry
-                - risk * 2.0
-            )
-
-    # --------------------------------------------------------
-    # RISK
-    # --------------------------------------------------------
+            take_profit = expected_entry - risk * 2.0
 
     hour = datetime.utcnow().hour
+    is_asia = (21 <= hour or hour < 7)
+    risk_pct = 0.5 if is_asia else RISK_PERCENTAGE
 
-    is_asia = (
-        21 <= hour
-        or hour < 7
-    )
-
-    risk_pct = (
-        0.5
-        if is_asia
-        else RISK_PERCENTAGE
-    )
-
-    units = calculate_units_v88(
-        pair,
-        expected_entry,
-        stop_loss,
-        balance,
-        risk_pct=risk_pct
-    )
-
+    units = calculate_units_v88(pair, expected_entry, stop_loss, balance, risk_pct=risk_pct)
     if not units or float(units) <= 0:
-        logger.error(
-            f"Units invalides: {units}"
-        )
+        logger.error(f"Units invalides: {units}")
         return None
 
-    # --------------------------------------------------------
-    # MARGIN
-    # --------------------------------------------------------
-
-    margin_info = calculate_margin_v88(
-        pair,
-        units,
-        expected_entry
-    )
-
+    margin_info = calculate_margin_v88(pair, units, expected_entry)
     if not margin_info["sufficient"]:
-
-        units = cap_units_by_margin_v88(
-            pair,
-            units,
-            expected_entry,
-            balance
-        )
-
+        units = cap_units_by_margin_v88(pair, units, expected_entry, balance)
         if not units or units <= 0:
-            logger.error(
-                f"[RISK] Marge insuffisante"
-            )
+            logger.error(f"[RISK] Marge insuffisante")
             return None
 
-    signed_units = (
-        units
-        if direction == "BUY"
-        else -units
-    )
-
-    # --------------------------------------------------------
-    # ORDER OANDA
-    # --------------------------------------------------------
+    signed_units = units if direction == "BUY" else -units
 
     order_data = {
         "order": {
             "type": "MARKET",
             "instrument": pair,
-            "units": str(
-                int(signed_units)
-            ),
+            "units": str(int(signed_units)),
             "positionFill": "DEFAULT",
-
             "stopLossOnFill": {
-                "price": round_price_v88(
-                    pair,
-                    stop_loss
-                ),
+                "price": round_price_v88(pair, stop_loss),
                 "timeInForce": "GTC"
             },
-
             "takeProfitOnFill": {
-                "price": round_price_v88(
-                    pair,
-                    take_profit
-                ),
+                "price": round_price_v88(pair, take_profit),
                 "timeInForce": "GTC"
             }
         }
     }
 
-    logger.info(
-        f"[ORDER_EXPECTED] "
-        f"{pair} | {direction} | "
-        f"ENTRY_EXPECTED="
-        f"{expected_entry:.5f} | "
-        f"SL={stop_loss:.5f} | "
-        f"TP={take_profit:.5f} | "
-        f"RR="
-        f"{abs(take_profit-expected_entry)/risk:.2f}"
-    )
+    logger.info(f"[ORDER_EXPECTED] {pair} | {direction} | ENTRY_EXPECTED={expected_entry:.5f} | SL={stop_loss:.5f} | TP={take_profit:.5f} | RR={abs(take_profit-expected_entry)/risk:.2f}")
 
     if not EXECUTE_TRADES:
-        logger.info(
-            "[ORDER] EXECUTE_TRADES=false"
-        )
+        logger.info("[ORDER] EXECUTE_TRADES=false")
         return "SIMULATION"
 
-    # --------------------------------------------------------
-    # SEND OANDA
-    # --------------------------------------------------------
-
     try:
-
         api = v88_client()
-
-        r = orders.OrderCreate(
-            accountID=OANDA_ACCOUNT_ID,
-            data=order_data
-        )
-
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         import json
-
-        logger.info(
-            f"[ORDER] 📤 OANDA "
-            f"{json.dumps(order_data)}"
-        )
-
+        logger.info(f"[ORDER] 📤 OANDA {json.dumps(order_data)}")
         resp = api.request(r)
+        logger.info(f"[ORDER] 📥 OANDA RESPONSE {json.dumps(resp)}")
 
-        logger.info(
-            f"[ORDER] 📥 OANDA RESPONSE "
-            f"{json.dumps(resp)}"
-        )
-
-        # ----------------------------------------------------
-        # REJECT
-        # ----------------------------------------------------
-
-        if resp.get(
-            "orderRejectTransaction"
-        ):
-
-            reject = resp[
-                "orderRejectTransaction"
-            ]
-
-            logger.error(
-                f"[ORDER] REJECT "
-                f"{pair}: "
-                f"{reject.get('rejectReason')}"
-            )
-
+        if resp.get("orderRejectTransaction"):
+            reject = resp["orderRejectTransaction"]
+            logger.error(f"[ORDER] REJECT {pair}: {reject.get('rejectReason')}")
             return None
 
-        # ----------------------------------------------------
-        # FILL TRANSACTION
-        # ----------------------------------------------------
-
-        fill = resp.get(
-            "orderFillTransaction",
-            {}
-        )
-
+        fill = resp.get("orderFillTransaction", {})
         trade_id = None
-
         if fill.get("tradeOpened"):
-
-            trade_id = (
-                fill["tradeOpened"]
-                .get("tradeID")
-            )
-
-        # Prix réellement exécuté
+            trade_id = fill["tradeOpened"].get("tradeID")
         actual_entry = None
-
-        for key in [
-            "fullPrice",
-            "price"
-        ]:
-
+        for key in ["fullPrice", "price"]:
             if fill.get(key) is not None:
                 try:
-                    actual_entry = float(
-                        fill[key]
-                    )
+                    actual_entry = float(fill[key])
                     break
                 except Exception:
                     pass
 
-        # ----------------------------------------------------
-        # FALLBACK : TRADES OUVERTS
-        # ----------------------------------------------------
-
         if not trade_id:
-
             time.sleep(1.0)
-
             for attempt in range(8):
-
-                open_trades = (
-                    get_open_trades_v88(
-                        skip_maintenance_check=True,
-                        force_refresh=True
-                    )
-                )
-
+                open_trades = get_open_trades_v88(skip_maintenance_check=True, force_refresh=True)
                 candidates = []
-
                 for t in open_trades:
-
-                    if t.get(
-                        "instrument"
-                    ) != pair:
+                    if t.get("instrument") != pair:
                         continue
-
-                    t_direction = (
-                        "BUY"
-                        if float(
-                            t.get(
-                                "currentUnits",
-                                0
-                            )
-                        ) > 0
-                        else "SELL"
-                    )
-
-                    if (
-                        t_direction
-                        != direction
-                    ):
+                    t_direction = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
+                    if t_direction != direction:
                         continue
-
-                    t_entry = float(
-                        t.get("price", 0)
-                    )
-
-                    candidates.append(
-                        (
-                            abs(
-                                t_entry
-                                - expected_entry
-                            ),
-                            t
-                        )
-                    )
-
+                    t_entry = float(t.get("price", 0))
+                    candidates.append((abs(t_entry - expected_entry), t))
                 if candidates:
-
-                    candidates.sort(
-                        key=lambda x: x[0]
-                    )
-
-                    _, best_trade = (
-                        candidates[0]
-                    )
-
-                    trade_id = best_trade.get(
-                        "id"
-                    )
-
-                    actual_entry = float(
-                        best_trade.get(
-                            "price"
-                        )
-                    )
-
+                    candidates.sort(key=lambda x: x[0])
+                    _, best_trade = candidates[0]
+                    trade_id = best_trade.get("id")
+                    actual_entry = float(best_trade.get("price"))
                     break
-
                 time.sleep(0.8)
 
-        # ----------------------------------------------------
-        # DERNIER FALLBACK
-        # ----------------------------------------------------
-
         if not trade_id:
-
-            logger.error(
-                f"[ORDER] "
-                f"Trade non confirmé "
-                f"{pair}"
-            )
-
+            logger.error(f"[ORDER] Trade non confirmé {pair}")
             return None
 
-        # ----------------------------------------------------
-        # PRIX RÉEL
-        # ----------------------------------------------------
-
         if actual_entry is None:
-
             try:
-
-                trade_details = (
-                    get_trade_details_v88(
-                        trade_id
-                    )
-                )
-
+                trade_details = get_trade_details_v88(trade_id)
                 if trade_details:
-
-                    actual_entry = float(
-                        trade_details.get(
-                            "price",
-                            expected_entry
-                        )
-                    )
-
+                    actual_entry = float(trade_details.get("price", expected_entry))
             except Exception as e:
-
-                logger.warning(
-                    f"[ORDER] Impossible "
-                    f"récupérer fill réel: {e}"
-                )
-
+                logger.warning(f"[ORDER] Impossible récupérer fill réel: {e}")
         if actual_entry is None:
             actual_entry = expected_entry
 
-        # ----------------------------------------------------
-        # SLIPPAGE
-        # ----------------------------------------------------
-
-        slippage_price = (
-            actual_entry
-            - expected_entry
-        )
-
-        slippage_pips = (
-            slippage_price
-            / pip_value
-        )
-
-        logger.info(
-            f"[FILL_REAL] {pair} | "
-            f"TRADE_ID={trade_id} | "
-            f"ENTRY_EXPECTED="
-            f"{expected_entry:.5f} | "
-            f"ENTRY_FILLED="
-            f"{actual_entry:.5f} | "
-            f"SLIPPAGE="
-            f"{slippage_pips:+.1f} pips"
-        )
-
-        # ----------------------------------------------------
-        # SLIPPAGE PROTECTION
-        # ----------------------------------------------------
+        slippage_price = actual_entry - expected_entry
+        slippage_pips = slippage_price / pip_value
+        logger.info(f"[FILL_REAL] {pair} | TRADE_ID={trade_id} | ENTRY_EXPECTED={expected_entry:.5f} | ENTRY_FILLED={actual_entry:.5f} | SLIPPAGE={slippage_pips:+.1f} pips")
 
         MAX_ENTRY_SLIPPAGE_PIPS = {
             "GBP_USD": 2.5,
@@ -3224,142 +2183,45 @@ def execute_oanda_trade_v981(
             "AUD_USD": 2.5,
             "DEFAULT": 3.0,
         }
-
-        max_slippage = (
-            MAX_ENTRY_SLIPPAGE_PIPS.get(
-                pair,
-                MAX_ENTRY_SLIPPAGE_PIPS[
-                    "DEFAULT"
-                ]
-            )
-        )
-
+        max_slippage = MAX_ENTRY_SLIPPAGE_PIPS.get(pair, MAX_ENTRY_SLIPPAGE_PIPS["DEFAULT"])
         if abs(slippage_pips) > max_slippage:
-
-            logger.warning(
-                f"[SLIPPAGE] "
-                f"{pair}: "
-                f"{slippage_pips:+.1f} pips "
-                f"> max "
-                f"{max_slippage:.1f}"
-            )
-
-            # Le trade est déjà exécuté.
-            # On ne le ferme PAS automatiquement ici.
-            # On marque simplement l'anomalie.
+            logger.warning(f"[SLIPPAGE] {pair}: {slippage_pips:+.1f} pips > max {max_slippage:.1f}")
             metrics = dict(metrics or {})
-
-            metrics[
-                "slippage_pips"
-            ] = slippage_pips
-
-            metrics[
-                "slippage_warning"
-            ] = True
-
+            metrics["slippage_pips"] = slippage_pips
+            metrics["slippage_warning"] = True
         else:
-
             metrics = dict(metrics or {})
+            metrics["slippage_pips"] = slippage_pips
+            metrics["slippage_warning"] = False
 
-            metrics[
-                "slippage_pips"
-            ] = slippage_pips
-
-            metrics[
-                "slippage_warning"
-            ] = False
-
-        # ----------------------------------------------------
-        # ENREGISTREMENT AVEC PRIX RÉEL
-        # ----------------------------------------------------
-
-        trade_tracker.add_trade(
-            trade_id,
-            pair,
-            direction,
-            actual_entry,
-            stop_loss,
-            take_profit,
-            setup_type,
-            eqs
-        )
-
-        open_trade_details[
-            str(trade_id)
-        ] = {
-
-            "entry":
-                actual_entry,
-
-            "expected_entry":
-                expected_entry,
-
-            "actual_entry":
-                actual_entry,
-
-            "sl":
-                stop_loss,
-
-            "tp":
-                take_profit,
-
-            "direction":
-                direction,
-
-            "setup_type":
-                setup_type,
-
-            "eqs":
-                eqs,
-
-            "pair":
-                pair,
-
-            "units":
-                units,
-
+        # Enregistrement du trade avec le prix réel et stockage du SL initial
+        trade_tracker.add_trade(trade_id, pair, direction, actual_entry, stop_loss, take_profit, setup_type, eqs)
+        open_trade_details[str(trade_id)] = {
+            "entry": actual_entry,
+            "expected_entry": expected_entry,
+            "actual_entry": actual_entry,
+            "sl": stop_loss,                # SL initial
+            "tp": take_profit,
+            "direction": direction,
+            "setup_type": setup_type,
+            "eqs": eqs,
+            "pair": pair,
+            "units": units,
             **metrics
         }
 
-        logger.info(
-            f"[ORDER_CONFIRMED] "
-            f"{pair} | "
-            f"{direction} | "
-            f"ID={trade_id} | "
-            f"EXPECTED="
-            f"{expected_entry:.5f} | "
-            f"FILLED="
-            f"{actual_entry:.5f} | "
-            f"SL="
-            f"{stop_loss:.5f} | "
-            f"TP="
-            f"{take_profit:.5f}"
-        )
-
+        logger.info(f"[ORDER_CONFIRMED] {pair} | {direction} | ID={trade_id} | EXPECTED={expected_entry:.5f} | FILLED={actual_entry:.5f} | SL={stop_loss:.5f} | TP={take_profit:.5f}")
         return str(trade_id)
 
     except oandapyV20.exceptions.V20Error as e:
-
-        logger.error(
-            f"[ORDER] V20Error "
-            f"{pair}: {e}"
-        )
-
+        logger.error(f"[ORDER] V20Error {pair}: {e}")
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
-
         return None
-
     except Exception as e:
-
-        logger.exception(
-            f"[ORDER] Erreur OANDA "
-            f"{pair}: {e}"
-        )
-
+        logger.exception(f"[ORDER] Erreur OANDA {pair}: {e}")
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
-
         return None
 
 
@@ -3367,169 +2229,70 @@ def execute_oanda_trade_v981(
 # V106 - MODIFICATION SL (avec réajustement TP pour préserver RR)
 # ============================================================
 def modify_trade_sl_v981(trade_id: str, pair: str, new_sl: float, adjust_tp: bool = True) -> bool:
-    """
-    Modifie le SL et ajuste le TP pour maintenir RR >= 2.
-    Correction : currentUnits est explicitement converti en float.
-    """
     try:
         if is_maintenance_suspended():
-            logger.warning(
-                f"[BE] OANDA en maintenance - modification SL suspendue pour {trade_id}"
-            )
+            logger.warning(f"[BE] OANDA en maintenance - modification SL suspendue pour {trade_id}")
             return False
 
-        # Récupérer les détails du trade
         trade_details = get_trade_details_v88(trade_id)
-
         if not trade_details:
             logger.error(f"[BE] Impossible de récupérer le trade {trade_id}")
             return False
 
         entry = float(trade_details.get("price", 0))
-
-        current_tp = float(
-            trade_details.get("takeProfitOrder", {}).get("price", 0)
-        )
-
-        # CORRECTION : OANDA peut retourner currentUnits sous forme de string
-        current_units = float(
-            trade_details.get("currentUnits", 0)
-        )
+        current_tp = float(trade_details.get("takeProfitOrder", {}).get("price", 0))
+        current_units = float(trade_details.get("currentUnits", 0))
 
         if entry == 0 or current_tp == 0:
-            logger.warning(
-                f"[BE] Pas de TP pour trade {trade_id}, "
-                f"on modifie SL seulement"
-            )
+            logger.warning(f"[BE] Pas de TP pour trade {trade_id}, on modifie SL seulement")
             adjust_tp = False
 
         api = v88_client()
+        logger.info(f"[BE] Modification SL via TradeCRCDO pour trade {trade_id} -> {new_sl:.5f}")
 
-        logger.info(
-            f"[BE] Modification SL via TradeCRCDO "
-            f"pour trade {trade_id} -> {new_sl:.5f}"
-        )
+        data = {"stopLoss": {"price": round_price_v88(pair, new_sl), "timeInForce": "GTC"}}
 
-        # Préparer la mise à jour du SL
-        data = {
-            "stopLoss": {
-                "price": round_price_v88(pair, new_sl),
-                "timeInForce": "GTC"
-            }
-        }
-
-        # Ajustement du TP pour maintenir RR >= 2
         if adjust_tp and current_tp > 0:
-
             risk = abs(entry - new_sl)
-
             if risk > 0:
-
-                # BUY = TP au-dessus de l'entrée
-                # SELL = TP en-dessous de l'entrée
-                new_tp = (
-                    entry + (2.0 * risk)
-                    if current_units > 0
-                    else entry - (2.0 * risk)
-                )
-
-                # Vérification de la direction du TP
-                if (
-                    current_units > 0 and new_tp > entry
-                ) or (
-                    current_units < 0 and new_tp < entry
-                ):
-
-                    data["takeProfit"] = {
-                        "price": round_price_v88(pair, new_tp),
-                        "timeInForce": "GTC"
-                    }
-
-                    logger.info(
-                        f"[BE] TP ajusté à {new_tp:.5f} "
-                        f"pour maintenir RR=2.0"
-                    )
-
+                new_tp = entry + (2.0 * risk) if current_units > 0 else entry - (2.0 * risk)
+                if (current_units > 0 and new_tp > entry) or (current_units < 0 and new_tp < entry):
+                    data["takeProfit"] = {"price": round_price_v88(pair, new_tp), "timeInForce": "GTC"}
+                    logger.info(f"[BE] TP ajusté à {new_tp:.5f} pour maintenir RR=2.0")
                 else:
-                    logger.warning(
-                        f"[BE] TP ajusté invalide, "
-                        f"on le laisse inchangé"
-                    )
+                    logger.warning(f"[BE] TP ajusté invalide, on le laisse inchangé")
 
-        # Envoi de la modification à OANDA
-        r = trades.TradeCRCDO(
-            accountID=OANDA_ACCOUNT_ID,
-            tradeID=trade_id,
-            data=data
-        )
-
+        r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
         resp = api.request(r)
 
-        # Vérifier un rejet OANDA
         if resp.get("orderRejectTransaction"):
             reject = resp.get("orderRejectTransaction")
-
-            logger.error(
-                f"[BE] Rejeté pour trade {trade_id}: "
-                f"{reject.get('rejectReason', 'unknown')}"
-            )
-
+            logger.error(f"[BE] Rejeté pour trade {trade_id}: {reject.get('rejectReason', 'unknown')}")
             return False
 
-        logger.info(
-            f"[BE] SUCCESS: SL modifié pour trade {trade_id} "
-            f"-> {new_sl:.5f}"
-        )
-
-        # Attendre la propagation OANDA
+        logger.info(f"[BE] SUCCESS: SL modifié pour trade {trade_id} -> {new_sl:.5f}")
         time.sleep(1)
-
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
 
-        # Vérification réelle du SL côté OANDA
         trade_details = get_trade_details_v88(trade_id)
-
         if trade_details:
-
             actual_sl = get_stop_loss_v88(trade_details)
-
             if abs(actual_sl - new_sl) <= 0.0001:
-
-                logger.info(
-                    f"[CONFIRM] ✅ SL confirmé: {actual_sl:.5f}"
-                )
-
+                logger.info(f"[CONFIRM] ✅ SL confirmé: {actual_sl:.5f}")
                 return True
-
             else:
-
-                logger.warning(
-                    f"[CONFIRM] SL non confirmé: "
-                    f"attendu {new_sl:.5f}, "
-                    f"reçu {actual_sl:.5f}"
-                )
-
+                logger.warning(f"[CONFIRM] SL non confirmé: attendu {new_sl:.5f}, reçu {actual_sl:.5f}")
                 return True
-
         else:
-
-            logger.warning(
-                f"[CONFIRM] Impossible de confirmer le SL "
-                f"pour {trade_id}"
-            )
-
+            logger.warning(f"[CONFIRM] Impossible de confirmer le SL pour {trade_id}")
             return True
 
     except Exception as e:
-
-        logger.error(
-            f"[BE] Erreur modification SL trade {trade_id}: {e}"
-        )
-
+        logger.error(f"[BE] Erreur modification SL trade {trade_id}: {e}")
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
-
         return False
+
 # ============================================================
 # V106 - CRÉATION TRAILING STOP (optimisé avec activation à 0.80R)
 # ============================================================
@@ -3540,7 +2303,6 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
             return False
 
         api = v88_client()
-
         logger.info(f"[TSL] Création trailing via OrderCreate pour trade {trade_id} -> distance={distance:.5f}")
 
         order_data = {
@@ -3560,7 +2322,6 @@ def create_oanda_trailing_stop_v981(trade_id: str, pair: str, distance: float) -
             return False
 
         logger.info(f"[TSL] SUCCESS: Trailing stop créé pour trade {trade_id}, distance={distance:.5f}")
-
         time.sleep(1)
         _OANDA_CACHE_V88.pop("open_trades_raw", None)
 
@@ -3587,7 +2348,6 @@ def get_trade_details_v88(trade_id: str) -> dict:
     try:
         if is_maintenance_suspended():
             return {}
-
         api = v88_client()
         r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
         resp = api.request(r)
@@ -3616,7 +2376,6 @@ def get_stop_loss_v88(trade: dict) -> float:
 def extract_trade_id_v89(response: dict) -> str | None:
     if not response:
         return None
-
     oft = response.get("orderFillTransaction")
     if oft:
         if "tradeOpened" in oft and oft["tradeOpened"]:
@@ -3631,16 +2390,13 @@ def extract_trade_id_v89(response: dict) -> str | None:
             opened = oft["tradesOpened"]
             if opened and opened[0].get("tradeID"):
                 return str(opened[0]["tradeID"])
-
     oct = response.get("orderCreateTransaction")
     if oct and "relatedTransactionIDs" in oct:
         related = oct.get("relatedTransactionIDs", [])
         if related:
             return str(related[-1])
-
     if response.get("tradeID"):
         return str(response["tradeID"])
-
     return None
 
 
@@ -4944,12 +3700,6 @@ def calculate_entry_quality_score(
 
 
 def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5) -> tuple:
-    """
-    V106.1 : Version corrigée du filtre structure H1.
-    - BUY : rejeter uniquement si structure BEARISH confirmée (LH et LL)
-    - SELL : rejeter uniquement si structure BULLISH confirmée (HH et HL)
-    - Les structures neutres ou partiellement alignées sont acceptées
-    """
     if len(df) < lookback * 2 + 2:
         return True, "Données insuffisantes, structure acceptée par défaut"
 
@@ -4967,8 +3717,6 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
         hl = last_lows[-1]['price'] > last_lows[-2]['price']
         lh = last_highs[-1]['price'] < last_highs[-2]['price']
         ll = last_lows[-1]['price'] < last_lows[-2]['price']
-        
-        # ✅ V106.1 : Rejeter UNIQUEMENT si structure BEARISH confirmée (LH ET LL)
         if lh and ll:
             return False, f"Structure BEARISH confirmée (LH={lh}, LL={ll})"
         else:
@@ -4979,8 +3727,6 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5)
         hl = last_lows[-1]['price'] > last_lows[-2]['price']
         lh = last_highs[-1]['price'] < last_highs[-2]['price']
         ll = last_lows[-1]['price'] < last_lows[-2]['price']
-        
-        # ✅ V106.1 : Rejeter UNIQUEMENT si structure BULLISH confirmée (HH ET HL)
         if hh and hl:
             return False, f"Structure BULLISH confirmée (HH={hh}, HL={hl})"
         else:
@@ -4995,47 +3741,9 @@ def filter_pullback(
     current_price: float,
     pair: str
 ) -> tuple:
-    """
-    V106.2 - Pullback dynamique basé sur l'ATR.
-
-    Objectif :
-    - Remplacer le seuil fixe de pullback par un seuil adaptatif
-      à la volatilité réelle du marché.
-    - Conserver un filtre suffisamment strict pour éviter les
-      entrées sans véritable retracement.
-    - Être plus permissif lorsque l'ATR est faible, notamment
-      pendant la session ASIA.
-
-    Logique :
-        seuil_ATR = ATR(M15) × 0.75
-
-        seuil_effectif =
-            max(minimum absolu,
-                min(seuil maximum, seuil_ATR))
-
-    Puis application d'une tolérance de 0.5 pip.
-
-    Exemples EUR/USD :
-        ATR 3.0 pips  → seuil = 2.25 pips
-        ATR 4.0 pips  → seuil = 3.00 pips
-        ATR 5.0 pips  → seuil = 3.75 pips
-        ATR 6.0+ pips → seuil plafonné à 4.00 pips
-
-    Important :
-    - On ne supprime PAS le filtre pullback.
-    - On ne force PAS une entrée.
-    - Le pullback doit toujours exister.
-    - Le seuil reste borné pour éviter les retracements
-      artificiellement faibles ou excessivement importants.
-    """
-
     try:
         direction = str(direction).upper()
         pair = str(pair).upper()
-
-        # ============================================================
-        # 1. VALIDATION DES DONNÉES
-        # ============================================================
 
         if df is None or len(df) < max(8, ATR_PERIOD):
             return False, "Données insuffisantes pour pullback"
@@ -5044,86 +3752,29 @@ def filter_pullback(
             return False, "Prix courant invalide"
 
         current_price = float(current_price)
-
-        # ============================================================
-        # 2. PIP VALUE
-        # ============================================================
-
         pip_value = get_pip_value_for_pair(pair)
-
         if pip_value is None or pip_value <= 0:
             return False, f"Valeur pip invalide pour {pair}"
-
         pip_value = float(pip_value)
-
-        # ============================================================
-        # 3. ATR M15
-        # ============================================================
 
         try:
             atr_price = calculate_atr(df, period=ATR_PERIOD)
             atr_pips = price_to_pips(atr_price, pair)
-
             atr_pips = float(atr_pips)
-
         except Exception as e:
-            logger.warning(
-                f"[PULLBACK_ATR] {pair} | "
-                f"Impossible de calculer ATR: {e}"
-            )
-
+            logger.warning(f"[PULLBACK_ATR] {pair} | Impossible de calculer ATR: {e}")
             atr_pips = 0.0
 
-        # ============================================================
-        # 4. SEUIL DE BASE
-        # ============================================================
-
-        base_min_pullback = PULLBACK_MIN_PIPS_BY_PAIR.get(
-            pair,
-            PULLBACK_MIN_PIPS_BY_PAIR["DEFAULT"]
-        )
-
+        base_min_pullback = PULLBACK_MIN_PIPS_BY_PAIR.get(pair, PULLBACK_MIN_PIPS_BY_PAIR["DEFAULT"])
         base_min_pullback = float(base_min_pullback)
 
-        # ============================================================
-        # 5. SEUIL DYNAMIQUE ATR
-        # ============================================================
-
         if atr_pips > 0:
-
-            # 75 % de l'ATR M15
             atr_based_threshold = atr_pips * 0.75
-
-            # --------------------------------------------------------
-            # Bornes de sécurité
-            # --------------------------------------------------------
-
-            # Minimum absolu :
-            # on ne veut jamais accepter un pullback ridicule.
-            min_absolute_pips = min(
-                2.0,
-                base_min_pullback * 0.75
-            )
-
-            # Maximum :
-            # on conserve l'ancien seuil comme plafond.
+            min_absolute_pips = min(2.0, base_min_pullback * 0.75)
             max_pullback_pips = base_min_pullback
-
-            dynamic_min_pullback = max(
-                min_absolute_pips,
-                min(
-                    max_pullback_pips,
-                    atr_based_threshold
-                )
-            )
-
+            dynamic_min_pullback = max(min_absolute_pips, min(max_pullback_pips, atr_based_threshold))
         else:
-            # Si ATR indisponible → fallback ancien système
             dynamic_min_pullback = base_min_pullback
-
-        # ============================================================
-        # 6. ADAPTATION ASIA
-        # ============================================================
 
         try:
             hour = datetime.utcnow().hour
@@ -5132,173 +3783,47 @@ def filter_pullback(
             is_asia = False
 
         if is_asia:
-
-            # En ASIA, on autorise une réduction supplémentaire
-            # de 10 %, mais sans jamais passer sous 2 pips.
-            dynamic_min_pullback = max(
-                2.0,
-                dynamic_min_pullback * 0.90
-            )
-
-        # ============================================================
-        # 7. TOLÉRANCE
-        # ============================================================
+            dynamic_min_pullback = max(2.0, dynamic_min_pullback * 0.90)
 
         tolerance_pips = 0.5
-
-        effective_threshold_pips = max(
-            0.0,
-            dynamic_min_pullback - tolerance_pips
-        )
-
-        min_pullback_price = (
-            effective_threshold_pips * pip_value
-        )
-
-        # ============================================================
-        # 8. FENÊTRE D'ANALYSE
-        # ============================================================
+        effective_threshold_pips = max(0.0, dynamic_min_pullback - tolerance_pips)
+        min_pullback_price = effective_threshold_pips * pip_value
 
         recent = df.iloc[-8:]
 
-        # ============================================================
-        # 9. CALCUL DU PULLBACK BUY
-        # ============================================================
-
         if direction == "BUY":
-
             recent_high = float(recent["high"].max())
-
             pullback_depth = recent_high - current_price
-
-            pullback_pips = price_to_pips(
-                pullback_depth,
-                pair
-            )
-
-            pullback_pips = max(
-                0.0,
-                float(pullback_pips)
-            )
-
-            # --------------------------------------------------------
-            # Validation
-            # --------------------------------------------------------
+            pullback_pips = price_to_pips(pullback_depth, pair)
+            pullback_pips = max(0.0, float(pullback_pips))
 
             if pullback_depth >= min_pullback_price:
-
-                logger.info(
-                    f"[PULLBACK_DYNAMIC] {pair} | BUY | "
-                    f"Pullback={pullback_pips:.1f}p | "
-                    f"Seuil={dynamic_min_pullback:.1f}p | "
-                    f"ATR={atr_pips:.1f}p | "
-                    f"Asia={is_asia} | PASSED"
-                )
-
-                return True, (
-                    f"Pullback OK "
-                    f"({pullback_pips:.1f} pips >= "
-                    f"{dynamic_min_pullback:.1f} pips | "
-                    f"ATR={atr_pips:.1f})"
-                )
-
+                logger.info(f"[PULLBACK_DYNAMIC] {pair} | BUY | Pullback={pullback_pips:.1f}p | Seuil={dynamic_min_pullback:.1f}p | ATR={atr_pips:.1f}p | Asia={is_asia} | PASSED")
+                return True, f"Pullback OK ({pullback_pips:.1f} pips >= {dynamic_min_pullback:.1f} pips | ATR={atr_pips:.1f})"
             else:
-
-                logger.info(
-                    f"[PULLBACK_DYNAMIC] {pair} | BUY | "
-                    f"Pullback={pullback_pips:.1f}p | "
-                    f"Seuil={dynamic_min_pullback:.1f}p | "
-                    f"ATR={atr_pips:.1f}p | "
-                    f"Asia={is_asia} | REJECT"
-                )
-
-                return False, (
-                    f"Pullback insuffisant "
-                    f"({pullback_pips:.1f} pips < "
-                    f"{dynamic_min_pullback:.1f} pips | "
-                    f"ATR={atr_pips:.1f})"
-                )
-
-        # ============================================================
-        # 10. CALCUL DU PULLBACK SELL
-        # ============================================================
+                logger.info(f"[PULLBACK_DYNAMIC] {pair} | BUY | Pullback={pullback_pips:.1f}p | Seuil={dynamic_min_pullback:.1f}p | ATR={atr_pips:.1f}p | Asia={is_asia} | REJECT")
+                return False, f"Pullback insuffisant ({pullback_pips:.1f} pips < {dynamic_min_pullback:.1f} pips | ATR={atr_pips:.1f})"
 
         elif direction == "SELL":
-
             recent_low = float(recent["low"].min())
-
             pullback_depth = current_price - recent_low
-
-            pullback_pips = price_to_pips(
-                pullback_depth,
-                pair
-            )
-
-            pullback_pips = max(
-                0.0,
-                float(pullback_pips)
-            )
-
-            # --------------------------------------------------------
-            # Validation
-            # --------------------------------------------------------
+            pullback_pips = price_to_pips(pullback_depth, pair)
+            pullback_pips = max(0.0, float(pullback_pips))
 
             if pullback_depth >= min_pullback_price:
-
-                logger.info(
-                    f"[PULLBACK_DYNAMIC] {pair} | SELL | "
-                    f"Pullback={pullback_pips:.1f}p | "
-                    f"Seuil={dynamic_min_pullback:.1f}p | "
-                    f"ATR={atr_pips:.1f}p | "
-                    f"Asia={is_asia} | PASSED"
-                )
-
-                return True, (
-                    f"Pullback OK "
-                    f"({pullback_pips:.1f} pips >= "
-                    f"{dynamic_min_pullback:.1f} pips | "
-                    f"ATR={atr_pips:.1f})"
-                )
-
+                logger.info(f"[PULLBACK_DYNAMIC] {pair} | SELL | Pullback={pullback_pips:.1f}p | Seuil={dynamic_min_pullback:.1f}p | ATR={atr_pips:.1f}p | Asia={is_asia} | PASSED")
+                return True, f"Pullback OK ({pullback_pips:.1f} pips >= {dynamic_min_pullback:.1f} pips | ATR={atr_pips:.1f})"
             else:
-
-                logger.info(
-                    f"[PULLBACK_DYNAMIC] {pair} | SELL | "
-                    f"Pullback={pullback_pips:.1f}p | "
-                    f"Seuil={dynamic_min_pullback:.1f}p | "
-                    f"ATR={atr_pips:.1f}p | "
-                    f"Asia={is_asia} | REJECT"
-                )
-
-                return False, (
-                    f"Pullback insuffisant "
-                    f"({pullback_pips:.1f} pips < "
-                    f"{dynamic_min_pullback:.1f} pips | "
-                    f"ATR={atr_pips:.1f})"
-                )
-
-        # ============================================================
-        # 11. DIRECTION INVALIDE
-        # ============================================================
+                logger.info(f"[PULLBACK_DYNAMIC] {pair} | SELL | Pullback={pullback_pips:.1f}p | Seuil={dynamic_min_pullback:.1f}p | ATR={atr_pips:.1f}p | Asia={is_asia} | REJECT")
+                return False, f"Pullback insuffisant ({pullback_pips:.1f} pips < {dynamic_min_pullback:.1f} pips | ATR={atr_pips:.1f})"
 
         return False, f"Direction {direction} invalide"
 
     except Exception as e:
-
-        logger.error(
-            f"[PULLBACK_DYNAMIC] {pair} | "
-            f"Erreur: {e}",
-            exc_info=True
-        )
-
+        logger.error(f"[PULLBACK_DYNAMIC] {pair} | Erreur: {e}", exc_info=True)
         return False, f"Erreur filtre pullback: {e}"
 
-# ✅ V106 : Fonction de score ATR / volatilité (remplace filter_min_volatility)
 def score_atr_volatility(df: pd.DataFrame, pair: str) -> tuple:
-    """
-    Retourne un score (0-10) et un message.
-    Score basé sur l'ATR en pips par rapport au seuil de la session.
-    """
     if len(df) < ATR_PERIOD:
         return 0, "Données insuffisantes pour ATR"
 
@@ -5311,7 +3836,6 @@ def score_atr_volatility(df: pd.DataFrame, pair: str) -> tuple:
     is_ny = 12 <= hour < 21
 
     base_min_atr = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
-    
     if is_asia:
         min_atr_pips = MIN_ATR_PIPS_BY_PAIR_ASIA.get(pair, base_min_atr * 0.75)
     elif is_london or is_ny:
@@ -5319,7 +3843,6 @@ def score_atr_volatility(df: pd.DataFrame, pair: str) -> tuple:
     else:
         min_atr_pips = base_min_atr * 0.85
 
-    # Score : si ATR est bien au-dessus du seuil, bonus
     ratio = atr_pips / min_atr_pips if min_atr_pips > 0 else 0
     if ratio >= 1.5:
         score = 10
@@ -5337,24 +3860,16 @@ def score_atr_volatility(df: pd.DataFrame, pair: str) -> tuple:
         score = 0
         msg = f"ATR très faible ({atr_pips:.1f} pips)"
 
-    # Veto si ATR < 0.7 * seuil (pour éviter les trades en volatilité trop faible)
     if ratio < 0.7:
         return 0, f"ATR trop faible ({atr_pips:.1f} < {min_atr_pips*0.7:.1f})"
-    
     return score, msg
 
 
-# ✅ V106 : Fonction de score pour le momentum (gradué)
 def score_momentum(pair: str, direction: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, entry_level: float, current_price: float, entry_type: str) -> tuple:
-    """
-    Retourne un score (0-15) et un message, avec pénalité progressive pour momentum opposé.
-    """
     direction = direction.upper()
     momentum = calculate_momentum(df_m15, period=5)
-    # Momentum en pourcentage
     abs_momentum = abs(momentum)
-    
-    # Score de base
+
     if direction == "BUY":
         if momentum > 0.2:
             score = 15
@@ -5371,7 +3886,7 @@ def score_momentum(pair: str, direction: str, df_m15: pd.DataFrame, df_h1: pd.Da
         else:
             score = 0
             msg = f"Momentum baissier fort ({momentum:.2f}%)"
-    else:  # SELL
+    else:
         if momentum < -0.2:
             score = 15
             msg = f"Momentum baissier fort ({momentum:.2f}%)"
@@ -5387,39 +3902,31 @@ def score_momentum(pair: str, direction: str, df_m15: pd.DataFrame, df_h1: pd.Da
         else:
             score = 0
             msg = f"Momentum haussier fort ({momentum:.2f}%)"
-    
-    # Veto si momentum > 0.15% opposé
+
     if direction == "BUY" and momentum < -0.15:
         return 0, f"Momentum baissier fort ({momentum:.2f}%) contre BUY"
     if direction == "SELL" and momentum > 0.15:
         return 0, f"Momentum haussier fort ({momentum:.2f}%) contre SELL"
-    
-    # Pénalité si momentum opposé modéré
+
     if direction == "BUY" and momentum < -0.05:
         score -= 2
     if direction == "SELL" and momentum > 0.05:
         score -= 2
-    
+
     return max(0, score), msg
 
 
-# ✅ V106 : Fonction de score ADX dynamique (avec pente)
 def score_adx_dynamic(df_h1: pd.DataFrame) -> tuple:
-    """
-    Retourne un score (0-10) basé sur l'ADX et sa pente.
-    """
     adx = calculate_adx(df_h1, period=14)
     if adx == 0:
         return 0, "ADX indisponible"
-    
-    # Calculer la pente ADX sur 3 périodes
+
     adx_series = []
     for i in range(1, 4):
         if len(df_h1) > i:
             adx_series.append(calculate_adx(df_h1.iloc[:-i] if i>0 else df_h1, period=14))
     pente = adx - adx_series[-1] if len(adx_series) > 0 else 0
-    
-    # Score
+
     if adx >= 30 and pente > 0:
         score = 10
         msg = f"ADX fort et montant ({adx:.1f})"
@@ -5446,41 +3953,35 @@ def score_adx_dynamic(df_h1: pd.DataFrame) -> tuple:
     else:
         score = 0
         msg = f"ADX très faible ({adx:.1f})"
-    
+
     return score, msg
 
 
-# ✅ V106 : check_htf_confluence retourne un score sur 3 et bonus 3/3
 def check_htf_confluence(direction: str, df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> tuple:
-    """Vérifie la confluence sur les hauts timeframes, retourne (score, message, bonus)"""
     score = 0
     details = []
-    
-    # Vérifier la tendance H1
+
     h1_trend = score_ema_trend(df_h1)
     if (direction == "BUY" and h1_trend > 0) or (direction == "SELL" and h1_trend < 0):
         score += 1
         details.append("Tendance H1 alignée")
     else:
         details.append("Tendance H1 neutre/opposée")
-    
-    # Vérifier la tendance H4
+
     h4_trend = score_ema_trend(df_h4)
     if (direction == "BUY" and h4_trend > 0) or (direction == "SELL" and h4_trend < 0):
         score += 1
         details.append("Tendance H4 alignée")
     else:
         details.append("Tendance H4 neutre/opposée")
-    
-    # Vérifier la structure H1
+
     h1_structure = score_market_structure(df_h1)
     if (direction == "BUY" and h1_structure > 0) or (direction == "SELL" and h1_structure < 0):
         score += 1
         details.append("Structure H1 alignée")
     else:
         details.append("Structure H1 neutre/opposée")
-    
-    # Bonus 3/3
+
     bonus = 5 if score == 3 else 0
     if bonus:
         details.append("BONUS 3/3 +5")
@@ -5492,7 +3993,7 @@ def get_effective_atr_threshold(pair: str) -> float:
     is_asia = 21 <= hour or hour < 7
     is_london = 7 <= hour < 16
     is_ny = 12 <= hour < 21
-    
+
     base_min_atr = MIN_ATR_PIPS_BY_PAIR.get(pair, MIN_ATR_PIPS_BY_PAIR["DEFAULT"])
     if is_asia:
         return MIN_ATR_PIPS_BY_PAIR_ASIA.get(pair, base_min_atr * 0.75)
@@ -5513,35 +4014,25 @@ def calculate_sl_tp(
     fvg_data: dict = None,
     breaker_level: float = None,
 ) -> Tuple[float, float]:
-    """
-    Calcule le Stop Loss et le Take Profit en fonction du type de setup.
-    Utilise SIGNAL_RISK_SETTINGS pour les multiplicateurs.
-    Retourne (stop_loss, take_profit).
-    """
     direction = direction.upper()
     pip_value = get_pip_value_for_pair(pair)
 
-    # Récupérer les multiplicateurs pour ce setup
     risk_settings = SIGNAL_RISK_SETTINGS.get(entry_type, SIGNAL_RISK_SETTINGS["FVG_RETEST"])
     sl_mult = risk_settings.get("sl_multiplier", 0.8)
     tp_mult = risk_settings.get("tp_multiplier", 2.0)
 
-    # Ajustements spécifiques
     if entry_type == "BREAKER" and breaker_level is not None:
-        # Pour BREAKER, on place le SL juste au-delà du breaker
         if direction == "BUY":
             stop_loss = breaker_level - (atr * 0.3)
         else:
             stop_loss = breaker_level + (atr * 0.3)
     else:
-        # Calcul standard basé sur l'ATR
-        sl_distance = max(atr * sl_mult, pip_value * 10)  # minimum 10 pips
+        sl_distance = max(atr * sl_mult, pip_value * 10)
         if direction == "BUY":
             stop_loss = entry_price - sl_distance
         else:
             stop_loss = entry_price + sl_distance
 
-    # Calcul du TP (RR minimum 2:1)
     risk = abs(entry_price - stop_loss)
     tp_distance = max(risk * max(tp_mult, 2.0), risk * 2.0)
 
@@ -5550,56 +4041,24 @@ def calculate_sl_tp(
     else:
         take_profit = entry_price - tp_distance
 
-    # Arrondir selon la paire
     stop_loss = float(round_price_v88(pair, stop_loss))
     take_profit = float(round_price_v88(pair, take_profit))
 
     return stop_loss, take_profit
 
 # ============================================================
-# V106 - FILTRE DE CONFIRMATION DE CLÔTURE M15
+# V106 - FILTRE DE CONFIRMATION DE CLÔTURE M15 (V110)
 # ============================================================
-# ============================================================
-# V110 - CONFIRMATION M15 RENFORCÉE
-# ============================================================
-
 def filter_close_confirmation(
     df_m15: pd.DataFrame,
     direction: str
 ) -> Tuple[bool, str]:
-    """
-    V110 - Confirmation M15 renforcée.
-
-    Cette fonction ne décide pas seule du trade.
-    Elle fournit une confirmation fiable au Entry Quality Gate.
-
-    BUY :
-        - bougie haussière
-        - clôture dans moitié haute
-        - corps suffisamment important
-        OU
-        - momentum haussier avec nouveau high
-
-    SELL :
-        - bougie baissière
-        - clôture dans moitié basse
-        - corps suffisamment important
-        OU
-        - momentum baissier avec nouveau low
-    """
-
     direction = (direction or "").upper()
 
     if df_m15 is None or len(df_m15) < 3:
         return False, "Données M15 insuffisantes"
 
     try:
-        # ----------------------------------------------------
-        # IMPORTANT :
-        # utiliser les deux dernières bougies clôturées
-        # et éviter la bougie actuellement en formation.
-        # ----------------------------------------------------
-
         last = df_m15.iloc[-2]
         prev = df_m15.iloc[-3]
 
@@ -5624,186 +4083,79 @@ def filter_close_confirmation(
         upper_wick = high - max(open_price, close)
         lower_wick = min(open_price, close) - low
 
-        # ----------------------------------------------------
-        # BUY
-        # ----------------------------------------------------
-
         if direction == "BUY":
-
             is_bullish = close > open_price
-
             strong_body = body_ratio >= 0.45
+            upper_half = close >= (low + total_range * 0.55)
+            momentum_confirm = (close > prev_close and high >= prev_high)
+            no_strong_upper_rejection = (upper_wick <= body * 1.5)
 
-            upper_half = close >= (
-                low + total_range * 0.55
-            )
-
-            momentum_confirm = (
-                close > prev_close
-                and high >= prev_high
-            )
-
-            no_strong_upper_rejection = (
-                upper_wick <= body * 1.5
-            )
-
-            if (
-                is_bullish
-                and strong_body
-                and upper_half
-                and no_strong_upper_rejection
-            ):
-                return True, (
-                    f"BUY confirmé M15 | "
-                    f"body={body_ratio*100:.0f}% | "
-                    f"close haut de range"
-                )
-
-            if (
-                is_bullish
-                and momentum_confirm
-                and upper_half
-            ):
-                return True, (
-                    f"BUY momentum M15 confirmé | "
-                    f"close={close:.5f} > "
-                    f"prev={prev_close:.5f} | "
-                    f"high={high:.5f} >= "
-                    f"prev_high={prev_high:.5f}"
-                )
-
+            if (is_bullish and strong_body and upper_half and no_strong_upper_rejection):
+                return True, f"BUY confirmé M15 | body={body_ratio*100:.0f}% | close haut de range"
+            if (is_bullish and momentum_confirm and upper_half):
+                return True, f"BUY momentum M15 confirmé | close={close:.5f} > prev={prev_close:.5f} | high={high:.5f} >= prev_high={prev_high:.5f}"
             reasons = []
-
             if not is_bullish:
                 reasons.append("bougie non haussière")
-
             if not strong_body:
-                reasons.append(
-                    f"corps faible={body_ratio*100:.0f}%"
-                )
-
+                reasons.append(f"corps faible={body_ratio*100:.0f}%")
             if not upper_half:
                 reasons.append("clôture trop basse")
-
             if not momentum_confirm:
                 reasons.append("pas de nouveau momentum")
-
             if not no_strong_upper_rejection:
                 reasons.append("rejet haut important")
-
-            return False, (
-                "BUY non confirmé M15: "
-                + ", ".join(reasons)
-            )
-
-        # ----------------------------------------------------
-        # SELL
-        # ----------------------------------------------------
+            return False, "BUY non confirmé M15: " + ", ".join(reasons)
 
         if direction == "SELL":
-
             is_bearish = close < open_price
-
             strong_body = body_ratio >= 0.45
+            lower_half = close <= (low + total_range * 0.45)
+            momentum_confirm = (close < prev_close and low <= prev_low)
+            no_strong_lower_rejection = (lower_wick <= body * 1.5)
 
-            lower_half = close <= (
-                low + total_range * 0.45
-            )
-
-            momentum_confirm = (
-                close < prev_close
-                and low <= prev_low
-            )
-
-            no_strong_lower_rejection = (
-                lower_wick <= body * 1.5
-            )
-
-            if (
-                is_bearish
-                and strong_body
-                and lower_half
-                and no_strong_lower_rejection
-            ):
-                return True, (
-                    f"SELL confirmé M15 | "
-                    f"body={body_ratio*100:.0f}% | "
-                    f"close bas de range"
-                )
-
-            if (
-                is_bearish
-                and momentum_confirm
-                and lower_half
-            ):
-                return True, (
-                    f"SELL momentum M15 confirmé | "
-                    f"close={close:.5f} < "
-                    f"prev={prev_close:.5f} | "
-                    f"low={low:.5f} <= "
-                    f"prev_low={prev_low:.5f}"
-                )
-
+            if (is_bearish and strong_body and lower_half and no_strong_lower_rejection):
+                return True, f"SELL confirmé M15 | body={body_ratio*100:.0f}% | close bas de range"
+            if (is_bearish and momentum_confirm and lower_half):
+                return True, f"SELL momentum M15 confirmé | close={close:.5f} < prev={prev_close:.5f} | low={low:.5f} <= prev_low={prev_low:.5f}"
             reasons = []
-
             if not is_bearish:
                 reasons.append("bougie non baissière")
-
             if not strong_body:
-                reasons.append(
-                    f"corps faible={body_ratio*100:.0f}%"
-                )
-
+                reasons.append(f"corps faible={body_ratio*100:.0f}%")
             if not lower_half:
                 reasons.append("clôture trop haute")
-
             if not momentum_confirm:
                 reasons.append("pas de nouveau momentum")
-
             if not no_strong_lower_rejection:
                 reasons.append("rejet bas important")
-
-            return False, (
-                "SELL non confirmé M15: "
-                + ", ".join(reasons)
-            )
+            return False, "SELL non confirmé M15: " + ", ".join(reasons)
 
         return False, f"Direction invalide: {direction}"
 
     except Exception as e:
-        logger.error(
-            f"[CONFIRM] Erreur confirmation M15: {e}"
-        )
+        logger.error(f"[CONFIRM] Erreur confirmation M15: {e}")
         return False, f"Erreur confirmation M15: {e}"
 
 # ============================================================
 # V106 - FONCTIONS DE SCORING MANQUANTES
 # ============================================================
-
 def estimate_win_rate(entry_score: int, eqs_score: int, confluences: dict) -> str:
-    """
-    Estime le win rate en fonction du score et des confluences.
-    Retourne une chaîne comme "55-60%".
-    """
-    base = 45  # base minimale
-    
-    # Score d'entrée
+    base = 45
     if entry_score >= 80:
         base += 15
     elif entry_score >= 70:
         base += 10
     elif entry_score >= 65:
         base += 5
-    
-    # EQS
+
     if eqs_score >= 80:
         base += 8
     elif eqs_score >= 70:
         base += 5
     elif eqs_score >= 65:
         base += 2
-    
-    # Confluences
+
     if confluences.get("d1_aligned", False):
         base += 5
     if confluences.get("structure_ok", False):
@@ -5818,18 +4170,12 @@ def estimate_win_rate(entry_score: int, eqs_score: int, confluences: dict) -> st
         base += 2
     if confluences.get("rsi_divergence", False):
         base += 3
-    
-    # Limiter entre 35% et 75%
+
     base = max(35, min(75, base))
-    
     return f"{base-3}-{base+3}%"
 
 
 def get_signal_quality_label(entry_score: int, eqs_score: int) -> str:
-    """
-    Détermine la qualité du signal basée sur entry_score et EQS.
-    Retourne "SNIPER", "A+", "A", "B", "C", "D".
-    """
     if entry_score >= 85 and eqs_score >= 80:
         return "SNIPER"
     elif entry_score >= 78 and eqs_score >= 75:
@@ -5845,31 +4191,20 @@ def get_signal_quality_label(entry_score: int, eqs_score: int) -> str:
 
 
 def get_d1_trend_bonus(df_d1: pd.DataFrame, direction: str) -> Tuple[int, str]:
-    """
-    Vérifie si la tendance D1 est alignée avec la direction.
-    Retourne (bonus: int, label: str).
-    """
     if df_d1 is None or len(df_d1) < 20:
         return 0, "Données D1 insuffisantes"
-    
     try:
-        # EMA50 D1
         ema50_d1 = df_d1['close'].ewm(span=50, adjust=False).mean()
         if len(ema50_d1.dropna()) < 2:
             return 0, "EMA50 D1 indisponible"
-        
         price = df_d1['close'].iloc[-1]
         ema50 = ema50_d1.iloc[-1]
-        
-        # Pente EMA50
         ema50_prev = ema50_d1.iloc[-5] if len(ema50_d1) > 5 else ema50
         slope = ema50 - ema50_prev
-        
-        # MACD D1
         macd_hist = calculate_macd_momentum(df_d1)
         macd_last = macd_hist.iloc[-1] if len(macd_hist) > 0 else 0
         macd_prev = macd_hist.iloc[-2] if len(macd_hist) > 1 else 0
-        
+
         if direction == "BUY":
             if price > ema50 and slope > 0 and macd_last > 0 and macd_last > macd_prev:
                 return 2, "Tendance D1 haussière forte"
@@ -5877,35 +4212,28 @@ def get_d1_trend_bonus(df_d1: pd.DataFrame, direction: str) -> Tuple[int, str]:
                 return 1, "Tendance D1 haussière"
             else:
                 return 0, "D1 neutre ou baissière"
-        else:  # SELL
+        else:
             if price < ema50 and slope < 0 and macd_last < 0 and macd_last < macd_prev:
                 return 2, "Tendance D1 baissière forte"
             elif price < ema50:
                 return 1, "Tendance D1 baissière"
             else:
                 return 0, "D1 neutre ou haussière"
-                
     except Exception as e:
         logger.debug(f"[D1_TREND] Erreur: {e}")
         return 0, f"Erreur D1: {str(e)[:30]}"
 
 
 def get_macd_h1_bonus(df_h1: pd.DataFrame, direction: str) -> Tuple[int, str]:
-    """
-    Vérifie si le MACD H1 confirme la direction.
-    Retourne (bonus: int, label: str).
-    """
     if df_h1 is None or len(df_h1) < 26:
         return 0, "Données H1 insuffisantes"
-    
     try:
         macd_hist = calculate_macd_momentum(df_h1)
         if len(macd_hist.dropna()) < 2:
             return 0, "MACD indisponible"
-        
         macd_last = macd_hist.iloc[-1]
         macd_prev = macd_hist.iloc[-2]
-        
+
         if direction == "BUY":
             if macd_last > 0 and macd_last > macd_prev:
                 return 1, "MACD haussier"
@@ -5913,22 +4241,31 @@ def get_macd_h1_bonus(df_h1: pd.DataFrame, direction: str) -> Tuple[int, str]:
                 return 0, "MACD positif mais non croissant"
             else:
                 return 0, "MACD négatif"
-        else:  # SELL
+        else:
             if macd_last < 0 and macd_last < macd_prev:
                 return 1, "MACD baissier"
             elif macd_last < 0:
                 return 0, "MACD négatif mais non décroissant"
             else:
                 return 0, "MACD positif"
-                
     except Exception as e:
         logger.debug(f"[MACD] Erreur: {e}")
         return 0, f"Erreur MACD: {str(e)[:30]}"
 
+def get_session_quality_bonus(pair: str) -> Tuple[int, str]:
+    hour = datetime.utcnow().hour
+    if 7 <= hour < 16:
+        return 1, "LONDON"
+    elif 12 <= hour < 21:
+        return 1, "NY"
+    elif hour >= 21 or hour < 7:
+        return 0, "ASIA"
+    else:
+        return 0, "OTHER"
+
 # ============================================================
 # V110 - ENTRY QUALITY GATE
 # ============================================================
-
 def validate_entry_quality_gate(
     pair: str,
     direction: str,
@@ -5941,40 +4278,6 @@ def validate_entry_quality_gate(
     h1_structure: int,
     htf_score: int,
 ) -> tuple:
-    """
-    V110 - Filtre final de qualité avant autorisation d'entrée.
-
-    Objectif :
-    empêcher les trades "limites" (ex: Score 55-59)
-    d'être exécutés uniquement parce qu'ils dépassent MIN_ENTRY_SCORE.
-
-    Règles :
-        Score < 55 :
-            REJECT
-
-        Score 55-59 :
-            REJECT systématique.
-
-        Score 60-64 :
-            nécessite confirmation M15
-            + momentum non opposé
-            + EQS >= 70
-            + ADX >= 25
-            + structure H1 non opposée
-
-        Score >= 65 :
-            ACCEPT si les filtres structurels sont cohérents.
-
-    FVG_RETEST_PERFECT :
-        Score >= 65 obligatoire.
-        Score 65-69 nécessite confirmation M15.
-        Score >= 70 peut passer sans confirmation M15
-        uniquement si EQS >= 75 et ADX >= 27.
-
-    Retour :
-        (passed: bool, reason: str)
-    """
-
     try:
         pair = str(pair).upper()
         direction = str(direction).upper()
@@ -5987,177 +4290,63 @@ def validate_entry_quality_gate(
         h1_structure = int(h1_structure)
         htf_score = int(htf_score)
 
-        # ----------------------------------------------------
-        # 1. SCORE ABSOLU
-        # ----------------------------------------------------
-
         if entry_score < 55:
-            return False, (
-                f"Score trop faible: {entry_score}/100 < 55"
-            )
-
-        # ----------------------------------------------------
-        # 2. ZONE DANGEREUSE 55-59
-        # ----------------------------------------------------
+            return False, f"Score trop faible: {entry_score}/100 < 55"
 
         if 55 <= entry_score <= 59:
-            return False, (
-                f"Score limite {entry_score}/100: "
-                f"zone 55-59 interdite"
-            )
-
-        # ----------------------------------------------------
-        # 3. STRUCTURE H1 OPPOSÉE
-        # ----------------------------------------------------
+            return False, f"Score limite {entry_score}/100: zone 55-59 interdite"
 
         if direction == "BUY" and h1_structure < 0:
-            return False, (
-                f"Structure H1 baissière ({h1_structure}) "
-                f"contre BUY"
-            )
-
+            return False, f"Structure H1 baissière ({h1_structure}) contre BUY"
         if direction == "SELL" and h1_structure > 0:
-            return False, (
-                f"Structure H1 haussière ({h1_structure}) "
-                f"contre SELL"
-            )
-
-        # ----------------------------------------------------
-        # 4. SCORE 60-64 = CONFIRMATION OBLIGATOIRE
-        # ----------------------------------------------------
+            return False, f"Structure H1 haussière ({h1_structure}) contre SELL"
 
         if 60 <= entry_score <= 64:
-
             if not close_confirmed:
-                return False, (
-                    f"Score {entry_score}/100: "
-                    f"confirmation M15 obligatoire"
-                )
-
+                return False, f"Score {entry_score}/100: confirmation M15 obligatoire"
             if eqs_score < 70:
-                return False, (
-                    f"Score {entry_score}/100 mais "
-                    f"EQS={eqs_score:.0f}<70"
-                )
-
+                return False, f"Score {entry_score}/100 mais EQS={eqs_score:.0f}<70"
             if adx < 25:
-                return False, (
-                    f"Score {entry_score}/100 mais "
-                    f"ADX={adx:.1f}<25"
-                )
-
+                return False, f"Score {entry_score}/100 mais ADX={adx:.1f}<25"
             if direction == "BUY" and momentum < -0.05:
-                return False, (
-                    f"Momentum opposé BUY: {momentum:+.2f}%"
-                )
-
+                return False, f"Momentum opposé BUY: {momentum:+.2f}%"
             if direction == "SELL" and momentum > 0.05:
-                return False, (
-                    f"Momentum opposé SELL: {momentum:+.2f}%"
-                )
-
-        # ----------------------------------------------------
-        # 5. FVG_RETEST_PERFECT
-        # ----------------------------------------------------
+                return False, f"Momentum opposé SELL: {momentum:+.2f}%"
 
         if entry_type == "FVG_RETEST_PERFECT":
-
             if entry_score < 65:
-                return False, (
-                    f"FVG_RETEST_PERFECT exige "
-                    f"Score >=65: actuel={entry_score}"
-                )
-
-            # 65-69 : confirmation obligatoire
+                return False, f"FVG_RETEST_PERFECT exige Score>=65: actuel={entry_score}"
             if 65 <= entry_score <= 69:
-
                 if not close_confirmed:
-                    return False, (
-                        f"FVG_RETEST_PERFECT Score={entry_score}: "
-                        f"confirmation M15 obligatoire"
-                    )
-
+                    return False, f"FVG_RETEST_PERFECT Score={entry_score}: confirmation M15 obligatoire"
                 if eqs_score < 70:
-                    return False, (
-                        f"FVG_RETEST_PERFECT: "
-                        f"EQS={eqs_score:.0f}<70"
-                    )
-
+                    return False, f"FVG_RETEST_PERFECT: EQS={eqs_score:.0f}<70"
                 if adx < 25:
-                    return False, (
-                        f"FVG_RETEST_PERFECT: "
-                        f"ADX={adx:.1f}<25"
-                    )
-
-            # 70+ : confirmation facultative seulement
-            # si contexte suffisamment solide
+                    return False, f"FVG_RETEST_PERFECT: ADX={adx:.1f}<25"
             elif entry_score >= 70:
-
                 if eqs_score < 70:
-                    return False, (
-                        f"FVG_RETEST_PERFECT Score={entry_score}: "
-                        f"EQS={eqs_score:.0f}<70"
-                    )
-
+                    return False, f"FVG_RETEST_PERFECT Score={entry_score}: EQS={eqs_score:.0f}<70"
                 if adx < 25:
-                    return False, (
-                        f"FVG_RETEST_PERFECT Score={entry_score}: "
-                        f"ADX={adx:.1f}<25"
-                    )
-
-                # Si EQS <75 ou ADX <27, confirmation obligatoire
+                    return False, f"FVG_RETEST_PERFECT Score={entry_score}: ADX={adx:.1f}<25"
                 if (eqs_score < 75 or adx < 27) and not close_confirmed:
-                    return False, (
-                        f"FVG_RETEST_PERFECT Score={entry_score}: "
-                        f"confirmation M15 requise "
-                        f"(EQS={eqs_score:.0f}, ADX={adx:.1f})"
-                    )
-
-        # ----------------------------------------------------
-        # 6. HTF
-        # ----------------------------------------------------
+                    return False, f"FVG_RETEST_PERFECT Score={entry_score}: confirmation M15 requise (EQS={eqs_score:.0f}, ADX={adx:.1f})"
 
         if htf_score < 2 and entry_score < 70:
-            return False, (
-                f"Confluence HTF insuffisante: "
-                f"{htf_score}/3 pour Score={entry_score}"
-            )
-
-        # ----------------------------------------------------
-        # 7. MOMENTUM OPPOSÉ
-        # ----------------------------------------------------
+            return False, f"Confluence HTF insuffisante: {htf_score}/3 pour Score={entry_score}"
 
         if direction == "BUY" and momentum < -0.10:
-            return False, (
-                f"Momentum trop opposé au BUY: {momentum:+.2f}%"
-            )
-
+            return False, f"Momentum trop opposé au BUY: {momentum:+.2f}%"
         if direction == "SELL" and momentum > 0.10:
-            return False, (
-                f"Momentum trop opposé au SELL: {momentum:+.2f}%"
-            )
+            return False, f"Momentum trop opposé au SELL: {momentum:+.2f}%"
 
-        # ----------------------------------------------------
-        # 8. ACCEPTATION
-        # ----------------------------------------------------
-
-        return True, (
-            f"ENTRY_GATE_PASS | "
-            f"Score={entry_score} | "
-            f"EQS={eqs_score:.0f} | "
-            f"ADX={adx:.1f} | "
-            f"MOM={momentum:+.2f}% | "
-            f"M15_CONFIRM={close_confirmed}"
-        )
+        return True, f"ENTRY_GATE_PASS | Score={entry_score} | EQS={eqs_score:.0f} | ADX={adx:.1f} | MOM={momentum:+.2f}% | M15_CONFIRM={close_confirmed}"
 
     except Exception as e:
-        logger.error(
-            f"[ENTRY_GATE] Erreur validation: {e}"
-        )
+        logger.error(f"[ENTRY_GATE] Erreur validation: {e}")
         return False, f"Erreur Entry Quality Gate: {e}"
 
 # ============================================================
-# V109.1 - CALCUL DU SCORE DE CONFIANCE
+# V109.1 - CALCUL DU SCORE DE CONFIANCE (AVEC BYPASS ASIA/LONDON)
 # ============================================================
 def calculate_signal_confidence(
     pair: str,
@@ -6172,11 +4361,6 @@ def calculate_signal_confidence(
     tbs_setup_type: str = "",
     df_d1: pd.DataFrame = None,
 ) -> dict:
-    """
-    V109.1 : 
-    - Structure H1 : neutre acceptée pour setups forts (FVG_RETEST_PERFECT/NESTED_FVG) si EQS >=75, opposée rejetée.
-    - HTF 1/3 bypassé pour setups forts si EQS >=80, ADX >=28 et structure non opposée.
-    """
     score_components = {
         "ICT": 0,
         "Structure_H1": 0,
@@ -6190,7 +4374,6 @@ def calculate_signal_confidence(
     details: dict = {}
     rejection_logs = []
 
-    # --- 1. Récupération des paramètres de base ---
     base_min_required = BASE_MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, BASE_MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
     setup_type = str(entry.get("type", "FVG_RETEST")).upper()
     setup_weight = stats.adaptive_state.get_setup_weight(pair, setup_type)
@@ -6243,7 +4426,6 @@ def calculate_signal_confidence(
         pair=pair, entry_type=entry_type, fvg_data=fvg_data,
     )
 
-    # --- 2. Construire les métriques ---
     atr_pips = price_to_pips(atr_value, pair)
     adx = calculate_adx(df_h1)
     rsi = get_last_rsi(df_m15["close"])
@@ -6350,11 +4532,9 @@ def calculate_signal_confidence(
     # --- 5. Structure H1 (V106.1 - plus permissif) ---
     struct_passed, struct_msg = filter_market_structure(df_h1, direction, lookback=5)
 
-    # Détecter si la structure est totalement opposée
     is_opposed = "BEARISH" in struct_msg or "BULLISH" in struct_msg
 
     if not struct_passed:
-        # Rejet normal (structure opposée)
         rejection_logs.append(struct_msg)
         details["VETO"] = f"STRUCTURE: {struct_msg}"
         return {
@@ -6375,11 +4555,9 @@ def calculate_signal_confidence(
         }
 
     if "non-bearish" in struct_msg or "non-bullish" in struct_msg:
-        # Structure neutre ou partiellement alignée → bonus +1
         score_components["Structure"] += 1
         details["Structure_V98.1"] = f"+1 ({struct_msg}, neutre acceptée)"
     else:
-        # Structure pleinement alignée → bonus +2
         score_components["Structure"] += 2
         details["Structure_V98.1"] = f"+2 ({struct_msg})"
 
@@ -6466,7 +4644,6 @@ def calculate_signal_confidence(
     # --- 10. Filtre structure H1 (veto dur) - CONSERVÉ mais assoupli ---
     h1_structure = score_market_structure(df_h1)
     if direction == "BUY" and h1_structure < 0:
-        # Structure baissière confirmée
         rejection_logs.append(f"Structure H1 baissière ({h1_structure}) contre BUY")
         details["VETO"] = f"Structure H1: {h1_structure} (baissière)"
         return {
@@ -6486,7 +4663,6 @@ def calculate_signal_confidence(
             "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
     if direction == "SELL" and h1_structure > 0:
-        # Structure haussière confirmée
         rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL")
         details["VETO"] = f"Structure H1: {h1_structure} (haussière)"
         return {
@@ -6510,18 +4686,15 @@ def calculate_signal_confidence(
     # --- 11. Confluence HTF (V109.1) ---
     htf_score, htf_str, htf_details, htf_bonus = check_htf_confluence(direction, df_h1, df_h4)
 
-    # ✅ V109.1 : Bypass HTF 1/3 pour setups forts avec EQS>=80 et ADX>=28
     strong_setups = ["FVG_RETEST_PERFECT", "NESTED_FVG"]
     is_strong_setup = entry_type in strong_setups
     bypass_htf = False
-    
+
     if htf_score == 1 and is_strong_setup and eqs_score >= 80 and adx >= 28:
-        # Vérifier que la structure n'est pas opposée (on utilise struct_passed qui est déjà vrai)
         if struct_passed:
             bypass_htf = True
             logger.info(f"[HTF_BYPASS] {pair} | {direction} | {entry_type} | HTF 1/3 bypassé car EQS={eqs_score}>=80, ADX={adx:.1f}>=28, setup fort")
-            # On garde le score de base sans bonus
-            htf_score = 2  # pour ne pas déclencher le rejet
+            htf_score = 2
 
     if htf_score < 2 and not bypass_htf:
         rejection_logs.append(f"Confluence HTF: {htf_score}/3 (requis 2/3)")
@@ -6543,7 +4716,6 @@ def calculate_signal_confidence(
             "filter_diag": {"HTF_BYPASS": "NO" if not bypass_htf else "YES", "STRUCTURE_FILTER": "PASS", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
         }
 
-    # Ajouter les bonus HTF (si bypass, on garde le bonus 0)
     if not bypass_htf:
         score_components["HTF_Alignment"] += htf_score + htf_bonus
         details["HTF_Confluence"] = f"{htf_str} ({' | '.join(htf_details)}) (bonus {htf_bonus})"
@@ -6692,43 +4864,25 @@ def calculate_signal_confidence(
         pass
 
     # --- 20. Calcul du score total ---
-    # ========================================================
-    # V110 - FINAL ENTRY QUALITY GATE
-    # ========================================================
-
     raw_score = compute_final_score(score_components)
     entry_score = min(100, max(0, raw_score + 10))
 
     # Confirmation M15
-    close_passed, close_msg = filter_close_confirmation(
-        df_m15,
-        direction
-    )
+    close_passed, close_msg = filter_close_confirmation(df_m15, direction)
 
     # Structure H1 finale
     try:
-        final_h1_structure = int(
-            score_market_structure(df_h1)
-        )
+        final_h1_structure = int(score_market_structure(df_h1))
     except Exception:
         final_h1_structure = 0
 
     # HTF final
     try:
-        final_htf_score = int(
-            score_higher_timeframe_alignment(
-                direction,
-                df_h1,
-                df_h4
-            )
-        )
+        final_htf_score = int(score_higher_timeframe_alignment(direction, df_h1, df_h4))
     except Exception:
         final_htf_score = 0
 
-    # --------------------------------------------------------
-    # ENTRY QUALITY GATE
-    # --------------------------------------------------------
-
+    # --- ENTRY QUALITY GATE ---
     gate_passed, gate_reason = validate_entry_quality_gate(
         pair=pair,
         direction=direction,
@@ -6741,41 +4895,18 @@ def calculate_signal_confidence(
         h1_structure=final_h1_structure,
         htf_score=final_htf_score,
     )
-    # ========================================================
-    # V108 - ASIA + LONDON ENTRY BYPASS
-    # ========================================================
 
+    # ============================================================
+    # V111 - ASIA/LONDON ENTRY BYPASS (avec constantes définies)
+    # ============================================================
     bypass_used = False
     bypass_reason = None
 
-    # --------------------------------------------------------
-    # Détection des sessions
-    # --------------------------------------------------------
-
     hour = datetime.utcnow().hour
+    is_asia = (hour >= 21 or hour < 7)
+    is_london = (7 <= hour < 12)
 
-    # ASIA : 21:00 -> 07:00 UTC
-    is_asia = (
-        hour >= 21 or
-        hour < 7
-    )
-
-    # LONDON : 07:00 -> 12:00 UTC
-    is_london = (
-        7 <= hour < 12
-    )
-
-    # --------------------------------------------------------
-    # Setup autorisé pour le bypass
-    # --------------------------------------------------------
-
-    is_fvg_retest = (
-        str(entry_type).upper() == "FVG_RETEST_PERFECT"
-    )
-
-    # --------------------------------------------------------
-    # Conditions communes
-    # --------------------------------------------------------
+    is_fvg_retest = (str(entry_type).upper() == "FVG_RETEST_PERFECT")
 
     bypass_score = float(entry_score)
     bypass_eqs = float(eqs_score)
@@ -6790,507 +4921,165 @@ def calculate_signal_confidence(
         (direction == "SELL" and momentum > 0.05)
     )
 
-    # --------------------------------------------------------
-    # Vérification du spread
-    # --------------------------------------------------------
-
     try:
-
-        pip_value = float(
-            get_pip_value_for_pair(pair)
-        )
-
-        spread_value = float(
-            spread_data.get("spread", 0.0)
-        )
-
-        bypass_spread_ok = (
-            spread_value <= pip_value * 1.5
-        )
-
+        pip_value = float(get_pip_value_for_pair(pair))
+        spread_value = float(spread_data.get("spread", 0.0))
+        bypass_spread_ok = (spread_value <= pip_value * 1.5)
     except Exception as e:
-
-        logger.warning(
-            f"[BYPASS] Erreur calcul spread "
-            f"{pair}: {e}"
-        )
-
+        logger.warning(f"[BYPASS] Erreur calcul spread {pair}: {e}")
         bypass_spread_ok = False
 
-
-    # ========================================================
     # ASIA
-    # ========================================================
-
     asia_conditions = {
-        "score":
-            bypass_score >= ASIA_BYPASS_MIN_SCORE,
-
-        "eqs":
-            bypass_eqs >= ASIA_BYPASS_MIN_EQS,
-
-        "adx":
-            bypass_adx >= ASIA_BYPASS_MIN_ADX,
-
-        # Protection structure H1 conservée
-        "structure":
-            bypass_struct,
-
-        "pullback":
-            bypass_pullback,
-
-        "momentum":
-            bypass_momentum_ok,
-
-        "spread":
-            bypass_spread_ok,
+        "score": bypass_score >= ASIA_BYPASS_MIN_SCORE,
+        "eqs": bypass_eqs >= ASIA_BYPASS_MIN_EQS,
+        "adx": bypass_adx >= ASIA_BYPASS_MIN_ADX,
+        "structure": bypass_struct,
+        "pullback": bypass_pullback,
+        "momentum": bypass_momentum_ok,
+        "spread": bypass_spread_ok,
     }
-
     asia_all_conditions_met = (
         is_asia
         and is_fvg_retest
         and not gate_passed
-        and all(
-            asia_conditions.values()
-        )
+        and all(asia_conditions.values())
     )
 
-
-    # ========================================================
     # LONDON
-    # ========================================================
-
     london_conditions = {
-        "score":
-            bypass_score >= LONDON_BYPASS_MIN_SCORE,
-
-        "eqs":
-            bypass_eqs >= LONDON_BYPASS_MIN_EQS,
-
-        "adx":
-            bypass_adx >= LONDON_BYPASS_MIN_ADX,
-
-        # Protection structure H1 conservée
-        "structure":
-            bypass_struct,
-
-        "pullback":
-            bypass_pullback,
-
-        "momentum":
-            bypass_momentum_ok,
-
-        "spread":
-            bypass_spread_ok,
+        "score": bypass_score >= LONDON_BYPASS_MIN_SCORE,
+        "eqs": bypass_eqs >= LONDON_BYPASS_MIN_EQS,
+        "adx": bypass_adx >= LONDON_BYPASS_MIN_ADX,
+        "structure": bypass_struct,
+        "pullback": bypass_pullback,
+        "momentum": bypass_momentum_ok,
+        "spread": bypass_spread_ok,
     }
-
     london_all_conditions_met = (
         is_london
         and is_fvg_retest
         and not gate_passed
-        and all(
-            london_conditions.values()
-        )
+        and all(london_conditions.values())
     )
 
-
-    # ========================================================
-    # ACCEPTATION ASIA
-    # ========================================================
-
     if asia_all_conditions_met:
-
         gate_passed = True
         gate_reason = "ASIA_BYPASS"
         bypass_used = True
-
-        logger.info(
-            f"[ASIA_ENTRY_BYPASS] "
-            f"{pair} | {direction} | "
-            f"FVG_RETEST_PERFECT | "
-            f"Score={bypass_score:.1f} | "
-            f"EQS={bypass_eqs:.1f} | "
-            f"ADX={bypass_adx:.1f} | "
-            f"H1_STRUCT=PASS | "
-            f"Pullback=PASS | "
-            f"RESULT=ACCEPT"
-        )
-
-
-    # ========================================================
-    # ACCEPTATION LONDON
-    # ========================================================
+        logger.info(f"[ASIA_ENTRY_BYPASS] {pair} | {direction} | FVG_RETEST_PERFECT | Score={bypass_score:.1f} | EQS={bypass_eqs:.1f} | ADX={bypass_adx:.1f} | H1_STRUCT=PASS | Pullback=PASS | RESULT=ACCEPT")
 
     elif london_all_conditions_met:
-
         gate_passed = True
         gate_reason = "LONDON_BYPASS"
         bypass_used = True
+        logger.info(f"[LONDON_ENTRY_BYPASS] {pair} | {direction} | FVG_RETEST_PERFECT | Score={bypass_score:.1f} | EQS={bypass_eqs:.1f} | ADX={bypass_adx:.1f} | H1_STRUCT=PASS | Pullback=PASS | RESULT=ACCEPT")
 
-        logger.info(
-            f"[LONDON_ENTRY_BYPASS] "
-            f"{pair} | {direction} | "
-            f"FVG_RETEST_PERFECT | "
-            f"Score={bypass_score:.1f} | "
-            f"EQS={bypass_eqs:.1f} | "
-            f"ADX={bypass_adx:.1f} | "
-            f"H1_STRUCT=PASS | "
-            f"Pullback=PASS | "
-            f"RESULT=ACCEPT"
-        )
+    elif is_asia and is_fvg_retest and not gate_passed:
+        failed_conditions = [key for key, value in asia_conditions.items() if not value]
+        logger.info(f"[ASIA_ENTRY_BYPASS_REJECT] {pair} | {direction} | reason={', '.join(failed_conditions)} | Score={bypass_score:.1f} | EQS={bypass_eqs:.1f} | ADX={bypass_adx:.1f} | H1_STRUCT={'PASS' if bypass_struct else 'FAIL'} | Pullback={'PASS' if bypass_pullback else 'FAIL'}")
 
-
-    # ========================================================
-    # REJET ASIA - DIAGNOSTIC
-    # ========================================================
-
-    elif (
-        is_asia
-        and is_fvg_retest
-        and not gate_passed
-    ):
-
-        failed_conditions = [
-            key
-            for key, value in asia_conditions.items()
-            if not value
-        ]
-
-        logger.info(
-            f"[ASIA_ENTRY_BYPASS_REJECT] "
-            f"{pair} | {direction} | "
-            f"reason="
-            f"{', '.join(failed_conditions)} | "
-            f"Score={bypass_score:.1f} | "
-            f"EQS={bypass_eqs:.1f} | "
-            f"ADX={bypass_adx:.1f} | "
-            f"H1_STRUCT="
-            f"{'PASS' if bypass_struct else 'FAIL'} | "
-            f"Pullback="
-            f"{'PASS' if bypass_pullback else 'FAIL'}"
-        )
-
-
-    # ========================================================
-    # REJET LONDON - DIAGNOSTIC
-    # ========================================================
-
-    elif (
-        is_london
-        and is_fvg_retest
-        and not gate_passed
-    ):
-
-        failed_conditions = [
-            key
-            for key, value in london_conditions.items()
-            if not value
-        ]
-
-        logger.info(
-            f"[LONDON_ENTRY_BYPASS_REJECT] "
-            f"{pair} | {direction} | "
-            f"reason="
-            f"{', '.join(failed_conditions)} | "
-            f"Score={bypass_score:.1f} | "
-            f"EQS={bypass_eqs:.1f} | "
-            f"ADX={bypass_adx:.1f} | "
-            f"H1_STRUCT="
-            f"{'PASS' if bypass_struct else 'FAIL'} | "
-            f"Pullback="
-            f"{'PASS' if bypass_pullback else 'FAIL'}"
-        )
-
-
-    # ========================================================
-    # RESULTAT FINAL DU GATE
-    # ========================================================
+    elif is_london and is_fvg_retest and not gate_passed:
+        failed_conditions = [key for key, value in london_conditions.items() if not value]
+        logger.info(f"[LONDON_ENTRY_BYPASS_REJECT] {pair} | {direction} | reason={', '.join(failed_conditions)} | Score={bypass_score:.1f} | EQS={bypass_eqs:.1f} | ADX={bypass_adx:.1f} | H1_STRUCT={'PASS' if bypass_struct else 'FAIL'} | Pullback={'PASS' if bypass_pullback else 'FAIL'}")
 
     passed = bool(gate_passed)
 
     if not passed:
-
-        rejection_logs.append(
-            f"ENTRY_GATE: {gate_reason}"
-        )
-
-
-    # ========================================================
-    # CONFIDENCE
-    # ========================================================
+        rejection_logs.append(f"ENTRY_GATE: {gate_reason}")
 
     if passed and entry_score >= 80:
-
         final_confidence = "HIGH"
-
     elif passed and entry_score >= 65:
-
         final_confidence = "MEDIUM"
-
     else:
-
         final_confidence = "LOW"
 
-
-    # ========================================================
-    # CONFLUENCES
-    # ========================================================
-
     confluences = {
-
-        "d1_aligned":
-            details.get(
-                "D1_Trend",
-                ""
-            ).startswith("+"),
-
-        "rsi_divergence":
-            False,
-
-        "session_active":
-            details.get(
-                "Session",
-                ""
-            ).startswith("+"),
-
-        "macd_confirmed":
-            details.get(
-                "MACD_H1",
-                ""
-            ).startswith("+"),
-
-        "bos_confirmed":
-            "BOS" in str(details),
-
-        "structure_ok":
-            score_components.get(
-                "Structure",
-                0
-            ) >= 1,
-
-        "pullback_ok":
-            score_components.get(
-                "Pullback",
-                0
-            ) >= 2,
-
-        "m15_confirmation":
-            close_passed,
-
-        "entry_gate":
-            passed,
+        "d1_aligned": details.get("D1_Trend", "").startswith("+"),
+        "rsi_divergence": False,
+        "session_active": details.get("Session", "").startswith("+"),
+        "macd_confirmed": details.get("MACD_H1", "").startswith("+"),
+        "bos_confirmed": "BOS" in str(details),
+        "structure_ok": score_components.get("Structure", 0) >= 1,
+        "pullback_ok": score_components.get("Pullback", 0) >= 2,
+        "m15_confirmation": close_passed,
+        "entry_gate": passed,
     }
 
-    # --------------------------------------------------------
-    # QUALITÉ
-    # --------------------------------------------------------
+    win_rate = estimate_win_rate(entry_score, eqs_score, confluences)
+    quality_label = get_signal_quality_label(entry_score, eqs_score)
 
-    win_rate = estimate_win_rate(
-        entry_score,
-        eqs_score,
-        confluences
-    )
-
-    quality_label = get_signal_quality_label(
-        entry_score,
-        eqs_score
-    )
-
-    # ASIA reste ultra stricte
-    if is_asia and quality_label not in [
-        "SNIPER",
-        "A+"
-    ] and not bypass_used:
+    if is_asia and quality_label not in ["SNIPER", "A+"] and not bypass_used:
         passed = False
+        rejection_logs.append(f"Qualité {quality_label} insuffisante en ASIA (requis SNIPER/A+)")
 
-        rejection_logs.append(
-            f"Qualité {quality_label} insuffisante en ASIA "
-            f"(requis SNIPER/A+)"
-        )
-
-    # --------------------------------------------------------
-    # LOG DÉTAILLÉ
-    # --------------------------------------------------------
-
-    log_score_detail(
-        score_components,
-        entry_score,
-        "PASSED" if passed else "REJECTED"
-    )
+    log_score_detail(score_components, entry_score, "PASSED" if passed else "REJECTED")
 
     eqs_detail_str = ""
-
     if eqs_components:
         comp_parts = []
-
         for comp_name, comp_data in eqs_components.items():
-            comp_label = comp_name.replace(
-                "_", " "
-            ).title()
-
-            comp_parts.append(
-                f"{comp_label}:{comp_data['score']:+d}"
-            )
-
-        eqs_detail_str = (
-            " | EQS="
-            + " ".join(comp_parts)
-        )
+            comp_label = comp_name.replace("_", " ").title()
+            comp_parts.append(f"{comp_label}:{comp_data['score']:+d}")
+        eqs_detail_str = " | EQS=" + " ".join(comp_parts)
 
     if passed:
         status = "✅ ACCEPT"
     else:
         status = "❌ REJECT"
-
         if rejection_logs:
-            status += (
-                f" | raison="
-                f"{rejection_logs[0][:120]}"
-            )
+            status += f" | raison={rejection_logs[0][:120]}"
 
-    # ✅ V107 : Ajout de l'indicateur ENTRY_GATE=ASIA_BYPASS
     entry_gate_label = "ASIA_BYPASS" if bypass_used else ("PASS" if passed else "FAIL")
 
     decision_line = (
-        f"[DECISION] {pair} | "
-        f"{direction} | "
-        f"{entry_type} | "
-        f"{status} | "
-        f"Score={entry_score}/100 | "
-        f"EQS={eqs_score}/"
-        f"{eqs_min_effective:.0f}"
-        f"{eqs_detail_str} | "
-        f"ATR={atr_pips:.1f}pips | "
-        f"ADX={adx:.1f} | "
-        f"RSI={rsi:.1f} | "
-        f"MOM={momentum:+.2f}% | "
-        f"M15_CONFIRM="
-        f"{'YES' if close_passed else 'NO'} | "
-        f"H1_STRUCT={final_h1_structure:+d} | "
-        f"HTF={final_htf_score}/3 | "
-        f"H={hour:02d}h | "
-        f"Sess={session} | "
-        f"Spread={spread:.2f} | "
-        f"RR={rr_ratio:.2f} | "
-        f"PoidsSetup={setup_weight:.2f} | "
-        f"ENTRY_GATE={entry_gate_label}"
+        f"[DECISION] {pair} | {direction} | {entry_type} | {status} | Score={entry_score}/100 | "
+        f"EQS={eqs_score}/{eqs_min_effective:.0f}{eqs_detail_str} | ATR={atr_pips:.1f}pips | ADX={adx:.1f} | RSI={rsi:.1f} | "
+        f"MOM={momentum:+.2f}% | M15_CONFIRM={'YES' if close_passed else 'NO'} | H1_STRUCT={final_h1_structure:+d} | "
+        f"HTF={final_htf_score}/3 | H={hour:02d}h | Sess={session} | Spread={spread:.2f} | RR={rr_ratio:.2f} | "
+        f"PoidsSetup={setup_weight:.2f} | ENTRY_GATE={entry_gate_label}"
     )
-
     if not passed and rejection_logs:
-        decision_line += (
-            f" | REJECT="
-            f"{rejection_logs[0][:120]}"
-        )
-
+        decision_line += f" | REJECT={rejection_logs[0][:120]}"
     logger.info(decision_line)
 
-    # --------------------------------------------------------
-    # FILTER DIAGNOSTIC
-    # --------------------------------------------------------
-
     filter_diag = {
-        "HTF_BYPASS":
-            "YES" if bypass_htf else "NO",
-
-        "STRUCTURE_FILTER":
-            "PASS" if struct_passed else "FAIL",
-
-        "M15_CONFIRMATION":
-            "PASS" if close_passed else "FAIL",
-
-        "ENTRY_GATE":
-            "PASS" if gate_passed else "FAIL",
-
-        "SCORE_FILTER":
-            "PASS" if passed else "FAIL",
-
-        "FINAL_DECISION":
-            "PASS" if passed else "REJECT",
+        "HTF_BYPASS": "YES" if bypass_htf else "NO",
+        "STRUCTURE_FILTER": "PASS" if struct_passed else "FAIL",
+        "M15_CONFIRMATION": "PASS" if close_passed else "FAIL",
+        "ENTRY_GATE": "PASS" if gate_passed else "FAIL",
+        "SCORE_FILTER": "PASS" if passed else "FAIL",
+        "FINAL_DECISION": "PASS" if passed else "REJECT",
     }
-
-    logger.info(
-        f"[FILTER_DIAG] "
-        f"{pair} | "
-        f"{direction} | "
-        f"{entry_type} | "
-        f"HTF_BYPASS="
-        f"{filter_diag['HTF_BYPASS']} | "
-        f"STRUCTURE="
-        f"{filter_diag['STRUCTURE_FILTER']} | "
-        f"M15="
-        f"{filter_diag['M15_CONFIRMATION']} | "
-        f"ENTRY_GATE="
-        f"{filter_diag['ENTRY_GATE']} | "
-        f"SCORE="
-        f"{entry_score} | "
-        f"EQS="
-        f"{eqs_score} | "
-        f"ADX="
-        f"{adx:.1f} | "
-        f"FINAL="
-        f"{filter_diag['FINAL_DECISION']} | "
-        f"REASON="
-        f"{gate_reason}"
-    )
-
-    # --------------------------------------------------------
-    # RETURN FINAL
-    # --------------------------------------------------------
+    logger.info(f"[FILTER_DIAG] {pair} | {direction} | {entry_type} | HTF_BYPASS={filter_diag['HTF_BYPASS']} | STRUCTURE={filter_diag['STRUCTURE_FILTER']} | M15={filter_diag['M15_CONFIRMATION']} | ENTRY_GATE={filter_diag['ENTRY_GATE']} | SCORE={entry_score} | EQS={eqs_score} | ADX={adx:.1f} | FINAL={filter_diag['FINAL_DECISION']} | REASON={gate_reason}")
 
     return {
         "total_score": entry_score,
         "entry_score": entry_score,
         "details": details,
         "score_components": score_components,
-
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "atr_value": atr_value,
-
         "passed": passed,
         "min_required": MIN_ENTRY_SCORE,
-
-        "final_confidence":
-            final_confidence,
-
-        "win_rate":
-            win_rate,
-
-        "quality_label":
-            quality_label,
-
-        "confluences":
-            confluences,
-
-        "eqs_score":
-            eqs_score,
-
-        "eqs_details":
-            eqs_result,
-
-        "eqs_components":
-            eqs_components,
-
-        "rejection_logs":
-            rejection_logs,
-
-        "metrics":
-            metrics,
-
-        "filter_diag":
-            filter_diag,
-
-        "m15_confirmation":
-            close_passed,
-
-        "m15_confirmation_message":
-            close_msg,
-
-        "entry_gate_reason":
-            gate_reason,
-        
-        "bypass_used": bypass_used,  # ✅ V107
+        "final_confidence": final_confidence,
+        "win_rate": win_rate,
+        "quality_label": quality_label,
+        "confluences": confluences,
+        "eqs_score": eqs_score,
+        "eqs_details": eqs_result,
+        "eqs_components": eqs_components,
+        "rejection_logs": rejection_logs,
+        "metrics": metrics,
+        "filter_diag": filter_diag,
+        "m15_confirmation": close_passed,
+        "m15_confirmation_message": close_msg,
+        "entry_gate_reason": gate_reason,
+        "bypass_used": bypass_used,
     }
+
 # =============================
 # DÉTECTION BIAS-FIRST - inchangé
 # =============================
@@ -7387,9 +5176,9 @@ def advanced_main_v981():
     try:
         api = v88_client()
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V106 - Seuil adaptatif + ASIA (65)")
+        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V111 - Seuil adaptatif + ASIA (65)")
         logger.info(f"✅ ENTRY SCORE /100 - Seuil minimum {MIN_ENTRY_SCORE}")
-        logger.info(f"✅ V107 - ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT")
+        logger.info(f"✅ V111 - ASIA/LONDON ENTRY BYPASS pour FVG_RETEST_PERFECT")
         logger.info(f"✅ Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R)")
         logger.info("✅ AUDIT ATR ACTIVÉ")
         logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
@@ -7401,7 +5190,7 @@ def advanced_main_v981():
         logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
         logger.info(f"✅ VERROUILLAGE PAR PAIRE: {EXECUTION_COOLDOWN_SECONDS}s")
         logger.info("✅ SUIVI MFE/MAE ACTIVÉ")
-        logger.info("✅ PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 10 trades, hystérésis 1 cycle)")
+        logger.info("✅ PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 20 trades, hystérésis 2 cycles)")
         logger.info("✅ V104 : Blocage contre-tendance 4H (sauf BREAKER/BISI)")
         logger.info("✅ V104 : ADX minimum 25 en session active")
         logger.info("✅ V104 : Veto si momentum opposé >0.15%")
@@ -7433,6 +5222,7 @@ def advanced_main_v981():
         logger.info("✅ V106.1 : Filtre STRUCTURE H1 assoupli (rejet uniquement structure opposée)")
         logger.info("✅ V106.1 : Logs FILTER_DIAG et REJECT_DIAG pour diagnostic")
         logger.info("✅ V107 : ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT")
+        logger.info("✅ V111 : Correction des constantes manquantes + R initial pour trailing")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -7440,17 +5230,12 @@ def advanced_main_v981():
     for pair in PAIR_LIST:
         _reset_log_dedup()
 
-        # ============================================================
-        # ✅ V105 : FILTRES DE SESSION + COOLDOWN
-        # ============================================================
         hour = datetime.utcnow().hour
 
-        # ✅ V103 : Bloquer USD/CAD et AUD/USD en ASIA (21h-7h)
         if (21 <= hour or hour < 7) and pair in ["USD_CAD", "AUD_USD"]:
             logger.info(f"[SESSION] {pair} - Session ASIA ({hour}h), trade ignoré")
             continue
 
-        # ✅ V105 : Cooldown après une perte (2h)
         if not stats.adaptive_state.can_trade(pair):
             logger.info(f"[COOLDOWN] {pair} - en cooldown après une perte, scan ignoré")
             continue
@@ -7526,9 +5311,8 @@ def advanced_main_v981():
                 eqs = confidence_result.get("eqs_score", 0)
                 metrics = confidence_result.get("metrics", {})
                 passed = confidence_result.get("passed", False)
-                bypass_used = confidence_result.get("bypass_used", False)  # ✅ V107
+                bypass_used = confidence_result.get("bypass_used", False)
                 
-                # ✅ V106 : LOG enrichi avec score /100
                 bypass_tag = " | BYPASS=ASIA" if bypass_used else ""
                 logger.info(
                     f"[SIGNAL] {pair} | "
@@ -7544,7 +5328,6 @@ def advanced_main_v981():
                 if DEBUG_MODE:
                     logger.debug(f"📊 {pair} {direction} | Score: {score} | EQS: {eqs}/100 | Passed: {passed} | Bypass: {bypass_used}")
 
-                # ✅ V106.1 : Log détaillé du rejet pour diagnostic
                 if not passed:
                     filter_diag = confidence_result.get("filter_diag", {})
                     if filter_diag:
@@ -7575,7 +5358,6 @@ def advanced_main_v981():
                 if len(rejected_details) > 5:
                     logger.debug(f"  ... et {len(rejected_details)-5} autres")
 
-            # ✅ V105 : Sélection avec seuil de qualité relative (basé sur entry_score)
             finalists = strict_keep_best_per_direction(scored_entries, min_score_gap=5)
             
             log_line = (
@@ -7688,14 +5470,11 @@ def advanced_main_v981():
             continue
             
     stats.log_summary()
-# ============================================================
-# V106 - CORRECTION DU TRAILING APRÈS BE
-# ============================================================
 
+# ============================================================
+# V106 - CORRECTION DU TRAILING APRÈS BE (utilisation du risque initial)
+# ============================================================
 def check_breakeven_v981():
-    """
-    Version corrigée : le trailing peut s'activer même si BE déjà déclenché.
-    """
     try:
         if is_maintenance_suspended():
             logger.debug("⏳ OANDA en maintenance - BE suspendu")
@@ -7726,22 +5505,28 @@ def check_breakeven_v981():
 
             trade_tracker.update_price(trade_id, current_price)
 
+            # Récupérer le SL initial depuis open_trade_details
+            trade_info = open_trade_details.get(trade_id, {})
+            initial_sl = trade_info.get("sl", current_sl)
+            if initial_sl <= 0:
+                initial_sl = current_sl  # fallback
+
+            # Calcul du R avec le risque initial
             if direction == "BUY":
                 profit = current_price - entry
-                risk = entry - current_sl
+                initial_risk = entry - initial_sl
             else:
                 profit = entry - current_price
-                risk = current_sl - entry
-            if risk <= 0:
-                continue
-            r = profit / risk
+                initial_risk = current_sl - entry   # pour un SELL, le SL est au-dessus de l'entrée
+            if initial_risk <= 0:
+                initial_risk = abs(entry - current_sl)  # fallback
+            r = profit / initial_risk if initial_risk > 0 else 0.0
 
             check_stagnant_trades(trade_id, pair, direction, entry, r)
 
             pair_params = stats.adaptive_state.get_pair_params(pair)
             effective_threshold = pair_params["be_trigger_r"]
             
-            # ✅ V106 : Vérifier si le SL est déjà au BE
             is_already_be = (direction == "BUY" and current_sl >= entry) or (direction == "SELL" and current_sl <= entry)
             
             if not is_already_be and r >= effective_threshold:
@@ -7757,14 +5542,12 @@ def check_breakeven_v981():
                         logger.info(f"[BE] ✅ SL et TP ajustés avec succès pour {trade_id}")
                         time.sleep(1)
                         _OANDA_CACHE_V88.pop("open_trades_raw", None)
-                        # Mettre à jour current_sl pour le trailing
                         current_sl = be_sl
                     else:
                         logger.error(f"[BE] ❌ ÉCHEC modification SL")
                         continue
 
-            # ✅ V106 : Vérifier le trailing (même si BE déjà déclenché)
-            # Vérifier d'abord si le trailing existe déjà
+            # Vérifier le trailing (en utilisant le R basé sur le risque initial)
             trade_details = get_trade_details_v88(trade_id)
             if has_trailing_stop_v88(trade_details):
                 logger.debug(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
@@ -7779,8 +5562,9 @@ def check_breakeven_v981():
                 profit = entry - current_price
             if risk <= 0:
                 continue
-            r = profit / risk
-
+            # Mais pour la décision de trailing, on utilise le R basé sur le risque initial
+            # r a déjà été calculé ci-dessus avec initial_risk
+            # On peut utiliser r pour la condition de trailing
             trailing_activation = pair_params.get("trailing_activation_r", 0.80)
             
             if r >= trailing_activation:
@@ -7814,6 +5598,7 @@ def check_breakeven_v981():
     except Exception as e:
         logger.error(f"Erreur check_breakeven_v981: {e}")
         logger.error(traceback.format_exc())
+
 # ============================================================
 # STRICT FILTERS - inchangé
 # ============================================================
@@ -7908,10 +5693,6 @@ def strict_distance_filter(pair: str, current_price: float, entry: dict) -> tupl
 
 
 def strict_keep_best_per_direction(scored_entries: list, min_score_gap: int = 3) -> list:
-    """
-    V106 : Sélection du meilleur setup avec seuil de qualité relative.
-    Utilise entry_score au lieu de total_score.
-    """
     if not scored_entries:
         return []
     
@@ -7919,7 +5700,7 @@ def strict_keep_best_per_direction(scored_entries: list, min_score_gap: int = 3)
     for item in scored_entries:
         entry = item["entry"]
         direction = entry.get("direction", "").upper()
-        score = item["confidence"].get("entry_score", -999)  # Utilisation de entry_score
+        score = item["confidence"].get("entry_score", -999)
         eqs = item["confidence"].get("eqs_score", 0)
         entry_type = entry.get("type", "")
         priority = 0
@@ -7938,7 +5719,6 @@ def strict_keep_best_per_direction(scored_entries: list, min_score_gap: int = 3)
             item["key_score"] = key_score
             best[direction] = item
     
-    # Vérifier l'écart entre les directions
     if len(best) >= 2:
         scores = {}
         for direction, item in best.items():
@@ -8078,24 +5858,25 @@ def send_telegram_alert(pair: str, direction: str, entry_price: float, stop_loss
         logger.error(f"Erreur envoi Telegram: {e}")
 
 # ============================================================
-# DIAGNOSTIC DE DÉMARRAGE V107
+# DIAGNOSTIC DE DÉMARRAGE V111
 # ============================================================
 def diagnostic_startup_v981():
     logger.info("=" * 60)
-    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V107")
+    logger.info("[DIAG] DIAGNOSTIC DE DÉMARRAGE V111")
     logger.info("=" * 60)
-    logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BASE_BREAKEVEN_TRIGGER_R} (adaptatif) - ✅ V106: 0.55R")
-    logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif) - ✅ V106: 0.25R")
-    logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {BASE_EQS_MIN_THRESHOLD} (adaptatif, 65 en ASIA) - ✅ V105")
+    logger.info(f"[DIAG] BREAKEVEN_TRIGGER_R = {BASE_BREAKEVEN_TRIGGER_R} (adaptatif)")
+    logger.info(f"[DIAG] BREAKEVEN_EARLY_R = {BASE_BREAKEVEN_EARLY_R} (adaptatif)")
+    logger.info(f"[DIAG] EQS_MIN_THRESHOLD = {BASE_EQS_MIN_THRESHOLD} (adaptatif, 65 en ASIA)")
     logger.info(f"[DIAG] ADX_MIN_THRESHOLD = {BASE_ADX_MIN_THRESHOLD} (adaptatif, 20 en ASIA, 25 en session active)")
-    logger.info(f"[DIAG] TRAILING_STOP = {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R - ✅ V105.1: 1.5R")
-    logger.info(f"[DIAG] TRAILING_ACTIVATION = {BASE_TRAILING_ACTIVATION_R}R - ✅ V105.1: 0.80R")
-    logger.info(f"[DIAG] MIN_ENTRY_SCORE = {MIN_ENTRY_SCORE} - ✅ V106")
-    logger.info(f"[DIAG] ASIA_ENTRY_BYPASS = ACTIVE (FVG_RETEST_PERFECT, Score>=48, EQS>=80, ADX>=18, HTF>=2/3, M15=YES, H1=PASS, Pullback=PASS)")
+    logger.info(f"[DIAG] TRAILING_STOP = {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R")
+    logger.info(f"[DIAG] TRAILING_ACTIVATION = {BASE_TRAILING_ACTIVATION_R}R")
+    logger.info(f"[DIAG] MIN_ENTRY_SCORE = {MIN_ENTRY_SCORE}")
+    logger.info(f"[DIAG] ASIA_BYPASS: Score>={ASIA_BYPASS_MIN_SCORE}, EQS>={ASIA_BYPASS_MIN_EQS}, ADX>={ASIA_BYPASS_MIN_ADX}")
+    logger.info(f"[DIAG] LONDON_BYPASS: Score>={LONDON_BYPASS_MIN_SCORE}, EQS>={LONDON_BYPASS_MIN_EQS}, ADX>={LONDON_BYPASS_MIN_ADX}")
     logger.info(f"[DIAG] BASE_MIN_CONFIDENCE_SCORE_BY_PAIR = {BASE_MIN_CONFIDENCE_SCORE_BY_PAIR}")
     logger.info(f"[DIAG] MIN_ATR_PIPS = {MIN_ATR_PIPS_BY_PAIR}")
-    logger.info(f"[DIAG] MIN_ATR_PIPS_ASIA = {MIN_ATR_PIPS_BY_PAIR_ASIA} - ✅ V105")
-    logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR} - ✅ V105.1: AUD/USD corrigé à 3.5")
+    logger.info(f"[DIAG] MIN_ATR_PIPS_ASIA = {MIN_ATR_PIPS_BY_PAIR_ASIA}")
+    logger.info(f"[DIAG] PULLBACK_MIN_PIPS = {PULLBACK_MIN_PIPS_BY_PAIR}")
     logger.info("[DIAG] SUIVI DES CLÔTURES : tentative API + fallback")
     logger.info("[DIAG] ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS")
     logger.info("[DIAG] APPELS OANDA CORRIGÉS")
@@ -8103,34 +5884,35 @@ def diagnostic_startup_v981():
     logger.info("[DIAG] SUIVI DES TRADES STAGNANTS ACTIVÉ")
     logger.info("[DIAG] BREAK EVEN ADAPTATIF ACTIVÉ")
     logger.info("[DIAG] TRAILING STOP OPTIMISÉ ACTIVÉ (activation 0.80R, distance 1.5R)")
-    logger.info("[DIAG] SORTIE ANTICIPÉE SUR RETOURNEMENT ACTIVÉE - ✅ V103: 4 signaux requis")
+    logger.info("[DIAG] SORTIE ANTICIPÉE SUR RETOURNEMENT ACTIVÉE (4 signaux requis)")
     logger.info("[DIAG] DISTANCE SL MINIMUM (10 pips) ACTIVÉE")
     logger.info("[DIAG] FILTRE SPREAD ÉLEVÉ ACTIVÉ")
     logger.info(f"[DIAG] MAX TRADES = {MAX_TRADES_TOTAL}")
-    logger.info("[DIAG] SUIVI MFE/MAE ACTIVÉ AVEC LOGS ENRICHIS - ✅ V105.1")
+    logger.info("[DIAG] SUIVI MFE/MAE ACTIVÉ AVEC LOGS ENRICHIS")
     logger.info("[DIAG] APPRENTISSAGE DES SETUPS ACTIVÉ (seuil 10 trades)")
-    logger.info("[DIAG] PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 10 trades, hystérésis 1 cycle, amplitude limitée) - ✅ V104")
-    logger.info("[DIAG] FILTRES SESSION ASIA : USD/CAD, AUD/USD bloqués - ✅ V103")
-    logger.info("[DIAG] RISQUE PAR TRADE : 0.75% (0.5% ASIA) - ✅ V105")
-    logger.info("[DIAG] BLOCAGE CONTRE-TENDANCE 4H (sauf BREAKER/BISI) - ✅ V104")
-    logger.info("[DIAG] ADX MINIMUM 25 EN SESSION ACTIVE - ✅ V104")
-    logger.info("[DIAG] VETO SI MOMENTUM OPPOSÉ >0.15% - ✅ V104 (remplacé par score gradué en V106)")
-    logger.info("[DIAG] CONFLUENCE HTF REQUISE (2/3) - ✅ V104")
-    logger.info("[DIAG] COOLDOWN 2H APRÈS UNE PERTE - ✅ V105")
-    logger.info("[DIAG] SCORE MINIMUM +3 EN ASIA - ✅ V105")
-    logger.info("[DIAG] QUALITÉ REQUISE SNIPER/A+ EN ASIA - ✅ V105")
-    logger.info("[DIAG] SUPPRESSION FILTRE EUR/USD NY (18h-21h) - ✅ V105")
-    logger.info("[DIAG] FILTRE STRUCTURE H1 - ✅ V105")
-    logger.info("[DIAG] ADAPTATION DES POIDS DES SETUPS - ✅ V105")
-    logger.info("[DIAG] SÉLECTION DU MEILLEUR SETUP AVEC SEUIL RELATIF - ✅ V105")
-    logger.info("[DIAG] SL/TP RÉÉQUILIBRÉS (multiplicateurs plus serrés) - ✅ V105.1")
-    logger.info("[DIAG] CORRECTION RR APRÈS BE (TP réajusté) - ✅ V106")
-    logger.info("[DIAG] SCORE D'ENTRÉE /100 AVEC COMPOSANTES - ✅ V106")
-    logger.info("[DIAG] BONUS 3/3 HTF (+5) - ✅ V106")
-    logger.info("[DIAG] MOMENTUM GRADUÉ (pénalité progressive) - ✅ V106")
-    logger.info("[DIAG] ADX DYNAMIQUE AVEC PENTE - ✅ V106")
-    logger.info("[DIAG] POIDS INITIAUX DES SETUPS AJUSTÉS - ✅ V106")
-    logger.info("[DIAG] ASIA ENTRY BYPASS - ✅ V107")
+    logger.info("[DIAG] PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 20 trades, hystérésis 2 cycles, amplitude limitée)")
+    logger.info("[DIAG] FILTRES SESSION ASIA : USD/CAD, AUD/USD bloqués")
+    logger.info("[DIAG] RISQUE PAR TRADE : 0.75% (0.5% ASIA)")
+    logger.info("[DIAG] BLOCAGE CONTRE-TENDANCE 4H (sauf BREAKER/BISI)")
+    logger.info("[DIAG] ADX MINIMUM 25 EN SESSION ACTIVE")
+    logger.info("[DIAG] VETO SI MOMENTUM OPPOSÉ >0.15% (remplacé par score gradué en V106)")
+    logger.info("[DIAG] CONFLUENCE HTF REQUISE (2/3)")
+    logger.info("[DIAG] COOLDOWN 2H APRÈS UNE PERTE")
+    logger.info("[DIAG] SCORE MINIMUM +3 EN ASIA")
+    logger.info("[DIAG] QUALITÉ REQUISE SNIPER/A+ EN ASIA")
+    logger.info("[DIAG] SUPPRESSION FILTRE EUR/USD NY (18h-21h)")
+    logger.info("[DIAG] FILTRE STRUCTURE H1")
+    logger.info("[DIAG] ADAPTATION DES POIDS DES SETUPS")
+    logger.info("[DIAG] SÉLECTION DU MEILLEUR SETUP AVEC SEUIL RELATIF")
+    logger.info("[DIAG] SL/TP RÉÉQUILIBRÉS (multiplicateurs plus serrés)")
+    logger.info("[DIAG] CORRECTION RR APRÈS BE (TP réajusté)")
+    logger.info("[DIAG] SCORE D'ENTRÉE /100 AVEC COMPOSANTES")
+    logger.info("[DIAG] BONUS 3/3 HTF (+5)")
+    logger.info("[DIAG] MOMENTUM GRADUÉ (pénalité progressive)")
+    logger.info("[DIAG] ADX DYNAMIQUE AVEC PENTE")
+    logger.info("[DIAG] POIDS INITIAUX DES SETUPS AJUSTÉS")
+    logger.info("[DIAG] ASIA/LONDON ENTRY BYPASS CORRIGÉ (constantes définies)")
+    logger.info("[DIAG] R initial pour trailing (après BE) corrigé")
     try:
         from oandapyV20.endpoints import trades
         logger.info("[DIAG] ✅ trades.TradeCRCDO disponible")
@@ -8152,29 +5934,31 @@ def diagnostic_startup_v981():
 # BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V107 (ASIA ENTRY BYPASS)")
+    logger.info("🚀 Démarrage du Bot Advanced Orderflow Trading - V111 (ASIA/LONDON BYPASS FIX)")
     logger.info("✅ Utilisation de TradeCRCDO pour la modification du SL")
     logger.info("✅ Utilisation de OrderCreate pour la création du Trailing Stop")
-    logger.info(f"✅ Seuil Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R) - ✅ V106: 0.55R")
-    logger.info(f"✅ Seuil Break Even anticipé adaptatif (base: {BASE_BREAKEVEN_EARLY_R}R) - ✅ V106: 0.25R")
-    logger.info(f"✅ Seuil EQS adaptatif (base: {BASE_EQS_MIN_THRESHOLD}/100, 65 en ASIA) - ✅ V105")
-    logger.info(f"✅ Trailing stop optimisé (activation {BASE_TRAILING_ACTIVATION_R}R, distance {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R) - ✅ V105.1")
-    logger.info(f"✅ Score d'entrée minimum /100: {MIN_ENTRY_SCORE} - ✅ V106")
-    logger.info(f"✅ ASIA ENTRY BYPASS: FVG_RETEST_PERFECT (Score>=48, EQS>=80, ADX>=18, HTF>=2/3, M15=YES, H1=PASS, Pullback=PASS)")
+    logger.info(f"✅ Seuil Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R)")
+    logger.info(f"✅ Seuil Break Even anticipé adaptatif (base: {BASE_BREAKEVEN_EARLY_R}R)")
+    logger.info(f"✅ Seuil EQS adaptatif (base: {BASE_EQS_MIN_THRESHOLD}/100, 65 en ASIA)")
+    logger.info(f"✅ Trailing stop optimisé (activation {BASE_TRAILING_ACTIVATION_R}R, distance {BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER}R)")
+    logger.info(f"✅ Score d'entrée minimum /100: {MIN_ENTRY_SCORE}")
+    logger.info(f"✅ ASIA BYPASS: FVG_RETEST_PERFECT (Score>={ASIA_BYPASS_MIN_SCORE}, EQS>={ASIA_BYPASS_MIN_EQS}, ADX>={ASIA_BYPASS_MIN_ADX}, HTF bypassé)")
+    logger.info(f"✅ LONDON BYPASS: FVG_RETEST_PERFECT (Score>={LONDON_BYPASS_MIN_SCORE}, EQS>={LONDON_BYPASS_MIN_EQS}, ADX>={LONDON_BYPASS_MIN_ADX}, HTF bypassé)")
     logger.info("🔄 DOUBLE BOUCLE : rapide (30s) pour BE/Trailing, lente (15min) pour les signaux")
     logger.info("📈 SUIVI DES CLÔTURES : tentative de récupération via TradeDetails + fallback")
     logger.info("📊 ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS (wins+losses+breakevens)")
     logger.info("📊 MÉTRIQUES ENRICHIES : ATR, ADX, RSI, Momentum, Heure, Jour, Session, Spread, Volatilité, Tendances H1/H4")
     logger.info("🔧 APPELS OANDA CORRIGÉS : formatage, retry, gestion d'erreur")
-    logger.info("📈 SUIVI MFE/MAE ACTIVÉ AVEC LOGS ENRICHIS - ✅ V105.1")
+    logger.info("📈 SUIVI MFE/MAE ACTIVÉ AVEC LOGS ENRICHIS")
     logger.info("📈 APPRENTISSAGE DES SETUPS ACTIVÉ (seuil 10 trades)")
-    logger.info("📈 PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 10 trades, hystérésis 1 cycle, amplitude limitée) - ✅ V104")
+    logger.info("📈 PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 20 trades, hystérésis 2 cycles, amplitude limitée)")
     logger.info("")
-    logger.info("🔧 CORRECTIONS V107 APPLIQUÉES :")
-    logger.info("  ✅ ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT")
-    logger.info("  ✅ Score 48-54 accepté en ASIA avec conditions strictes")
-    logger.info("  ✅ Logs spécifiques [ASIA_ENTRY_BYPASS] et [ASIA_ENTRY_BYPASS_REJECT]")
-    logger.info("  ✅ Indicateur ENTRY_GATE=ASIA_BYPASS dans [DECISION]")
+    logger.info("🔧 CORRECTIONS V111 APPLIQUÉES :")
+    logger.info("  ✅ Ajout des constantes ASIA_BYPASS_MIN_SCORE, ASIA_BYPASS_MIN_EQS, ASIA_BYPASS_MIN_ADX")
+    logger.info("  ✅ Ajout des constantes LONDON_BYPASS_MIN_SCORE, LONDON_BYPASS_MIN_EQS, LONDON_BYPASS_MIN_ADX")
+    logger.info("  ✅ Correction du calcul du R après BE (utilisation du risque initial)")
+    logger.info("  ✅ Adaptation moins agressive (20 trades, 2 cycles d'hystérésis)")
+    logger.info("  ✅ Nettoyage des logs de démarrage (version unifiée V111)")
     logger.info("")
 
     diagnostic_startup_v981()
@@ -8213,7 +5997,7 @@ if __name__ == "__main__":
             check_breakeven_v981()
 
             if now - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
-                logger.info(f"⏰ Scan des signaux V107")
+                logger.info(f"⏰ Scan des signaux V111")
                 last_signal_scan = now
 
                 now_dt = datetime.utcnow()
