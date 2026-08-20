@@ -3389,7 +3389,7 @@ def price_to_pips(price_diff: float, pair: str) -> float:
 def get_pip_value_for_pair(pair: str) -> float:
     pair = pair.upper()
     if pair == "XAU_USD":
-        return 0.1
+        return 1.0
     elif pair == "NAS100_USD":
         return 0.1
     elif "JPY" in pair:
@@ -4342,7 +4342,7 @@ def validate_entry_quality_gate(
             return False, f"Structure H1 haussière ({h1_structure}) contre SELL"
 
         if 60 <= entry_score <= 64:
-            if not close_confirmed:
+            if not close_confirmed and adx < 30:
                 return False, f"Score {entry_score}/100: confirmation M15 obligatoire"
             if eqs_score < 70:
                 return False, f"Score {entry_score}/100 mais EQS={eqs_score:.0f}<70"
@@ -4372,6 +4372,9 @@ def validate_entry_quality_gate(
                     return False, f"FVG_RETEST_PERFECT Score={entry_score}: confirmation M15 requise (EQS={eqs_score:.0f}, ADX={adx:.1f})"
 
         if htf_score < 2 and entry_score < 70:
+            if htf_score == 1 and entry_score >= 60 and eqs_score >= 75:
+                pass  # accepté
+        else:            
             return False, f"Confluence HTF insuffisante: {htf_score}/3 pour Score={entry_score}"
 
         if direction == "BUY" and momentum < -0.10:
@@ -4965,7 +4968,7 @@ def calculate_signal_confidence(
 
     # --- ENTRY QUALITY GATE (V112 - seuil adaptatif) ---
     # ✅ V112 : score minimum en ASIA = 50 (au lieu de 55)
-    min_score_gate = 50 if is_asia else 55
+    min_score_gate = 50 if is_asia else 50
 
     gate_passed, gate_reason = validate_entry_quality_gate(
         pair=pair,
@@ -5027,7 +5030,7 @@ def calculate_signal_confidence(
     }
     asia_all_conditions_met = (
         is_asia_now
-        and is_fvg_retest
+        and (is_fvg_retest or entry_type == "NESTED_FVG")
         and not gate_passed
         and all(asia_conditions.values())
     )
