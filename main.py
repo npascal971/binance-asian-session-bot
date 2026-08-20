@@ -3724,6 +3724,9 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5,
                 else:
                     return False, f"Structure BEARISH confirmée en ASIA (LH={lh}, LL={ll}, score={score}, EQS={eqs})"
             else:
+                adx = calculate_adx(df, period=14)
+                if adx < 20:
+                    return True, f"Structure BEARISH acceptée en session active (ADX={adx:.1f}<20)"
                 return False, f"Structure BEARISH confirmée (LH={lh}, LL={ll})"
         else:
             return True, f"Structure non-bearish (HH={hh}, HL={hl})"
@@ -3740,6 +3743,10 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5,
                 else:
                     return False, f"Structure BULLISH confirmée en ASIA (HH={hh}, HL={hl}, score={score}, EQS={eqs})"
             else:
+                # ✅ AJOUT : Même logique pour SELL
+                adx = calculate_adx(df, period=14)
+                if adx < 20:
+                    return True, f"Structure BULLISH acceptée en session active (ADX={adx:.1f}<20)"
                 return False, f"Structure BULLISH confirmée (HH={hh}, HL={hl})"
         else:
             return True, f"Structure non-bullish (LH={lh}, LL={ll})"
