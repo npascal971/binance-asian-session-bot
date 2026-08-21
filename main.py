@@ -4065,7 +4065,7 @@ def calculate_sl_tp(
     sl_mult = risk_settings.get("sl_multiplier", 0.8)
 
     # ✅ RR cible réduit à 1.8 (au lieu de 2.0)
-    RR_TARGET = 1.8
+    RR_TARGET = 2.0
 
     if entry_type == "BREAKER" and breaker_level is not None:
         if direction == "BUY":
@@ -5485,10 +5485,10 @@ def advanced_main_v981():
 
                 # ✅ Limitation des trades simultanés
                 current_open_trades = get_open_trades_v88(skip_maintenance_check=True, force_refresh=False)
-                if len(current_open_trades) >= 2:
+                if len(current_open_trades) >= 3:
                     score = confidence_result.get("entry_score", 0)
                     eqs = confidence_result.get("eqs_score", 0)
-                    if score < 75 or eqs < 80:
+                    if score < 70 or eqs < 75:
                         logger.info(f"[SKIP] {pair} | {direction} | Trades ouverts={len(current_open_trades)} ≥ 2 mais Score={score} < 75 ou EQS={eqs} < 80")
                         continue
 
@@ -5640,7 +5640,7 @@ def check_breakeven_v981():
             pair_params = stats.adaptive_state.get_pair_params(pair)
 
             # ✅ NOUVEAU SEUIL BE : 0.35R (au lieu de 0.55R)
-            effective_threshold = max(0.35, pair_params["be_trigger_r"] - 0.10)
+            effective_threshold = max(0.50, pair_params["be_trigger_r"] - 0.05)
 
             is_already_be = (direction == "BUY" and current_sl >= entry) or (direction == "SELL" and current_sl <= entry)
 
@@ -5679,7 +5679,7 @@ def check_breakeven_v981():
                 continue
 
             # ✅ NOUVEAU SEUIL D'ACTIVATION DU TRAILING : 0.50R (au lieu de 0.80R)
-            trailing_activation = max(0.50, pair_params.get("trailing_activation_r", 0.80) - 0.30)
+            trailing_activation = max(0.70, pair_params.get("trailing_activation_r", 0.80) - 0.10)
 
             if r >= trailing_activation:
                 logger.info(f"[TSL] R={r:.2f} >= seuil d'activation {trailing_activation:.2f}R - création du trailing")
