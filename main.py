@@ -37,7 +37,8 @@ load_dotenv()
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
-
+# Multiplicateur de risque par paire (1.0 = normal)
+RISK_MULTIPLIER_PER_PAIR = defaultdict(lambda: 1.0)
 # ============================================================
 # PARAMÈTRES DE BASE (seront adaptés dynamiquement)
 # ============================================================
