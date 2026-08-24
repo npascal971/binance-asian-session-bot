@@ -2056,7 +2056,7 @@ def execute_oanda_trade_v981(
         return None
 
     pip_value = get_pip_value_for_pair(pair)
-    min_sl_distance = pip_value * 10
+    min_sl_distance = pip_value * 5
     risk = abs(expected_entry - stop_loss)
 
     if risk < min_sl_distance:
@@ -3728,9 +3728,10 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5,
                 else:
                     return False, f"Structure BEARISH confirmée en ASIA (LH={lh}, LL={ll}, score={score}, EQS={eqs})"
             else:
+                # ✅ ICI : ajout de la condition ADX < 25 pour accepter en session active
                 adx = calculate_adx(df, period=14)
-                if adx < 20:
-                    return True, f"Structure BEARISH acceptée en session active (ADX={adx:.1f}<20)"
+                if adx < 25:
+                    return True, f"Structure BEARISH acceptée en session active (ADX={adx:.1f}<25)"
                 return False, f"Structure BEARISH confirmée (LH={lh}, LL={ll})"
         else:
             return True, f"Structure non-bearish (HH={hh}, HL={hl})"
@@ -3747,10 +3748,10 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5,
                 else:
                     return False, f"Structure BULLISH confirmée en ASIA (HH={hh}, HL={hl}, score={score}, EQS={eqs})"
             else:
-                # ✅ AJOUT : Même logique pour SELL
+                # ✅ ET ICI (symétrique pour SELL)
                 adx = calculate_adx(df, period=14)
-                if adx < 20:
-                    return True, f"Structure BULLISH acceptée en session active (ADX={adx:.1f}<20)"
+                if adx < 25:
+                    return True, f"Structure BULLISH acceptée en session active (ADX={adx:.1f}<25)"
                 return False, f"Structure BULLISH confirmée (HH={hh}, HL={hl})"
         else:
             return True, f"Structure non-bullish (LH={lh}, LL={ll})"
@@ -3792,7 +3793,7 @@ def filter_pullback(
         base_min_pullback = float(base_min_pullback)
 
         if atr_pips > 0:
-            atr_based_threshold = atr_pips * 0.75
+            atr_based_threshold = atr_pips * 0.6
             min_absolute_pips = min(2.0, base_min_pullback * 0.75)
             max_pullback_pips = base_min_pullback
             dynamic_min_pullback = max(min_absolute_pips, min(max_pullback_pips, atr_based_threshold))
@@ -4861,7 +4862,7 @@ def calculate_signal_confidence(
         max_pips = entry_type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]))
         # ✅ V112 : distance plus tolérante en session active (+30%)
         if is_active:
-            max_pips *= 1.3
+            max_pips *= 1.5
         max_distance_price = max(float(atr_value) * 1.20, pip * max_pips)
         if distance <= max_distance_price * 0.50:
             score_components["Risk_RR_Distance"] += 2
@@ -4981,7 +4982,7 @@ def calculate_signal_confidence(
 
     # --- ENTRY QUALITY GATE (V112 - seuil adaptatif) ---
     # ✅ V112 : score minimum en ASIA = 50 (au lieu de 55)
-    min_score_gate = 50 if is_asia else 50
+    min_score_gate = 45 if is_asia else 45
 
     gate_passed, gate_reason = validate_entry_quality_gate(
         pair=pair,
