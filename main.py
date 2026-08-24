@@ -37,8 +37,7 @@ load_dotenv()
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
-# Multiplicateur de risque par paire (1.0 = normal)
-RISK_MULTIPLIER_PER_PAIR = defaultdict(lambda: 1.0)
+
 # ============================================================
 # PARAMÈTRES DE BASE (seront adaptés dynamiquement)
 # ============================================================
@@ -2056,7 +2055,7 @@ def execute_oanda_trade_v981(
         return None
 
     pip_value = get_pip_value_for_pair(pair)
-    min_sl_distance = pip_value * 5
+    min_sl_distance = pip_value * 10
     risk = abs(expected_entry - stop_loss)
 
     if risk < min_sl_distance:
@@ -2074,11 +2073,6 @@ def execute_oanda_trade_v981(
     hour = datetime.utcnow().hour
     is_asia = (21 <= hour or hour < 7)
     risk_pct = 0.5 if is_asia else RISK_PERCENTAGE
-
-    # ✅ Appliquer le multiplicateur de risque global (sans AdaptiveState)
-    risk_multiplier = RISK_MULTIPLIER_PER_PAIR.get(pair, 1.0)
-    risk_pct = risk_pct * risk_multiplier
-    logger.info(f"[RISK] {pair} | risk_pct={risk_pct:.2f}% (mult={risk_multiplier:.2f})")
 
     units = calculate_units_v88(pair, expected_entry, stop_loss, balance, risk_pct=risk_pct)
     if not units or float(units) <= 0:
@@ -2229,6 +2223,8 @@ def execute_oanda_trade_v981(
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
         return None
+
+
 # ============================================================
 # V106 - MODIFICATION SL (avec réajustement TP pour préserver RR)
 # ============================================================
@@ -3728,10 +3724,9 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5,
                 else:
                     return False, f"Structure BEARISH confirmée en ASIA (LH={lh}, LL={ll}, score={score}, EQS={eqs})"
             else:
-                # ✅ ICI : ajout de la condition ADX < 25 pour accepter en session active
                 adx = calculate_adx(df, period=14)
-                if adx < 25:
-                    return True, f"Structure BEARISH acceptée en session active (ADX={adx:.1f}<25)"
+                if adx < 20:
+                    return True, f"Structure BEARISH acceptée en session active (ADX={adx:.1f}<20)"
                 return False, f"Structure BEARISH confirmée (LH={lh}, LL={ll})"
         else:
             return True, f"Structure non-bearish (HH={hh}, HL={hl})"
@@ -3748,10 +3743,10 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5,
                 else:
                     return False, f"Structure BULLISH confirmée en ASIA (HH={hh}, HL={hl}, score={score}, EQS={eqs})"
             else:
-                # ✅ ET ICI (symétrique pour SELL)
+                # ✅ AJOUT : Même logique pour SELL
                 adx = calculate_adx(df, period=14)
-                if adx < 25:
-                    return True, f"Structure BULLISH acceptée en session active (ADX={adx:.1f}<25)"
+                if adx < 20:
+                    return True, f"Structure BULLISH acceptée en session active (ADX={adx:.1f}<20)"
                 return False, f"Structure BULLISH confirmée (HH={hh}, HL={hl})"
         else:
             return True, f"Structure non-bullish (LH={lh}, LL={ll})"
@@ -3793,7 +3788,7 @@ def filter_pullback(
         base_min_pullback = float(base_min_pullback)
 
         if atr_pips > 0:
-            atr_based_threshold = atr_pips * 0.6
+            atr_based_threshold = atr_pips * 0.75
             min_absolute_pips = min(2.0, base_min_pullback * 0.75)
             max_pullback_pips = base_min_pullback
             dynamic_min_pullback = max(min_absolute_pips, min(max_pullback_pips, atr_based_threshold))
@@ -4064,9 +4059,7 @@ def calculate_sl_tp(
 
     risk_settings = SIGNAL_RISK_SETTINGS.get(entry_type, SIGNAL_RISK_SETTINGS["FVG_RETEST"])
     sl_mult = risk_settings.get("sl_multiplier", 0.8)
-
-    # ✅ RR cible réduit à 1.8 (au lieu de 2.0)
-    RR_TARGET = 2.0
+    tp_mult = risk_settings.get("tp_multiplier", 2.0)
 
     if entry_type == "BREAKER" and breaker_level is not None:
         if direction == "BUY":
@@ -4081,7 +4074,7 @@ def calculate_sl_tp(
             stop_loss = entry_price + sl_distance
 
     risk = abs(entry_price - stop_loss)
-    tp_distance = max(risk * RR_TARGET, risk * 1.8)  # au moins 1.8R
+    tp_distance = max(risk * max(tp_mult, 2.0), risk * 2.0)
 
     if direction == "BUY":
         take_profit = entry_price + tp_distance
@@ -4862,7 +4855,7 @@ def calculate_signal_confidence(
         max_pips = entry_type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]))
         # ✅ V112 : distance plus tolérante en session active (+30%)
         if is_active:
-            max_pips *= 1.5
+            max_pips *= 1.3
         max_distance_price = max(float(atr_value) * 1.20, pip * max_pips)
         if distance <= max_distance_price * 0.50:
             score_components["Risk_RR_Distance"] += 2
@@ -4982,7 +4975,7 @@ def calculate_signal_confidence(
 
     # --- ENTRY QUALITY GATE (V112 - seuil adaptatif) ---
     # ✅ V112 : score minimum en ASIA = 50 (au lieu de 55)
-    min_score_gate = 45 if is_asia else 45
+    min_score_gate = 50 if is_asia else 50
 
     gate_passed, gate_reason = validate_entry_quality_gate(
         pair=pair,
@@ -5484,21 +5477,10 @@ def advanced_main_v981():
                 zone_end = float(zone_end)
                 entry_level_key = round(entry_level, 5)
 
-                # ✅ Limitation des trades simultanés
-                current_open_trades = get_open_trades_v88(skip_maintenance_check=True, force_refresh=False)
-                if len(current_open_trades) >= 3:
-                    score = confidence_result.get("entry_score", 0)
-                    eqs = confidence_result.get("eqs_score", 0)
-                    if score < 70 or eqs < 75:
-                        logger.info(f"[SKIP] {pair} | {direction} | Trades ouverts={len(current_open_trades)} ≥ 2 mais Score={score} < 75 ou EQS={eqs} < 80")
-                        continue
-
                 if is_signal_sent_recently(pair, direction, entry_level_key, zone_start, zone_end):
                     if DEBUG_MODE:
                         logger.debug(f"❌ {pair} {direction} déjà envoyé")
                     continue
-
-                # ... (le reste du code de la boucle, inchangé)
 
                 stop_loss, take_profit = calculate_sl_tp(
                     entry_price=entry_level,
@@ -5623,7 +5605,7 @@ def check_breakeven_v981():
             trade_info = open_trade_details.get(trade_id, {})
             initial_sl = trade_info.get("sl", current_sl)
             if initial_sl <= 0:
-                initial_sl = current_sl
+                initial_sl = current_sl  # fallback
 
             # Calcul du R avec le risque initial
             if direction == "BUY":
@@ -5631,20 +5613,18 @@ def check_breakeven_v981():
                 initial_risk = entry - initial_sl
             else:
                 profit = entry - current_price
-                initial_risk = current_sl - entry
+                initial_risk = current_sl - entry   # pour un SELL, le SL est au-dessus de l'entrée
             if initial_risk <= 0:
-                initial_risk = abs(entry - current_sl)
+                initial_risk = abs(entry - current_sl)  # fallback
             r = profit / initial_risk if initial_risk > 0 else 0.0
 
             check_stagnant_trades(trade_id, pair, direction, entry, r)
 
             pair_params = stats.adaptive_state.get_pair_params(pair)
-
-            # ✅ NOUVEAU SEUIL BE : 0.35R (au lieu de 0.55R)
-            effective_threshold = max(0.50, pair_params["be_trigger_r"] - 0.05)
-
+            effective_threshold = pair_params["be_trigger_r"]
+            
             is_already_be = (direction == "BUY" and current_sl >= entry) or (direction == "SELL" and current_sl <= entry)
-
+            
             if not is_already_be and r >= effective_threshold:
                 logger.info(f"[BE] 🎯 Condition R>={effective_threshold:.2f} atteinte pour {trade_id}")
                 if direction == "BUY":
@@ -5663,13 +5643,13 @@ def check_breakeven_v981():
                         logger.error(f"[BE] ❌ ÉCHEC modification SL")
                         continue
 
-            # Vérifier le trailing
+            # Vérifier le trailing (en utilisant le R basé sur le risque initial)
             trade_details = get_trade_details_v88(trade_id)
             if has_trailing_stop_v88(trade_details):
                 logger.debug(f"[TSL] Trade {trade_id} a déjà un trailing, on saute")
                 continue
 
-            # Recalculer R avec le SL actuel
+            # Recalculer R avec le SL actuel (si BE vient d'être déclenché, current_sl a été mis à jour)
             if direction == "BUY":
                 risk = entry - current_sl
                 profit = current_price - entry
@@ -5678,13 +5658,14 @@ def check_breakeven_v981():
                 profit = entry - current_price
             if risk <= 0:
                 continue
-
-            # ✅ NOUVEAU SEUIL D'ACTIVATION DU TRAILING : 0.50R (au lieu de 0.80R)
-            trailing_activation = max(0.70, pair_params.get("trailing_activation_r", 0.80) - 0.10)
-
+            # Mais pour la décision de trailing, on utilise le R basé sur le risque initial
+            # r a déjà été calculé ci-dessus avec initial_risk
+            # On peut utiliser r pour la condition de trailing
+            trailing_activation = pair_params.get("trailing_activation_r", 0.80)
+            
             if r >= trailing_activation:
                 logger.info(f"[TSL] R={r:.2f} >= seuil d'activation {trailing_activation:.2f}R - création du trailing")
-
+                
                 atr = get_atr_m15_v88(pair)
                 pip_value = get_pip_value_for_pair(pair)
                 trailing_mult = pair_params["trailing_atr_mult"]
@@ -5693,7 +5674,7 @@ def check_breakeven_v981():
                 base_distance = atr * trailing_mult
                 r_factor = max(0.6, min(1.4, 1.0 / (1.0 + abs(r) * 0.3)))
                 distance = base_distance * r_factor
-
+                
                 distance = max(distance, atr * 0.8)
                 distance = min(distance, atr * 2.8)
                 distance = max(distance, pip_value * trailing_min_pips)
