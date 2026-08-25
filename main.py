@@ -4441,9 +4441,9 @@ def calculate_signal_confidence(
         # ✅ V112 : EQS minimum abaissé à 60 en ASIA (au lieu de 65)
         eqs_min_effective = max(pair_params["eqs_min"], 60)
         if pair in ["USD_JPY", "AUD_JPY"]:
-            adx_min_effective = max(pair_params["adx_min"], 18)
+            adx_min_effective = max(pair_params["adx_min"], 15)
         else:
-            adx_min_effective = max(pair_params["adx_min"], 20)
+            adx_min_effective = max(pair_params["adx_min"], 18)
         min_required += 3
     elif is_active:
         eqs_min_effective = max(pair_params["eqs_min"], 50)
@@ -5328,9 +5328,9 @@ def advanced_main_v981():
 
         hour = datetime.utcnow().hour
 
-        if (21 <= hour or hour < 7) and pair in ["USD_CAD", "AUD_USD"]:
-            logger.info(f"[SESSION] {pair} - Session ASIA ({hour}h), trade ignoré")
-            continue
+        #if (21 <= hour or hour < 7) and pair in ["USD_CAD", "AUD_USD"]:
+         #   logger.info(f"[SESSION] {pair} - Session ASIA ({hour}h), trade ignoré")
+          #  continue
 
         if not stats.adaptive_state.can_trade(pair):
             logger.info(f"[COOLDOWN] {pair} - en cooldown après une perte, scan ignoré")
