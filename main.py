@@ -3719,7 +3719,7 @@ def filter_market_structure(df: pd.DataFrame, direction: str, lookback: int = 5,
         ll = last_lows[-1]['price'] < last_lows[-2]['price']
         if lh and ll:
             if is_asia:
-                if score >= 75 and eqs >= 80:
+                if score >= 60 and eqs >= 75:
                     return True, f"Structure BEARISH acceptée en ASIA (score={score}, EQS={eqs})"
                 else:
                     return False, f"Structure BEARISH confirmée en ASIA (LH={lh}, LL={ll}, score={score}, EQS={eqs})"
@@ -4446,8 +4446,8 @@ def calculate_signal_confidence(
             adx_min_effective = max(pair_params["adx_min"], 20)
         min_required += 3
     elif is_active:
-        eqs_min_effective = pair_params["eqs_min"]
-        adx_min_effective = max(pair_params["adx_min"], 25)
+        eqs_min_effective = max(pair_params["eqs_min"], 50)
+        adx_min_effective = max(pair_params["adx_min"], 20)
         min_required += 2
     else:
         eqs_min_effective = pair_params["eqs_min"]
@@ -5106,9 +5106,9 @@ def calculate_signal_confidence(
     win_rate = estimate_win_rate(entry_score, eqs_score, confluences)
     quality_label = get_signal_quality_label(entry_score, eqs_score)
 
-    if is_asia and quality_label not in ["SNIPER", "A+"] and not bypass_used:
+    if is_asia and quality_label not in ["SNIPER", "A+", "A"] and not bypass_used:
         passed = False
-        rejection_logs.append(f"Qualité {quality_label} insuffisante en ASIA (requis SNIPER/A+)")
+        rejection_logs.append(f"Qualité {quality_label} insuffisante en ASIA (requis SNIPER/A+/A)")
 
     log_score_detail(score_components, entry_score, "PASSED" if passed else "REJECTED")
 
