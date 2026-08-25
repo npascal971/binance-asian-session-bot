@@ -4312,7 +4312,7 @@ def validate_entry_quality_gate(
     direction: str,
     entry_type: str,
     entry_score: int,
-    eqs_score: int,
+    eqs_score: float,
     adx: float,
     momentum: float,
     close_confirmed: bool,
@@ -4322,7 +4322,9 @@ def validate_entry_quality_gate(
     is_asia: bool = False,    # ✅ V112 : ajouté
 ) -> tuple:
     """
-    V112 - Entry Quality Gate avec seuil adaptatif selon la session.
+    V113 - Entry Quality Gate avec seuil adaptatif.
+    ✅ V113 : Suppression des seuils spécifiques pour FVG_RETEST_PERFECT/NESTED_FVG
+    pour utiliser le min_score_gate (44/50 selon setup).
     """
     try:
         pair = str(pair).upper()
@@ -4336,19 +4338,22 @@ def validate_entry_quality_gate(
         h1_structure = int(h1_structure)
         htf_score = int(htf_score)
 
-        # ✅ V112 : Seuil adaptatif
+        # ✅ V113 : Seuil principal basé sur min_score
         if entry_score < min_score:
             return False, f"Score trop faible: {entry_score}/{min_score} < {min_score}"
 
-        # ✅ V112 : Zone 55-59 interdite uniquement en ASIA (sinon, on garde min_score)
+        # ✅ V112 : Zone 55-59 interdite en ASIA (sauf si bypass)
         if is_asia and 55 <= entry_score <= 59:
             return False, f"Score limite {entry_score}/100: zone 55-59 interdite en ASIA"
 
+        # Structure H1 opposée -> veto
         if direction == "BUY" and h1_structure < 0:
             return False, f"Structure H1 baissière ({h1_structure}) contre BUY"
         if direction == "SELL" and h1_structure > 0:
             return False, f"Structure H1 haussière ({h1_structure}) contre SELL"
 
+        # ✅ V113 : Pour les scores entre 60 et 64, garder des conditions renforcées
+        # (mais ne plus exiger 65 pour FVG_RETEST_PERFECT)
         if 60 <= entry_score <= 64:
             if not close_confirmed and adx < 30:
                 return False, f"Score {entry_score}/100: confirmation M15 obligatoire"
@@ -4361,30 +4366,17 @@ def validate_entry_quality_gate(
             if direction == "SELL" and momentum > 0.05:
                 return False, f"Momentum opposé SELL: {momentum:+.2f}%"
 
-        if entry_type == "FVG_RETEST_PERFECT":
-            if entry_score < 65:
-                return False, f"FVG_RETEST_PERFECT exige Score>=65: actuel={entry_score}"
-            if 65 <= entry_score <= 69:
-                if not close_confirmed:
-                    return False, f"FVG_RETEST_PERFECT Score={entry_score}: confirmation M15 obligatoire"
-                if eqs_score < 70:
-                    return False, f"FVG_RETEST_PERFECT: EQS={eqs_score:.0f}<70"
-                if adx < 25:
-                    return False, f"FVG_RETEST_PERFECT: ADX={adx:.1f}<25"
-            elif entry_score >= 70:
-                if eqs_score < 70:
-                    return False, f"FVG_RETEST_PERFECT Score={entry_score}: EQS={eqs_score:.0f}<70"
-                if adx < 25:
-                    return False, f"FVG_RETEST_PERFECT Score={entry_score}: ADX={adx:.1f}<25"
-                if (eqs_score < 75 or adx < 27) and not close_confirmed:
-                    return False, f"FVG_RETEST_PERFECT Score={entry_score}: confirmation M15 requise (EQS={eqs_score:.0f}, ADX={adx:.1f})"
+        # ✅ V113 : Plus d'exigence spécifique à FVG_RETEST_PERFECT
+        # On garde juste les conditions générales ci-dessus.
 
+        # Confluence HTF (avec bypass possible déjà géré)
         if htf_score < 2 and entry_score < 70:
             if htf_score == 1 and entry_score >= 60 and eqs_score >= 75:
                 pass  # accepté
-        else:            
-            return False, f"Confluence HTF insuffisante: {htf_score}/3 pour Score={entry_score}"
+            else:
+                return False, f"Confluence HTF insuffisante: {htf_score}/3 pour Score={entry_score}"
 
+        # Momentum opposé fort (seuil 0.10)
         if direction == "BUY" and momentum < -0.10:
             return False, f"Momentum trop opposé au BUY: {momentum:+.2f}%"
         if direction == "SELL" and momentum > 0.10:
