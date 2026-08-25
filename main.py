@@ -4974,9 +4974,12 @@ def calculate_signal_confidence(
     except Exception:
         final_htf_score = 0
 
-    # --- ENTRY QUALITY GATE (V112 - seuil adaptatif) ---
-    # ✅ V112 : score minimum en ASIA = 50 (au lieu de 55)
-    min_score_gate = 50 if is_asia else 50
+    # --- ENTRY QUALITY GATE (V113 - seuil adaptatif par setup) ---
+    # ✅ V113 : FVG_RETEST_PERFECT et NESTED_FVG acceptés à partir de 44
+    if entry_type in ["FVG_RETEST_PERFECT", "NESTED_FVG"]:
+        min_score_gate = 44
+    else:
+        min_score_gate = 50   # tous les autres setups restent à 50
 
     gate_passed, gate_reason = validate_entry_quality_gate(
         pair=pair,
