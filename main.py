@@ -4408,6 +4408,12 @@ def calculate_signal_confidence(
     tbs_setup_type: str = "",
     df_d1: pd.DataFrame = None,
 ) -> dict:
+    """
+    V115 - Calcul du score de confiance avec VETO DIRECTIONNEL ABSOLU.
+    Aucun bypass ne peut annuler le veto si :
+      - BUY : H4 doit être BUY ou NEUTRAL, et H1 ne doit pas être baissier.
+      - SELL : H4 doit être SELL ou NEUTRAL, et H1 ne doit pas être haussier.
+    """
     score_components = {
         "ICT": 0,
         "Structure_H1": 0,
@@ -4435,7 +4441,6 @@ def calculate_signal_confidence(
     pair_params = stats.adaptive_state.get_pair_params(pair)
 
     if is_asia:
-        # ✅ V112 : EQS minimum abaissé à 60 en ASIA (au lieu de 65)
         eqs_min_effective = max(pair_params["eqs_min"], 60)
         if pair in ["USD_JPY", "AUD_JPY"]:
             adx_min_effective = max(pair_params["adx_min"], 15)
@@ -4453,6 +4458,61 @@ def calculate_signal_confidence(
     direction = (direction or "").upper()
     entry_level = entry.get("entry_level")
     entry_type = str(entry.get("type", "FVG_RETEST")).upper()
+
+    # -----------------------------------------------------------------
+    # V115 : VETO DIRECTIONNEL ABSOLU (aucun bypass ne peut annuler)
+    # -----------------------------------------------------------------
+    h1_struct = score_market_structure(df_h1)  # >0 = haussier, <0 = baissier
+    h4_bias = bias.upper() if bias else "NEUTRAL"
+
+    if direction == "BUY":
+        if h4_bias == "SELL":
+            details["VETO"] = f"VETO_DIRECTIONNEL: H4 baissier ({h4_bias}) contre BUY"
+            return {
+                "passed": False,
+                "entry_score": 0,
+                "total_score": 0,
+                "final_confidence": "LOW",
+                "details": details,
+                "metrics": {},
+                "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
+            }
+        if h1_struct < 0:
+            details["VETO"] = f"VETO_DIRECTIONNEL: Structure H1 baissière ({h1_struct}) contre BUY"
+            return {
+                "passed": False,
+                "entry_score": 0,
+                "total_score": 0,
+                "final_confidence": "LOW",
+                "details": details,
+                "metrics": {},
+                "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
+            }
+    elif direction == "SELL":
+        if h4_bias == "BUY":
+            details["VETO"] = f"VETO_DIRECTIONNEL: H4 haussier ({h4_bias}) contre SELL"
+            return {
+                "passed": False,
+                "entry_score": 0,
+                "total_score": 0,
+                "final_confidence": "LOW",
+                "details": details,
+                "metrics": {},
+                "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
+            }
+        if h1_struct > 0:
+            details["VETO"] = f"VETO_DIRECTIONNEL: Structure H1 haussière ({h1_struct}) contre SELL"
+            return {
+                "passed": False,
+                "entry_score": 0,
+                "total_score": 0,
+                "final_confidence": "LOW",
+                "details": details,
+                "metrics": {},
+                "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
+            }
+    # Si H4 neutre et H1 neutre, on laisse passer (pas de veto)
+    # -----------------------------------------------------------------
 
     if entry_level is None or direction not in ["BUY", "SELL"]:
         return {
@@ -4577,11 +4637,10 @@ def calculate_signal_confidence(
     details["Volatility"] = f"{atr_msg} (score {atr_score}/10)"
     score_components["Momentum"] += atr_score
 
-    # --- 5. Structure H1 (V112 - veto assoupli en ASIA) ---
-    # Calcul du score provisoire pour les conditions
+    # --- 5. Structure H1 (maintenant seulement pour le bonus, car le veto est déjà passé) ---
     temp_score = compute_final_score(score_components) + 10
 
-    # ✅ V112 : appel avec paramètres supplémentaires
+    # On conserve filter_market_structure pour le bonus/neutralité, mais le veto est déjà fait
     struct_passed, struct_msg = filter_market_structure(
         df_h1, direction, lookback=5,
         score=temp_score,
@@ -4589,9 +4648,8 @@ def calculate_signal_confidence(
         is_asia=is_asia
     )
 
-    is_opposed = "BEARISH" in struct_msg or "BULLISH" in struct_msg
-
     if not struct_passed:
+        # Normalement ne devrait pas arriver car le veto est déjà passé, mais on garde
         rejection_logs.append(struct_msg)
         details["VETO"] = f"STRUCTURE: {struct_msg}"
         return {
@@ -4612,8 +4670,7 @@ def calculate_signal_confidence(
         }
 
     if "acceptée en ASIA" in struct_msg:
-        # Structure opposée mais acceptée en ASIA avec score élevé
-        score_components["Structure"] += 0  # ni bonus ni pénalité
+        score_components["Structure"] += 0
         details["Structure_V98.1"] = f"0 ({struct_msg}, opposée acceptée en ASIA)"
     elif "non-bearish" in struct_msg or "non-bullish" in struct_msg:
         score_components["Structure"] += 1
@@ -4702,53 +4759,11 @@ def calculate_signal_confidence(
     score_components["Momentum"] += adx_score
     details["ADX"] = f"{adx_msg} (score {adx_score}/10)"
 
-    # --- 10. Filtre structure H1 (veto dur) - déjà traité par filter_market_structure, mais conservé pour sécurité ---
+    # --- 10. Filtre structure H1 (déjà traité, mais on garde la logique pour les logs) ---
     h1_structure = score_market_structure(df_h1)
-    if direction == "BUY" and h1_structure < 0:
-        if not (is_asia and temp_score >= 75 and eqs_score >= 80):  # condition déjà validée plus haut
-            rejection_logs.append(f"Structure H1 baissière ({h1_structure}) contre BUY")
-            details["VETO"] = f"Structure H1: {h1_structure} (baissière)"
-            return {
-                "passed": False,
-                "entry_score": 0,
-                "total_score": 0,
-                "final_confidence": "LOW",
-                "details": details,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "atr_value": atr_value,
-                "eqs_score": eqs_score,
-                "eqs_details": eqs_result,
-                "eqs_components": eqs_components,
-                "rejection_logs": rejection_logs,
-                "metrics": metrics,
-                "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
-            }
-    if direction == "SELL" and h1_structure > 0:
-        if not (is_asia and temp_score >= 75 and eqs_score >= 80):
-            rejection_logs.append(f"Structure H1 haussière ({h1_structure}) contre SELL")
-            details["VETO"] = f"Structure H1: {h1_structure} (haussière)"
-            return {
-                "passed": False,
-                "entry_score": 0,
-                "total_score": 0,
-                "final_confidence": "LOW",
-                "details": details,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "atr_value": atr_value,
-                "eqs_score": eqs_score,
-                "eqs_details": eqs_result,
-                "eqs_components": eqs_components,
-                "rejection_logs": rejection_logs,
-                "metrics": metrics,
-                "filter_diag": {"HTF_BYPASS": "NO", "STRUCTURE_FILTER": "FAIL", "SCORE_FILTER": "FAIL", "FINAL_DECISION": "REJECT"}
-            }
-
     details["H1_Structure"] = f"OK ({h1_structure:+d})"
 
-    # --- 11. Confluence HTF (V112 - seuil adaptatif) ---
-    # ✅ V112 : appel avec paramètres supplémentaires
+    # --- 11. Confluence HTF (on garde, mais le veto directionnel est déjà passé) ---
     htf_score, htf_str, htf_details, htf_bonus = check_htf_confluence(
         direction, df_h1, df_h4,
         is_asia=is_asia,
@@ -4760,21 +4775,17 @@ def calculate_signal_confidence(
     is_strong_setup = entry_type in strong_setups
     bypass_htf = False
 
-    # ✅ V112 : HTF 1/3 accepté en ASIA si score>=75 et EQS>=85 (déjà géré dans check_htf_confluence)
-    # On peut garder un log pour information
     if "accepté en ASIA" in htf_str:
         bypass_htf = True
         logger.info(f"[HTF_BYPASS] {pair} | {direction} | {entry_type} | HTF 1/3 accepté en ASIA (score={temp_score}, EQS={eqs_score})")
-        htf_score = 2  # pour que le gate voie 2/3
+        htf_score = 2
 
-    # Bypass existant pour NY/LONDON (score>=70, EQS>=80)
     if htf_score == 1 and not is_asia and temp_score >= 70 and eqs_score >= 80:
         if struct_passed:
             bypass_htf = True
             logger.info(f"[HTF_BYPASS] {pair} | {direction} | {entry_type} | HTF 1/3 accepté en session active (score={temp_score}, EQS={eqs_score})")
             htf_score = 2
 
-    # Ancien bypass pour setups forts en ASIA (EQS>=80, ADX>=28)
     if htf_score == 1 and is_asia and is_strong_setup and eqs_score >= 80 and adx >= 28:
         if struct_passed:
             bypass_htf = True
@@ -4808,7 +4819,7 @@ def calculate_signal_confidence(
         score_components["HTF_Alignment"] += 0
         details["HTF_Confluence"] = f"{htf_str} (BYPASS accepté)"
 
-    # --- 12. Bias / tendance H4 ---
+    # --- 12. Bias / tendance H4 (déjà vérifié par le veto, mais on garde pour le score) ---
     if (direction == "BUY" and bias == "BUY") or (direction == "SELL" and bias == "SELL"):
         score_components["ICT"] += 3
         details["Trend_H4"] = "+3 (Aligné)"
@@ -4850,7 +4861,6 @@ def calculate_signal_confidence(
             "BISI": 18.0, "BREAKER": 15.0,
         }
         max_pips = entry_type_max_pips.get(entry_type, STRICT_MAX_DISTANCE_PIPS.get(pair, STRICT_MAX_DISTANCE_PIPS["DEFAULT"]))
-        # ✅ V112 : distance plus tolérante en session active (+30%)
         if is_active:
             max_pips *= 1.3
         max_distance_price = max(float(atr_value) * 1.20, pip * max_pips)
@@ -4970,12 +4980,11 @@ def calculate_signal_confidence(
     except Exception:
         final_htf_score = 0
 
-    # --- ENTRY QUALITY GATE (V113 - seuil adaptatif par setup) ---
-    # ✅ V113 : FVG_RETEST_PERFECT et NESTED_FVG acceptés à partir de 44
+    # --- ENTRY QUALITY GATE (V114 - seuil adaptatif) ---
     if entry_type in ["FVG_RETEST_PERFECT", "NESTED_FVG"]:
         min_score_gate = 44
     else:
-        min_score_gate = 50   # tous les autres setups restent à 50
+        min_score_gate = 50
 
     gate_passed, gate_reason = validate_entry_quality_gate(
         pair=pair,
@@ -4994,6 +5003,7 @@ def calculate_signal_confidence(
 
     # ============================================================
     # ASIA/LONDON ENTRY BYPASS (avec constantes définies)
+    # (gardé pour compatibilité, mais le veto directionnel est déjà passé)
     # ============================================================
     bypass_used = False
     bypass_reason = None
@@ -5175,7 +5185,6 @@ def calculate_signal_confidence(
         "entry_gate_reason": gate_reason,
         "bypass_used": bypass_used,
     }
-
 # =============================
 # DÉTECTION BIAS-FIRST - inchangé
 # =============================
