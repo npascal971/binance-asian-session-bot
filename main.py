@@ -1997,13 +1997,24 @@ def execute_oanda_trade_v981(
     entry_type: str,
     eqs: int,
     setup_type: str,
-    metrics: dict
+    metrics: dict,
+    rr: float = None
 ) -> str | None:
 
     global last_execution_attempt
 
     pair_upper = pair.upper()
     direction = direction.upper()
+
+    # ✅ V114 : Double vérification du RR (sécurité)
+    if rr is None:
+        risk = abs(entry_price - stop_loss)
+        reward = abs(take_profit - entry_price)
+        rr = reward / risk if risk > 0 else 0.0
+
+    if rr < 1.30:
+        logger.warning(f"[ORDER_REJECT] {pair} {direction} RR={rr:.2f} < 1.30 → refusé dans execute_oanda_trade_v981")
+        return None
 
     now = time.time()
 
@@ -2028,9 +2039,9 @@ def execute_oanda_trade_v981(
         logger.error("[ORDER] Risque nul")
         return None
 
-    rr = reward / risk
+    rr_computed = reward / risk
 
-    if rr < 1.8:
+    if rr_computed < 1.80:
         if direction == "BUY":
             take_profit = expected_entry + risk * 2.0
         else:
@@ -2194,13 +2205,12 @@ def execute_oanda_trade_v981(
             metrics["slippage_pips"] = slippage_pips
             metrics["slippage_warning"] = False
 
-        # Enregistrement du trade avec le prix réel et stockage du SL initial
         trade_tracker.add_trade(trade_id, pair, direction, actual_entry, stop_loss, take_profit, setup_type, eqs)
         open_trade_details[str(trade_id)] = {
             "entry": actual_entry,
             "expected_entry": expected_entry,
             "actual_entry": actual_entry,
-            "sl": stop_loss,                # SL initial
+            "sl": stop_loss,
             "tp": take_profit,
             "direction": direction,
             "setup_type": setup_type,
@@ -2223,7 +2233,6 @@ def execute_oanda_trade_v981(
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
         return None
-
 
 # ============================================================
 # V106 - MODIFICATION SL (avec réajustement TP pour préserver RR)
@@ -5315,6 +5324,7 @@ def advanced_main_v981():
         logger.info("✅ V106.1 : Logs FILTER_DIAG et REJECT_DIAG pour diagnostic")
         logger.info("✅ V107 : ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT")
         logger.info("✅ V111 : Correction des constantes manquantes + R initial pour trailing")
+        logger.info("✅ V114 : Filtre RR minimum (1.30) avant exécution")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -5323,10 +5333,6 @@ def advanced_main_v981():
         _reset_log_dedup()
 
         hour = datetime.utcnow().hour
-
-        #if (21 <= hour or hour < 7) and pair in ["USD_CAD", "AUD_USD"]:
-         #   logger.info(f"[SESSION] {pair} - Session ASIA ({hour}h), trade ignoré")
-          #  continue
 
         if not stats.adaptive_state.can_trade(pair):
             logger.info(f"[COOLDOWN] {pair} - en cooldown après une perte, scan ignoré")
@@ -5487,12 +5493,24 @@ def advanced_main_v981():
                     breaker_level=None
                 )
 
+                # ✅ V114 : Filtre RR minimum (1.30)
+                risk = abs(entry_level - stop_loss)
+                reward = abs(take_profit - entry_level)
+                rr = reward / risk if risk > 0 else 0.0
+
+                if rr < 1.30:
+                    logger.info(f"[RR_FILTER] {pair} {direction} | RR={rr:.2f} < 1.30 → REJECT (SL={stop_loss:.5f}, TP={take_profit:.5f})")
+                    score = confidence_result.get("entry_score", 0)
+                    entry_metrics = confidence_result.get("metrics", {})
+                    stats.record_signal(pair, False, f"RR trop faible: {rr:.2f}", entry_level, stop_loss, take_profit, score, direction, entry_metrics)
+                    continue
+
                 score = confidence_result.get("entry_score", 0)
                 eqs = confidence_result.get("eqs_score", 0)
                 quality = confidence_result.get("quality_label", "B")
                 metrics = confidence_result.get("metrics", {})
 
-                logger.info(f"📊 TRADE {pair} {direction} {entry_type} @{entry_level:.5f} | Score: {score} | EQS: {eqs}/100 | Qualité: {quality}")
+                logger.info(f"📊 TRADE {pair} {direction} {entry_type} @{entry_level:.5f} | Score: {score} | EQS: {eqs}/100 | Qualité: {quality} | RR={rr:.2f}")
 
                 entry_metrics = {
                     "atr": metrics.get("atr", 0),
@@ -5526,7 +5544,8 @@ def advanced_main_v981():
                     entry_type=entry_type,
                     eqs=eqs,
                     setup_type=entry_type,
-                    metrics=entry_metrics
+                    metrics=entry_metrics,
+                    rr=rr   # ✅ on passe aussi le RR pour double vérification
                 )
 
                 if trade_id:
@@ -5562,7 +5581,6 @@ def advanced_main_v981():
             continue
             
     stats.log_summary()
-
 # ============================================================
 # V106 - CORRECTION DU TRAILING APRÈS BE (utilisation du risque initial)
 # ============================================================
