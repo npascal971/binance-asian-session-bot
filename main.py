@@ -443,6 +443,8 @@ class TradingStatsV101:
         except:
             pass
 
+    
+    
     def record_rejection(self, pair: str, filter_name: str, reason: str):
         self.rejection_stats[pair][filter_name] += 1
         if DEBUG_MODE:
@@ -672,6 +674,192 @@ class TradingStatsV101:
             "expectancy": f"${expectancy:.2f}"
         }
 
+    def get_directional_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> str:
+    """
+    Retourne 'BUY', 'SELL' ou 'NEUTRAL' selon la structure des swings H4/H1.
+    - Si H4 et H1 sont alignés (BUY/BUY ou SELL/SELL) → bias.
+    - Sinon → NEUTRAL (pas de trade).
+    """
+    def get_bias_from_structure(df: pd.DataFrame) -> str:
+        swing_highs, swing_lows = detect_swing_points_advanced(df, lookback=5)
+        if len(swing_highs) < 2 or len(swing_lows) < 2:
+            return "NEUTRAL"
+        # Derniers swings
+        last_h = swing_highs[-1]['price'], swing_highs[-2]['price']
+        last_l = swing_lows[-1]['price'], swing_lows[-2]['price']
+        hh = last_h[0] > last_h[1]
+        hl = last_l[0] > last_l[1]
+        lh = last_h[0] < last_h[1]
+        ll = last_l[0] < last_l[1]
+        if hh and hl:
+            return "BUY"
+        elif lh and ll:
+            return "SELL"
+        else:
+            return "NEUTRAL"
+    
+    bias_h4 = get_bias_from_structure(df_h4)
+    bias_h1 = get_bias_from_structure(df_h1)
+    
+    if bias_h4 == "BUY" and bias_h1 == "BUY":
+        return "BUY"
+    elif bias_h4 == "SELL" and bias_h1 == "SELL":
+        return "SELL"
+    else:
+        return "NEUTRAL"
+
+    def detect_retracement_zones(df: pd.DataFrame, direction: str, current_price: float, pair: str) -> List[Dict]:
+    """
+    Retourne les zones (FVG / imbalance) dans le sens du biais, proches du prix.
+    Une zone est valide si le prix actuel est dans ou proche (< 1.5 ATR) de la zone.
+    """
+    zones = []
+    fvgs = detect_fvg_advanced(df, max_lookback_hours=36)
+    # On ne garde que les FVG dans le sens du biais
+    for fvg in fvgs:
+        if fvg.get("direction", "").upper() != direction:
+            continue
+        low = float(fvg["low_level"])
+        high = float(fvg["high_level"])
+        mid = (low + high) / 2
+        distance = abs(current_price - mid)
+        atr = calculate_atr(df)
+        if distance <= atr * 1.5:
+            zones.append({
+                "type": "FVG",
+                "direction": direction,
+                "entry_zone": (low, high),
+                "midpoint": mid,
+                "fvg": fvg,
+                "distance_pips": price_to_pips(distance, pair)
+            })
+    # On peut aussi ajouter les imbalances détectées par detect_imbalances() si besoin
+    return zones
+
+    def has_enough_room_to_tp(
+    df_h1: pd.DataFrame,
+    direction: str,
+    entry: float,
+    tp: float,
+    pair: str
+) -> bool:
+    """
+    Vérifie qu'il n'y a pas de niveau de résistance/support (swing) entre l'entrée et le TP.
+    Si un swing (opposé) se trouve entre les deux, le RR n'est pas atteignable.
+    """
+    swing_highs, swing_lows = detect_swing_points_advanced(df_h1, lookback=5)
+    
+    if direction == "BUY":
+        # On cherche un swing haut entre entry et tp
+        for sh in swing_highs:
+            if entry < sh['price'] < tp:
+                return False
+        # On peut aussi vérifier une EMA / niveau psychologique
+    else:
+        for slw in swing_lows:
+            if tp < slw['price'] < entry:
+                return False
+    return True
+
+    def evaluate_simple_setup(
+    pair: str,
+    direction: str,
+    entry: dict,
+    df_h4: pd.DataFrame,
+    df_h1: pd.DataFrame,
+    df_m15: pd.DataFrame,
+    current_price: float
+) -> dict:
+    """
+    Évalue un setup avec les 4 filtres :
+    1. Régime directionnel déjà passé (dans advanced_main)
+    2. Zone de retracement valide (distance OK)
+    3. Confirmation M15
+    4. RR réel ≥ 2.0
+    Retourne un dict avec les infos de trade ou None si rejet.
+    """
+    entry_level = float(entry["entry_level"])
+    # 1. Vérifier que le prix est dans la zone ou proche
+    zone_ok = abs(current_price - entry_level) <= calculate_atr(df_m15) * 1.5
+    if not zone_ok:
+        return {"passed": False, "reason": "prix hors zone", "entry_score": 0}
+    
+    # 2. Confirmation M15
+    confirm_ok, msg = get_confirmation_signal(df_m15, direction, entry_level)
+    if not confirm_ok:
+        return {"passed": False, "reason": f"confirmation: {msg}", "entry_score": 0}
+    
+    # 3. Calcul SL/TP structurel
+    sl, tp, risk_pips, atr_pips = calculate_sl_tp_structural(df_m15, direction, entry_level, pair)
+    
+    # 4. RR réel (distance jusqu'au prochain niveau)
+    if not has_enough_room_to_tp(df_h1, direction, entry_level, tp, pair):
+        return {"passed": False, "reason": f"RR réel impossible: niveau entre entry et TP", "entry_score": 0}
+    
+    # 5. Vérifier que le TP est bien à 2R (ou plus)
+    rr = abs(tp - entry_level) / abs(sl - entry_level)
+    if rr < 2.0:
+        return {"passed": False, "reason": f"RR={rr:.2f} < 2.0", "entry_score": 0}
+    
+    # Tout est OK
+    return {
+        "passed": True,
+        "entry_level": entry_level,
+        "sl": sl,
+        "tp": tp,
+        "risk_pips": risk_pips,
+        "atr_pips": atr_pips,
+        "rr": rr,
+        "reason": "OK",
+        "metrics": {
+            "atr": atr_pips,
+            "adx": calculate_adx(df_h1),
+            "momentum": calculate_momentum(df_m15),
+            "session": get_session_label()
+        }
+    }
+
+
+    def get_confirmation_signal(df_m15: pd.DataFrame, direction: str, entry_level: float) -> Tuple[bool, str]:
+    """
+    Vérifie que la dernière bougie M15 montre :
+    - rejet dans la zone (wick opposé) 
+    - et micro-break (dépassement du dernier swing dans le sens du trade)
+    Retourne (True/False, message).
+    """
+    if len(df_m15) < 3:
+        return False, "données insuffisantes"
+    
+    last = df_m15.iloc[-1]
+    prev = df_m15.iloc[-2]
+    
+    # Calcul des wicks
+    body = abs(last['close'] - last['open'])
+    upper_wick = last['high'] - max(last['open'], last['close'])
+    lower_wick = min(last['open'], last['close']) - last['low']
+    total_range = last['high'] - last['low']
+    if total_range == 0:
+        return False, "range nul"
+    
+    # Rejet : wick opposé à la direction > 0.4 * range
+    if direction == "BUY":
+        rejet = lower_wick > total_range * 0.4
+        # Micro-break : close > high de la bougie précédente (ou > dernier swing haut)
+        micro_break = last['close'] > prev['high']
+    else:
+        rejet = upper_wick > total_range * 0.4
+        micro_break = last['close'] < prev['low']
+    
+    if rejet and micro_break:
+        return True, f"confirmation {direction}: rejet + micro-break"
+    else:
+        reasons = []
+        if not rejet:
+            reasons.append("pas de rejet")
+        if not micro_break:
+            reasons.append("pas de micro-break")
+        return False, ", ".join(reasons)
+    
     def log_daily_summary(self):
         logger.info("=" * 60)
         logger.info("📊 RÉSUMÉ QUOTIDIEN V111")
@@ -5278,57 +5466,22 @@ def detect_setups_aligned_with_bias(
 # FONCTION PRINCIPALE (scan des signaux) - avec filtres session V105 + score V106
 # =============================
 def advanced_main_v981():
+    """
+    Version simplifiée du scan de signaux :
+    - Détermine le biais directionnel H4+H1 (VETO absolu)
+    - Ne cherche que les setups dans ce sens
+    - Filtre : zone de retracement (FVG/imbalance) proche
+    - Confirmation M15 : rejet + micro-break
+    - SL structurel (dernier swing) + TP = 2R
+    - Vérifie que le TP est atteignable (pas de niveau entre entry et TP)
+    - Exécute si RR >= 2.0
+    """
     try:
         api = v88_client()
         logger.info("✅ API OANDA initialisée avec succès")
-        logger.info(f"✅ ENTRY QUALITY SCORE (EQS) V111 - Seuil adaptatif + ASIA (65)")
-        logger.info(f"✅ ENTRY SCORE /100 - Seuil minimum {MIN_ENTRY_SCORE}")
-        logger.info(f"✅ V111 - ASIA/LONDON ENTRY BYPASS pour FVG_RETEST_PERFECT")
-        logger.info(f"✅ Break Even adaptatif (base: {BASE_BREAKEVEN_TRIGGER_R}R)")
-        logger.info("✅ AUDIT ATR ACTIVÉ")
-        logger.info("✅ LOGS [DECISION] ENRICHIS AVEC MÉTRIQUES")
-        logger.info("✅ SUIVI DES CLÔTURES AMÉLIORÉ")
-        logger.info("✅ ESPÉRANCE CALCULÉE SUR LES TRADES CLÔTURÉS")
-        logger.info("✅ APPELS OANDA CORRIGÉS")
-        logger.info("✅ DISTANCE SL MINIMUM (10 pips)")
-        logger.info("✅ FILTRE SPREAD ÉLEVÉ")
-        logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
-        logger.info(f"✅ VERROUILLAGE PAR PAIRE: {EXECUTION_COOLDOWN_SECONDS}s")
-        logger.info("✅ SUIVI MFE/MAE ACTIVÉ")
-        logger.info("✅ PARAMÈTRES ADAPTATIFS ROBUSTES (seuil 20 trades, hystérésis 2 cycles)")
-        logger.info("✅ V104 : Blocage contre-tendance 4H (sauf BREAKER/BISI)")
-        logger.info("✅ V104 : ADX minimum 25 en session active")
-        logger.info("✅ V104 : Veto si momentum opposé >0.15%")
-        logger.info("✅ V104 : Confluence HTF requise (2/3)")
-        logger.info("✅ V105 : Cooldown de 2h après une perte")
-        logger.info("✅ V105 : Score minimum +3 en ASIA")
-        logger.info("✅ V105 : Qualité requise SNIPER/A+ en ASIA")
-        logger.info("✅ V105 : Seuils ATR réduits de 30% en ASIA")
-        logger.info("✅ V105 : Risque réduit à 0.5% en ASIA")
-        logger.info("✅ V105 : EQS minimum 65 en ASIA")
-        logger.info("✅ V105 : Suppression filtre EUR/USD NY (18h-21h)")
-        logger.info("✅ V105 : Filtre structure H1")
-        logger.info("✅ V105 : Adaptation des poids des setups")
-        logger.info("✅ V105 : Sélection du meilleur setup avec seuil relatif")
-        logger.info("✅ V103 : Blocage USD/CAD et AUD/USD en ASIA")
-        logger.info("✅ V103 : Filtre ADX renforcé (seuil 18)")
-        logger.info("✅ V103 : RISK 0.75% (0.5% ASIA)")
-        logger.info("✅ V103 : EXIT_EARLY plus sélectif (4 signaux)")
-        logger.info("✅ V105.1 : Logs MFE/MAE enrichis pour diagnostic")
-        logger.info("✅ V105.1 : SL/TP rééquilibrés (multiplicateurs plus serrés)")
-        logger.info("✅ V105.1 : Trailing stop optimisé (activation 0.80R, distance 1.5R)")
-        logger.info("✅ V105.1 : Pullback AUD/USD corrigé (3.5)")
-        logger.info("✅ V106 : Score d'entrée /100 avec composantes")
-        logger.info("✅ V106 : Bonus 3/3 HTF (+5)")
-        logger.info("✅ V106 : Momentum gradué (pénalité progressive)")
-        logger.info("✅ V106 : ADX dynamique avec pente")
-        logger.info("✅ V106 : Poids initiaux des setups ajustés")
-        logger.info("✅ V106 : Correction RR après BE (TP réajusté)")
-        logger.info("✅ V106.1 : Filtre STRUCTURE H1 assoupli (rejet uniquement structure opposée)")
-        logger.info("✅ V106.1 : Logs FILTER_DIAG et REJECT_DIAG pour diagnostic")
-        logger.info("✅ V107 : ASIA ENTRY BYPASS pour FVG_RETEST_PERFECT")
-        logger.info("✅ V111 : Correction des constantes manquantes + R initial pour trailing")
-        logger.info("✅ V114 : Filtre RR minimum (1.30) avant exécution")
+        logger.info("🎯 NOUVEAU MODE SIMPLIFIÉ : Biais → Retracement → Confirmation → 2R")
+        logger.info(f"📊 MAX TRADES: {MAX_TRADES_TOTAL}")
+        logger.info(f"🔒 VERROUILLAGE PAR PAIRE: {EXECUTION_COOLDOWN_SECONDS}s")
     except Exception as e:
         logger.error(f"❌ Échec d'initialisation de l'API OANDA : {e}")
         return
@@ -5336,8 +5489,7 @@ def advanced_main_v981():
     for pair in PAIR_LIST:
         _reset_log_dedup()
 
-        hour = datetime.utcnow().hour
-
+        # Vérifications préliminaires
         if not stats.adaptive_state.can_trade(pair):
             logger.info(f"[COOLDOWN] {pair} - en cooldown après une perte, scan ignoré")
             continue
@@ -5347,243 +5499,157 @@ def advanced_main_v981():
             continue
 
         if has_open_trade_v88(pair):
-            logger.info(f"[INFO] {pair}: trade deja ouvert - scan ignore")
+            logger.info(f"[INFO] {pair}: trade déjà ouvert - scan ignoré")
             continue
 
         try:
+            # Récupération des données
             df_h4 = get_candles_with_retry(api, pair, GRANULARITY_H4, 300)
             df_h1 = get_candles_with_retry(api, pair, GRANULARITY_H1, 200)
             df_m15 = get_candles_with_retry(api, pair, GRANULARITY_M15, 250)
             df_d1 = get_candles_with_retry(api, pair, "D", count=250)
-            
+
             if any(df.empty for df in [df_h4, df_h1, df_m15]):
                 logger.warning(f"⚠️ Données manquantes pour {pair}, analyse ignorée")
                 continue
 
-            atr_price = calculate_atr(df_m15, period=ATR_PERIOD)
-            atr_pips = price_to_pips(atr_price, pair)
-            effective_atr_threshold = get_effective_atr_threshold(pair)
-            logger.info(f"[ATR_DIAG] {pair} | ATR pips: {atr_pips:.1f} | Seuil effectif: {effective_atr_threshold:.1f}")
-
             current_price = float(df_m15["close"].iloc[-1])
-            bias_analysis = determine_advanced_bias(df_h4)
-            bias = bias_analysis.get("bias", "NEUTRAL")
 
-            if DEBUG_MODE:
-                adx = calculate_adx(df_h1)
-                momentum = calculate_momentum(df_m15)
-                logger.debug(f"📊 {pair} | ADX={adx:.1f} | MOM={momentum:.2f}% | ATR_pips={atr_pips:.1f}")
-
+            # 1. Régime directionnel (VETO absolu)
+            bias = get_directional_bias(df_h4, df_h1)
             if bias == "NEUTRAL":
-                buy_setups = detect_setups_aligned_with_bias(df_m15, df_h1, "BUY", pair, df_h4)
-                sell_setups = detect_setups_aligned_with_bias(df_m15, df_h1, "SELL", pair, df_h4)
-                setups = buy_setups + sell_setups
-            else:
-                setups = detect_setups_aligned_with_bias(df_m15, df_h1, bias, pair, df_h4)
+                logger.info(f"{pair} | Régime NEUTRAL → pas de trade")
+                continue
 
-            if DEBUG_MODE:
-                logger.debug(f"📋 {pair}: {len(setups)} setups détectés (biais: {bias})")
+            # 2. Détection des setups dans le sens du biais uniquement
+            setups = detect_setups_aligned_with_bias(df_m15, df_h1, bias, pair, df_h4)
+            if not setups:
+                logger.info(f"{pair} | Aucun setup {bias} détecté")
+                continue
 
-            scored_entries = []
-            rejected_reasons = defaultdict(int)
-            rejected_details = []
-
+            # 3. Évaluation simplifiée de chaque setup
+            valid_trades = []
             for entry in setups:
-                direction = entry.get("direction", "").upper()
-                entry_type = entry.get("type", "UNKNOWN")
-                entry_level = entry.get("entry_level")
-                
-                if entry_level is None:
-                    rejected_reasons["entry_level_none"] += 1
-                    continue
-                    
-                distance = abs(current_price - entry_level)
-                max_distance = MAX_DISTANCE_PIPS.get(pair, MAX_DISTANCE_PIPS["DEFAULT"])
-                
-                if distance > max_distance * 3:
-                    rejected_reasons["distance_too_far"] += 1
-                    continue
-                    
-                confidence_result = calculate_signal_confidence(
-                    pair, direction, df_h4, df_h1, df_m15, entry, bias, current_price,
-                    False, "", df_d1=df_d1
+                result = evaluate_simple_setup(
+                    pair, bias, entry,
+                    df_h4, df_h1, df_m15,
+                    current_price
                 )
-                
-                score = confidence_result.get("entry_score", 0)
-                eqs = confidence_result.get("eqs_score", 0)
-                metrics = confidence_result.get("metrics", {})
-                passed = confidence_result.get("passed", False)
-                bypass_used = confidence_result.get("bypass_used", False)
-                
-                bypass_tag = " | BYPASS=ASIA" if bypass_used else ""
-                logger.info(
-                    f"[SIGNAL] {pair} | "
-                    f"DIR={direction} | "
-                    f"Score={score} | "
-                    f"EQS={eqs} | "
-                    f"ADX={metrics.get('adx', 'NA')} | "
-                    f"ATR={atr_pips:.1f} | "
-                    f"SETUP={entry_type} | "
-                    f"PASSED={passed}{bypass_tag}"
-                )
-                
-                if DEBUG_MODE:
-                    logger.debug(f"📊 {pair} {direction} | Score: {score} | EQS: {eqs}/100 | Passed: {passed} | Bypass: {bypass_used}")
-
-                if not passed:
-                    filter_diag = confidence_result.get("filter_diag", {})
-                    if filter_diag:
-                        logger.info(
-                            f"[REJECT_DIAG] {pair} | {direction} | {entry_type} | "
-                            f"HTF_BYPASS={filter_diag.get('HTF_BYPASS', 'NO')} | "
-                            f"STRUCTURE={filter_diag.get('STRUCTURE_FILTER', 'UNKNOWN')} | "
-                            f"SCORE={filter_diag.get('SCORE_FILTER', 'UNKNOWN')} | "
-                            f"FINAL={filter_diag.get('FINAL_DECISION', 'UNKNOWN')} | "
-                            f"Score={score} | EQS={eqs} | ADX={metrics.get('adx', 'NA')}"
-                        )
-
-                if passed:
-                    scored_entries.append({"entry": entry, "confidence": confidence_result})
-                    stats.record_signal(pair, True, "score_ok", entry_level, 0, 0, score, direction, metrics)
+                if result["passed"]:
+                    valid_trades.append({
+                        "entry": entry,
+                        "sl": result["sl"],
+                        "tp": result["tp"],
+                        "risk_pips": result["risk_pips"],
+                        "rr": result["rr"],
+                        "atr_pips": result["atr_pips"],
+                        "metrics": result["metrics"]
+                    })
                 else:
-                    reason = confidence_result.get("details", {}).get("VETO", f"score_{score}")
-                    rejected_reasons[reason[:30]] += 1
-                    rejection_logs = confidence_result.get("rejection_logs", [])
-                    if rejection_logs:
-                        rejected_details.append(f"{pair} {direction}: " + " | ".join(rejection_logs))
-                    stats.record_signal(pair, False, reason, entry_level, 0, 0, score, direction)
+                    logger.info(f"[REJECT] {pair} {bias} {entry.get('type')} : {result['reason']}")
 
-            if rejected_details:
-                logger.debug(f"[REJECT_DETAILS] {pair} - {len(rejected_details)} rejets détaillés")
-                for detail in rejected_details[:5]:
-                    logger.debug(f"  {detail}")
-                if len(rejected_details) > 5:
-                    logger.debug(f"  ... et {len(rejected_details)-5} autres")
+            if not valid_trades:
+                logger.info(f"{pair} | Aucun trade valide après filtres")
+                continue
 
-            finalists = strict_keep_best_per_direction(scored_entries, min_score_gap=5)
-            
-            log_line = (
-                f"{pair:10} | Biais: {bias:6} | Setups: {len(setups):3} | "
-                f"Scorés: {len(scored_entries):3} | Finalistes: {len(finalists):3}"
+            # 4. Sélection du meilleur (celui avec le meilleur RR, ou le plus petit risque)
+            valid_trades.sort(key=lambda x: x["rr"], reverse=True)
+            best = valid_trades[0]
+
+            # 5. Préparation de l'ordre
+            entry_level = float(best["entry"]["entry_level"])
+            stop_loss = best["sl"]
+            take_profit = best["tp"]
+            rr = best["rr"]
+            metrics = best["metrics"]
+
+            # 6. Vérifications de sécurité (limites, cooldown, etc.)
+            if ONE_TRADE_PER_PAIR and has_open_trade_v88(pair):
+                logger.info(f"{pair}: trade déjà ouvert - annulation")
+                continue
+
+            if open_trade_count_v88() >= MAX_TRADES_TOTAL:
+                logger.info(f"Limite trades atteinte ({MAX_TRADES_TOTAL})")
+                continue
+
+            if is_maintenance_suspended():
+                logger.warning(f"[ORDER] OANDA en maintenance - exécution annulée")
+                continue
+
+            # 7. Exécution
+            trade_id = execute_oanda_trade_v981(
+                pair=pair,
+                direction=bias,
+                entry_price=entry_level,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                score=0,  # plus utilisé
+                entry_type=best["entry"]["type"],
+                eqs=0,    # plus utilisé
+                setup_type=best["entry"]["type"],
+                metrics=metrics,
+                rr=rr
             )
-            if rejected_reasons:
-                reasons = ", ".join([f"{k}:{v}" for k, v in list(rejected_reasons.items())[:3] if v > 0])
-                log_line += f" | Rejets: {reasons}"
-            logger.info(log_line)
 
-            nb_envoyes = 0
-            for item in finalists:
-                entry = item["entry"]
-                confidence_result = item["confidence"]
-                direction = entry.get("direction", "").upper()
-                entry_type = entry.get("type", "UNKNOWN")
-                entry_level = float(entry.get("entry_level"))
-                zone_start, zone_end = entry.get("entry_zone", (entry_level, entry_level))
-                zone_start = float(zone_start)
-                zone_end = float(zone_end)
-                entry_level_key = round(entry_level, 5)
-
-                if is_signal_sent_recently(pair, direction, entry_level_key, zone_start, zone_end):
-                    if DEBUG_MODE:
-                        logger.debug(f"❌ {pair} {direction} déjà envoyé")
-                    continue
-
-                stop_loss, take_profit = calculate_sl_tp(
-                    entry_price=entry_level,
-                    atr=confidence_result["atr_value"],
-                    direction=direction,
-                    pair=pair,
-                    entry_type=entry_type,
-                    breaker_level=None
+            if trade_id:
+                logger.info(
+                    f"[DECISION_EXECUTED] {pair} | {bias} | {best['entry']['type']} | "
+                    f"ENTRY={entry_level:.5f} | SL={stop_loss:.5f} | TP={take_profit:.5f} | RR={rr:.2f} | "
+                    f"TRADE_ID={trade_id} | ACTION=EXECUTED"
                 )
 
-                # ✅ V114 : Filtre RR minimum (1.30)
-                risk = abs(entry_level - stop_loss)
-                reward = abs(take_profit - entry_level)
-                rr = reward / risk if risk > 0 else 0.0
-
-                if rr < 1.30:
-                    logger.info(f"[RR_FILTER] {pair} {direction} | RR={rr:.2f} < 1.30 → REJECT (SL={stop_loss:.5f}, TP={take_profit:.5f})")
-                    score = confidence_result.get("entry_score", 0)
-                    entry_metrics = confidence_result.get("metrics", {})
-                    stats.record_signal(pair, False, f"RR trop faible: {rr:.2f}", entry_level, stop_loss, take_profit, score, direction, entry_metrics)
-                    continue
-
-                score = confidence_result.get("entry_score", 0)
-                eqs = confidence_result.get("eqs_score", 0)
-                quality = confidence_result.get("quality_label", "B")
-                metrics = confidence_result.get("metrics", {})
-
-                logger.info(f"📊 TRADE {pair} {direction} {entry_type} @{entry_level:.5f} | Score: {score} | EQS: {eqs}/100 | Qualité: {quality} | RR={rr:.2f}")
-
-                entry_metrics = {
-                    "atr": metrics.get("atr", 0),
-                    "adx": metrics.get("adx", 0),
-                    "rsi": metrics.get("rsi", 0),
-                    "eqs": eqs,
-                    "hour": metrics.get("hour", 0),
-                    "weekday": metrics.get("weekday", 0),
-                    "setup_type": entry_type,
-                    "momentum": metrics.get("momentum", 0),
-                    "spread": metrics.get("spread", 0),
-                    "volatility": metrics.get("volatility", 0),
-                    "session": metrics.get("session", "UNKNOWN"),
-                    "h1_trend": metrics.get("h1_trend", 0),
-                    "h4_trend": metrics.get("h4_trend", 0)
+                # Envoi Telegram (optionnel)
+                bias_analysis = {
+                    "bias": bias,
+                    "win_rate": "~55% (estimé)",
+                    "quality_label": "SIMPLE_SETUP",
+                    "score_details": {"rr": rr, "risk_pips": best["risk_pips"]}
                 }
-
-                if DEMO_MODE:
-                    logger.info(f"🔬 DEMO: {pair} {direction} @ {entry_level:.5f} (SL: {stop_loss}, TP: {take_profit})")
-                    stats.record_signal(pair, True, "demo_mode", entry_level, stop_loss, take_profit, score, direction, entry_metrics)
-                    nb_envoyes += 1
-                    continue
-
-                trade_id = execute_oanda_trade_v981(
+                send_telegram_alert(
                     pair=pair,
-                    direction=direction,
+                    direction=bias,
                     entry_price=entry_level,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    score=score,
-                    entry_type=entry_type,
-                    eqs=eqs,
-                    setup_type=entry_type,
-                    metrics=entry_metrics,
-                    rr=rr   # ✅ on passe aussi le RR pour double vérification
+                    narrative={},
+                    bias_analysis=bias_analysis,
+                    rsi=metrics.get("rsi", 50),
+                    entry_type=best["entry"]["type"],
+                    confidence_score=0,
+                    eqs_score=0
                 )
 
-                if trade_id:
-                    logger.info(
-                        f"[DECISION_EXECUTED] {pair} | {direction} | {entry_type} | "
-                        f"Score={score} | EQS={eqs} | "
-                        f"ENTRY={entry_level:.5f} | SL={stop_loss:.5f} | TP={take_profit:.5f} | "
-                        f"TRADE_ID={trade_id} | ACTION=EXECUTED"
-                    )
+                # Marquer comme envoyé pour éviter les doublons
+                zone_start, zone_end = best["entry"].get("entry_zone", (entry_level, entry_level))
+                mark_signal_sent(pair, bias, entry_level, zone_start, zone_end)
 
-                    enriched_bias = dict(bias_analysis) if bias_analysis else {}
-                    enriched_bias["win_rate"] = confidence_result.get("win_rate", "~55%")
-                    enriched_bias["quality_label"] = quality
-                    enriched_bias["score_details"] = confidence_result.get("details", {})
-                    send_telegram_alert(
-                        pair=pair, direction=direction, entry_price=entry_level,
-                        stop_loss=stop_loss, take_profit=take_profit,
-                        narrative={}, bias_analysis=enriched_bias,
-                        rsi=metrics.get("rsi", 50),
-                        entry_type=entry_type, confidence_score=score,
-                        eqs_score=eqs
-                    )
-                    mark_signal_sent(pair, direction, entry_level_key, zone_start, zone_end)
-                    stats.record_signal(pair, True, "trade_opened", entry_level, stop_loss, take_profit, score, direction, entry_metrics)
-                    nb_envoyes += 1
+                # Enregistrement des stats (simplifié)
+                entry_metrics = {
+                    "atr": best["atr_pips"],
+                    "adx": metrics.get("adx", 0),
+                    "rsi": metrics.get("rsi", 0),
+                    "eqs": 0,
+                    "hour": datetime.utcnow().hour,
+                    "weekday": datetime.utcnow().weekday(),
+                    "setup_type": best["entry"]["type"],
+                    "momentum": metrics.get("momentum", 0),
+                    "spread": 0,
+                    "volatility": 0,
+                    "session": metrics.get("session", "UNKNOWN"),
+                    "h1_trend": 0,
+                    "h4_trend": 0
+                }
+                stats.record_signal(pair, True, "trade_opened", entry_level, stop_loss, take_profit, 0, bias, entry_metrics)
 
-            if nb_envoyes > 0:
-                logger.info(f"✅ {pair}: {nb_envoyes} trades envoyés")
+                logger.info(f"✅ {pair}: trade exécuté (ID {trade_id})")
+            else:
+                logger.error(f"❌ {pair}: échec d'exécution du trade")
 
         except Exception as e:
             logger.error(f"💥 Erreur sur {pair} : {str(e)}")
             logger.error(traceback.format_exc())
             continue
-            
+
     stats.log_summary()
 # ============================================================
 # V106 - CORRECTION DU TRAILING APRÈS BE (utilisation du risque initial)
