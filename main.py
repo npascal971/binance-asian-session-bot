@@ -675,38 +675,38 @@ class TradingStatsV101:
         }
 
     def get_directional_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> str:
-    """
-    Retourne 'BUY', 'SELL' ou 'NEUTRAL' selon la structure des swings H4/H1.
-    - Si H4 et H1 sont alignés (BUY/BUY ou SELL/SELL) → bias.
-    - Sinon → NEUTRAL (pas de trade).
-    """
-    def get_bias_from_structure(df: pd.DataFrame) -> str:
-        swing_highs, swing_lows = detect_swing_points_advanced(df, lookback=5)
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
-            return "NEUTRAL"
-        # Derniers swings
-        last_h = swing_highs[-1]['price'], swing_highs[-2]['price']
-        last_l = swing_lows[-1]['price'], swing_lows[-2]['price']
-        hh = last_h[0] > last_h[1]
-        hl = last_l[0] > last_l[1]
-        lh = last_h[0] < last_h[1]
-        ll = last_l[0] < last_l[1]
-        if hh and hl:
+        """
+        Retourne 'BUY', 'SELL' ou 'NEUTRAL' selon la structure des swings H4/H1.
+        - Si H4 et H1 sont alignés (BUY/BUY ou SELL/SELL) → bias.
+        - Sinon → NEUTRAL (pas de trade).
+        """
+        def get_bias_from_structure(df: pd.DataFrame) -> str:
+            swing_highs, swing_lows = detect_swing_points_advanced(df, lookback=5)
+            if len(swing_highs) < 2 or len(swing_lows) < 2:
+                return "NEUTRAL"
+            # Derniers swings
+            last_h = (swing_highs[-1]['price'], swing_highs[-2]['price'])
+            last_l = (swing_lows[-1]['price'], swing_lows[-2]['price'])
+            hh = last_h[0] > last_h[1]
+            hl = last_l[0] > last_l[1]
+            lh = last_h[0] < last_h[1]
+            ll = last_l[0] < last_l[1]
+            if hh and hl:
+                return "BUY"
+            elif lh and ll:
+                return "SELL"
+            else:
+                return "NEUTRAL"
+    
+        bias_h4 = get_bias_from_structure(df_h4)
+        bias_h1 = get_bias_from_structure(df_h1)
+    
+        if bias_h4 == "BUY" and bias_h1 == "BUY":
             return "BUY"
-        elif lh and ll:
+        elif bias_h4 == "SELL" and bias_h1 == "SELL":
             return "SELL"
         else:
             return "NEUTRAL"
-    
-    bias_h4 = get_bias_from_structure(df_h4)
-    bias_h1 = get_bias_from_structure(df_h1)
-    
-    if bias_h4 == "BUY" and bias_h1 == "BUY":
-        return "BUY"
-    elif bias_h4 == "SELL" and bias_h1 == "SELL":
-        return "SELL"
-    else:
-        return "NEUTRAL"
 
     def detect_retracement_zones(df: pd.DataFrame, direction: str, current_price: float, pair: str) -> List[Dict]:
     """
