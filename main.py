@@ -229,6 +229,413 @@ def is_maintenance_suspended() -> bool:
     return False
 
 # ============================================================
+# CLASSES PRINCIPALES
+# ============================================================
+
+class AdaptiveState:
+    """État adaptatif du bot : paramètres dynamiques, qualité du marché, apprentissage"""
+    def __init__(self):
+        self.pair_params = {}
+        self.setup_weights = {}
+        self.suspended_pairs = {}
+        self.consecutive_losses = defaultdict(int)
+        self.last_adaptation = time.time()
+        self.adaptation_history = []
+        self.adaptation_counters = defaultdict(lambda: {"good": 0, "bad": 0})
+        self.last_loss_time = defaultdict(float)
+        self.loss_cooldown = 3600  # 1 heure
+        self.setup_performance = defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0})
+
+    def get_pair_params(self, pair: str) -> dict:
+        if pair not in self.pair_params:
+            self.pair_params[pair] = {
+                "adx_min": BASE_ADX_MIN_THRESHOLD,
+                "eqs_min": BASE_EQS_MIN_THRESHOLD,
+                "be_trigger_r": BASE_BREAKEVEN_TRIGGER_R,
+                "be_early_r": BASE_BREAKEVEN_EARLY_R,
+                "trailing_atr_mult": BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER,
+                "trailing_min_pips": BASE_TRAILING_STOP_MIN_DISTANCE_PIPS,
+                "trailing_activation_r": BASE_TRAILING_ACTIVATION_R,
+                "confidence_min": BASE_MIN_CONFIDENCE_SCORE_BY_PAIR.get(pair, BASE_MIN_CONFIDENCE_SCORE_BY_PAIR["DEFAULT"])
+            }
+        return self.pair_params[pair]
+
+    def get_setup_weight(self, pair: str, setup_type: str) -> float:
+        key = f"{pair}_{setup_type}"
+        if key not in self.setup_weights:
+            return SETUP_WEIGHTS_DEFAULT.get(setup_type, 1.0)
+        return self.setup_weights[key]
+
+    def update_setup_weight(self, pair: str, setup_type: str, new_weight: float):
+        key = f"{pair}_{setup_type}"
+        self.setup_weights[key] = max(0.2, min(2.0, new_weight))
+        logger.info(f"[SETUP_WEIGHT] {pair} | {setup_type} | Nouveau poids: {new_weight:.2f}")
+
+    def is_pair_suspended(self, pair: str) -> bool:
+        if pair not in self.suspended_pairs:
+            return False
+        suspend_time = self.suspended_pairs[pair]
+        if time.time() - suspend_time > 3600:
+            del self.suspended_pairs[pair]
+            return False
+        return True
+
+    def suspend_pair(self, pair: str, reason: str):
+        self.suspended_pairs[pair] = time.time()
+        logger.warning(f"[SUSPEND] {pair} suspendu pour 1 heure | Raison: {reason}")
+
+    def can_trade(self, pair: str) -> bool:
+        if pair in self.last_loss_time:
+            elapsed = time.time() - self.last_loss_time[pair]
+            if elapsed < self.loss_cooldown:
+                logger.debug(f"[COOLDOWN] {pair} en cooldown pour encore {int(self.loss_cooldown - elapsed)}s")
+                return False
+        return True
+
+    def record_loss(self, pair: str):
+        self.consecutive_losses[pair] += 1
+        self.last_loss_time[pair] = time.time()
+        # On pourrait ajouter une logique de suspension ici, mais simplifiée
+        if self.consecutive_losses[pair] >= 4:
+            self.suspend_pair(pair, f"{self.consecutive_losses[pair]} pertes consécutives")
+            self.consecutive_losses[pair] = 0
+
+    def record_win(self, pair: str):
+        self.consecutive_losses[pair] = 0
+        if pair in self.last_loss_time:
+            del self.last_loss_time[pair]
+
+    def adapt_parameters(self, pair: str, stats: dict):
+        # Version simplifiée, conservée pour compatibilité
+        pass
+
+# ============================================================
+# TRADE TRACKER (MFE/MAE)
+# ============================================================
+class TradeTracker:
+    def __init__(self):
+        self.trades = {}
+
+    def add_trade(self, trade_id: str, pair: str, direction: str, entry_price: float, sl: float, tp: float, setup_type: str, eqs: int):
+        self.trades[trade_id] = {
+            "pair": pair,
+            "direction": direction,
+            "entry": entry_price,
+            "sl": sl,
+            "tp": tp,
+            "setup_type": setup_type,
+            "eqs": eqs,
+            "highest_price": entry_price,
+            "lowest_price": entry_price,
+            "mfe": 0.0,
+            "mae": 0.0,
+            "max_favorable_pips": 0.0,
+            "max_adverse_pips": 0.0,
+            "last_update": time.time(),
+            "closed": False,
+            "exit_price": None,
+            "exit_r": None,
+            "entry_time": datetime.utcnow().isoformat(),
+            "exit_time": None
+        }
+
+    def update_price(self, trade_id: str, current_price: float):
+        if trade_id not in self.trades or self.trades[trade_id]["closed"]:
+            return
+        trade = self.trades[trade_id]
+        direction = trade["direction"]
+        entry = trade["entry"]
+        pip_value = get_pip_value_for_pair(trade["pair"])
+        if direction == "BUY":
+            price_move = current_price - entry
+            if current_price > trade["highest_price"]:
+                trade["highest_price"] = current_price
+            if current_price < trade["lowest_price"]:
+                trade["lowest_price"] = current_price
+        else:
+            price_move = entry - current_price
+            if current_price < trade["lowest_price"]:
+                trade["lowest_price"] = current_price
+            if current_price > trade["highest_price"]:
+                trade["highest_price"] = current_price
+        mfe_pips = max(price_move, trade["mfe"]) / pip_value if pip_value > 0 else 0
+        mae_pips = min(price_move, trade["mae"]) / pip_value if pip_value > 0 else 0
+        trade["mfe"] = max(price_move, trade["mfe"])
+        trade["mae"] = min(price_move, trade["mae"])
+        trade["max_favorable_pips"] = max(trade["max_favorable_pips"], mfe_pips)
+        trade["max_adverse_pips"] = min(trade["max_adverse_pips"], mae_pips)
+        trade["last_update"] = time.time()
+
+    def close_trade(self, trade_id: str, exit_price: float, r_multiple: float):
+        if trade_id not in self.trades:
+            return
+        trade = self.trades[trade_id]
+        trade["closed"] = True
+        trade["exit_price"] = exit_price
+        trade["exit_r"] = r_multiple
+        trade["exit_time"] = datetime.utcnow().isoformat()
+        logger.info(f"[MFE/MAE] {trade['pair']} | {trade['setup_type']} | MFE={trade['max_favorable_pips']:.1f}pips | MAE={trade['max_adverse_pips']:.1f}pips | R={r_multiple:.2f} | EQS={trade['eqs']}")
+        stats.record_mfe_mae(trade["pair"], trade["setup_type"], trade["eqs"], trade["max_favorable_pips"], trade["max_adverse_pips"], r_multiple)
+
+    def get_trade(self, trade_id: str):
+        return self.trades.get(trade_id)
+
+# ============================================================
+# STATISTIQUES
+# ============================================================
+class TradingStatsV101:
+    def __init__(self):
+        self.stats = defaultdict(lambda: {
+            "total_signals": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "wins": 0,
+            "losses": 0,
+            "breakevens": 0,
+            "total_profit": 0.0,
+            "total_loss": 0.0,
+            "trades": [],
+            "entry_metrics": {
+                "atr_values": [],
+                "adx_values": [],
+                "rsi_values": [],
+                "eqs_values": [],
+                "hours": [],
+                "weekdays": [],
+                "setup_types": [],
+                "momentum_values": [],
+                "spread_values": [],
+                "volatility_values": [],
+                "session_labels": [],
+                "h1_trend": [],
+                "h4_trend": []
+            },
+            "by_setup": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0, "trades": []}),
+            "by_eqs_range": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0, "trades": []}),
+            "by_hour": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0}),
+            "by_weekday": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0}),
+            "by_session": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0}),
+            "by_adx_range": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0}),
+            "mfe_mae": [],
+            "setup_performance": defaultdict(lambda: {"wins": 0, "losses": 0, "total_r": 0.0, "trades": []})
+        })
+        self.last_transaction_id = None
+        self.adaptive_state = AdaptiveState()  # <-- AJOUT
+        self._load_last_id()
+        self.last_daily_summary = time.time()
+        self.rejection_stats = defaultdict(lambda: defaultdict(int))
+
+    def _load_last_id(self):
+        try:
+            if os.path.exists("last_transaction_id.txt"):
+                with open("last_transaction_id.txt", "r") as f:
+                    self.last_transaction_id = f.read().strip()
+        except:
+            pass
+
+    def _save_last_id(self):
+        try:
+            with open("last_transaction_id.txt", "w") as f:
+                f.write(str(self.last_transaction_id))
+        except:
+            pass
+
+    def record_rejection(self, pair: str, filter_name: str, reason: str):
+        self.rejection_stats[pair][filter_name] += 1
+        if DEBUG_MODE:
+            logger.debug(f"[REJECT] {pair} | {filter_name}: {reason}")
+
+    def get_rejection_summary(self, pair: str) -> dict:
+        return dict(self.rejection_stats.get(pair, {}))
+
+    def log_rejection_summary(self):
+        logger.info("=" * 60)
+        logger.info("📊 RÉSUMÉ DES REJETS")
+        logger.info("=" * 60)
+        for pair, filters in self.rejection_stats.items():
+            total_rejections = sum(filters.values())
+            logger.info(f"{pair:10} | Total rejets: {total_rejections}")
+            for filter_name, count in sorted(filters.items(), key=lambda x: -x[1])[:5]:
+                pct = count / total_rejections * 100 if total_rejections > 0 else 0
+                logger.info(f"  {filter_name:20} | {count:4} ({pct:.1f}%)")
+        logger.info("=" * 60)
+
+    def record_signal(self, pair: str, accepted: bool, reason: str = "",
+                      entry: float = 0, sl: float = 0, tp: float = 0,
+                      score: int = 0, direction: str = "",
+                      entry_metrics: dict = None):
+        stats = self.stats[pair]
+        stats["total_signals"] += 1
+        if accepted:
+            stats["accepted"] += 1
+            logger.info(f"[SIGNAL_ACCEPTED] {pair} | {direction} | Score={score} | EQS={entry_metrics.get('eqs', 0) if entry_metrics else 0} | {reason}")
+        else:
+            stats["rejected"] += 1
+            self.record_rejection(pair, reason.split(":")[0] if ":" in reason else "UNKNOWN", reason)
+            logger.info(f"[SIGNAL_REJECTED] {pair} | {direction} | {reason}")
+        if accepted and entry_metrics:
+            trade_record = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "pair": pair,
+                "direction": direction,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "score": score,
+                "eqs": entry_metrics.get("eqs", 0),
+                "setup_type": entry_metrics.get("setup_type", "UNKNOWN"),
+                "atr": entry_metrics.get("atr", 0),
+                "adx": entry_metrics.get("adx", 0),
+                "rsi": entry_metrics.get("rsi", 0),
+                "momentum": entry_metrics.get("momentum", 0),
+                "hour": entry_metrics.get("hour", 0),
+                "weekday": entry_metrics.get("weekday", 0),
+                "spread": entry_metrics.get("spread", 0),
+                "volatility": entry_metrics.get("volatility", 0),
+                "session": entry_metrics.get("session", "UNKNOWN"),
+                "h1_trend": entry_metrics.get("h1_trend", 0),
+                "h4_trend": entry_metrics.get("h4_trend", 0),
+                "result": None,
+                "close_price": None,
+                "close_pl": None,
+                "mfe": None,
+                "mae": None
+            }
+            stats["trades"].append(trade_record)
+
+    def record_close(self, trade_id: str, pair: str, setup_type: str, eqs: int, r: float, profit_loss: float,
+                     close_price: float = None, is_estimate: bool = False, trade_info: dict = None):
+        stats = self.stats[pair]
+        
+        if profit_loss > 0:
+            stats["wins"] += 1
+            stats["total_profit"] += profit_loss
+            result = "WIN"
+            self.adaptive_state.record_win(pair)
+        elif profit_loss < 0:
+            stats["losses"] += 1
+            stats["total_loss"] += abs(profit_loss)
+            result = "LOSS"
+            self.adaptive_state.record_loss(pair)
+        else:
+            stats["breakevens"] += 1
+            result = "BREAKEVEN"
+            if r > 0.02:
+                logger.warning(f"[CLOSE_AMBIGUOUS] {pair} | R={r:.2f} | P&L={profit_loss:+.2f} | Frais ont mangé le profit")
+
+        # Setup performance
+        setup_stats = stats["by_setup"][setup_type]
+        setup_stats["wins"] += 1 if result == "WIN" else 0
+        setup_stats["losses"] += 1 if result == "LOSS" else 0
+        setup_stats["total_r"] += r
+
+        setup_perf = stats["setup_performance"][setup_type]
+        setup_perf["wins"] += 1 if result == "WIN" else 0
+        setup_perf["losses"] += 1 if result == "LOSS" else 0
+        setup_perf["total_r"] += r
+
+        # Enregistrement MFE/MAE
+        tracker_trade = trade_tracker.get_trade(trade_id)
+        if tracker_trade:
+            mfe = tracker_trade.get("max_favorable_pips", 0)
+            mae = tracker_trade.get("max_adverse_pips", 0)
+            self.record_mfe_mae(pair, setup_type, eqs, mfe, mae, r)
+
+        logger.info(f"[CLOSE] {pair} | {setup_type} | {result} | R={r:.2f} | P&L={profit_loss:+.2f} | EQS={eqs}")
+
+        # Mise à jour des trades ouverts
+        for trade in stats["trades"]:
+            if trade.get("close_price") is None and trade.get("entry") == trade_info.get("entry"):
+                trade["result"] = result
+                trade["close_price"] = close_price
+                trade["close_pl"] = profit_loss
+                trade["mfe"] = mfe
+                trade["mae"] = mae
+                break
+
+    def record_mfe_mae(self, pair: str, setup_type: str, eqs: int, mfe: float, mae: float, r: float):
+        self.stats[pair]["mfe_mae"].append({
+            "setup_type": setup_type,
+            "eqs": eqs,
+            "mfe": mfe,
+            "mae": mae,
+            "r": r
+        })
+
+    def get_summary(self, pair: str) -> dict:
+        stats = self.stats.get(pair, {})
+        total_signals = stats.get("total_signals", 0)
+        accepted = stats.get("accepted", 0)
+        rejected = stats.get("rejected", 0)
+        wins = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        breakevens = stats.get("breakevens", 0)
+        total_profit = stats.get("total_profit", 0.0)
+        total_loss = stats.get("total_loss", 0.0)
+        total_closed = wins + losses + breakevens
+        win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0
+        profit_factor = total_profit / total_loss if total_loss > 0 else 0
+        expectancy = (total_profit - total_loss) / total_closed if total_closed > 0 else 0
+        return {
+            "pair": pair,
+            "total_signals": total_signals,
+            "accepted": accepted,
+            "rejected": rejected,
+            "wins": wins,
+            "losses": losses,
+            "breakevens": breakevens,
+            "total_closed": total_closed,
+            "win_rate": f"{win_rate*100:.1f}%",
+            "profit_factor": f"{profit_factor:.2f}",
+            "expectancy": f"${expectancy:.2f}"
+        }
+
+    def log_daily_summary(self):
+        logger.info("=" * 60)
+        logger.info("📊 RÉSUMÉ QUOTIDIEN")
+        logger.info("=" * 60)
+        total_signals = 0
+        total_accepted = 0
+        total_rejected = 0
+        total_wins = 0
+        total_losses = 0
+        total_be = 0
+        for pair in sorted(self.stats.keys()):
+            summary = self.get_summary(pair)
+            total_signals += summary["total_signals"]
+            total_accepted += summary["accepted"]
+            total_rejected += summary["rejected"]
+            total_wins += summary["wins"]
+            total_losses += summary["losses"]
+            total_be += summary["breakevens"]
+            logger.info(f"{pair:10} | Signaux:{summary['total_signals']:3} | Acceptés:{summary['accepted']:3} | Rejetés:{summary['rejected']:3} | Clôturés:{summary['total_closed']:3} | WR:{summary['win_rate']:>6} | PF:{summary['profit_factor']:>6} | Esp:{summary['expectancy']:>8}")
+        if total_signals > 0:
+            logger.info("-" * 60)
+            logger.info(f"TOTAL      | Signaux:{total_signals:3} | Acceptés:{total_accepted:3} | Rejetés:{total_rejected:3} | Clôturés:{total_wins + total_losses + total_be:3}")
+            if total_wins + total_losses > 0:
+                global_wr = total_wins / (total_wins + total_losses) * 100
+                logger.info(f"Win Rate global: {global_wr:.1f}% | Wins:{total_wins} | Losses:{total_losses} | BE:{total_be}")
+        self.log_rejection_summary()
+        logger.info("=" * 60)
+
+    def log_summary(self):
+        if time.time() - self.last_daily_summary >= 86400:
+            self.log_daily_summary()
+            self.last_daily_summary = time.time()
+        logger.info("=" * 80)
+        logger.info("📊 STATISTIQUES GLOBALES")
+        logger.info("=" * 80)
+        logger.info(f"{'Paire':10} | {'Signaux':>7} | {'Acceptés':>7} | {'Rejetés':>7} | {'Clôturés':>7} | {'Win Rate':>9} | {'PF':>6} | {'Espérance':>10}")
+        logger.info("-" * 80)
+        for pair in sorted(self.stats.keys()):
+            summary = self.get_summary(pair)
+            logger.info(
+                f"{pair:10} | {summary['total_signals']:>7} | {summary['accepted']:>7} | {summary['rejected']:>7} | "
+                f"{summary['total_closed']:>7} | {summary['win_rate']:>9} | {summary['profit_factor']:>6} | {summary['expectancy']:>10}"
+            )
+        logger.info("=" * 80)
+
+# ============================================================
 # FONCTIONS OANDA
 # ============================================================
 def v88_client():
@@ -1115,91 +1522,13 @@ def get_pip_value_for_pair(pair: str) -> float:
         return 0.0001
 
 # ============================================================
-# CLASSE TRADE TRACKER (MFE/MAE)
-# ============================================================
-class TradeTracker:
-    def __init__(self):
-        self.trades = {}
-
-    def add_trade(self, trade_id: str, pair: str, direction: str, entry_price: float, sl: float, tp: float, setup_type: str, eqs: int):
-        self.trades[trade_id] = {
-            "pair": pair,
-            "direction": direction,
-            "entry": entry_price,
-            "sl": sl,
-            "tp": tp,
-            "setup_type": setup_type,
-            "eqs": eqs,
-            "highest_price": entry_price,
-            "lowest_price": entry_price,
-            "mfe": 0.0,
-            "mae": 0.0,
-            "max_favorable_pips": 0.0,
-            "max_adverse_pips": 0.0,
-            "last_update": time.time(),
-            "closed": False,
-            "exit_price": None,
-            "exit_r": None,
-            "entry_time": datetime.utcnow().isoformat(),
-            "exit_time": None
-        }
-
-    def update_price(self, trade_id: str, current_price: float):
-        if trade_id not in self.trades or self.trades[trade_id]["closed"]:
-            return
-        trade = self.trades[trade_id]
-        direction = trade["direction"]
-        entry = trade["entry"]
-        pip_value = get_pip_value_for_pair(trade["pair"])
-        if direction == "BUY":
-            price_move = current_price - entry
-            if current_price > trade["highest_price"]:
-                trade["highest_price"] = current_price
-            if current_price < trade["lowest_price"]:
-                trade["lowest_price"] = current_price
-        else:
-            price_move = entry - current_price
-            if current_price < trade["lowest_price"]:
-                trade["lowest_price"] = current_price
-            if current_price > trade["highest_price"]:
-                trade["highest_price"] = current_price
-        mfe_pips = max(price_move, trade["mfe"]) / pip_value if pip_value > 0 else 0
-        mae_pips = min(price_move, trade["mae"]) / pip_value if pip_value > 0 else 0
-        trade["mfe"] = max(price_move, trade["mfe"])
-        trade["mae"] = min(price_move, trade["mae"])
-        trade["max_favorable_pips"] = max(trade["max_favorable_pips"], mfe_pips)
-        trade["max_adverse_pips"] = min(trade["max_adverse_pips"], mae_pips)
-        trade["last_update"] = time.time()
-
-    def close_trade(self, trade_id: str, exit_price: float, r_multiple: float):
-        if trade_id not in self.trades:
-            return
-        trade = self.trades[trade_id]
-        trade["closed"] = True
-        trade["exit_price"] = exit_price
-        trade["exit_r"] = r_multiple
-        trade["exit_time"] = datetime.utcnow().isoformat()
-        logger.info(f"[MFE/MAE] {trade['pair']} | {trade['setup_type']} | MFE={trade['max_favorable_pips']:.1f}pips | MAE={trade['max_adverse_pips']:.1f}pips | R={r_multiple:.2f} | EQS={trade['eqs']}")
-        stats.record_mfe_mae(trade["pair"], trade["setup_type"], trade["eqs"], trade["max_favorable_pips"], trade["max_adverse_pips"], r_multiple)
-
-    def get_trade(self, trade_id: str):
-        return self.trades.get(trade_id)
-
-# ============================================================
 # INSTANCIATION DES CLASSES
 # ============================================================
-class AdaptiveState:
-    # (défini plus haut, mais on le définit avant l'instanciation)
-    pass
-
-class TradingStatsV101:
-    # (défini plus haut, mais on le définit avant l'instanciation)
-    pass
-
 stats = TradingStatsV101()
 trade_tracker = TradeTracker()
 open_trade_details = {}
 stagnant_trade_tracker = {}
+last_execution_attempt = {}
 
 # ============================================================
 # EXÉCUTION ORDRE
@@ -1381,8 +1710,6 @@ def execute_oanda_trade_v981(pair: str, direction: str, entry_price: float, stop
         if is_oanda_in_maintenance(e):
             handle_api_error(e)
         return None
-
-last_execution_attempt = {}
 
 # ============================================================
 # MODIFICATIONS SL / TRAILING
@@ -1763,7 +2090,7 @@ def mark_signal_sent(pair: str, direction: str, entry_level: float, zone_start: 
     logger.info(f"✅ Signal marqué comme envoyé : {key}")
 
 # ============================================================
-# LOGGING HELPERS (simplifiés)
+# LOGGING HELPERS
 # ============================================================
 _seen_log_keys_fvg_recent = set()
 _seen_log_keys_fvg_added = set()
