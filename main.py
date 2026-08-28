@@ -29,6 +29,9 @@ load_dotenv()
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 
+BASE_ADX_MIN_THRESHOLD = float(os.getenv("ADX_MIN_THRESHOLD", "23.0"))
+BASE_EQS_MIN_THRESHOLD = float(os.getenv("EQS_MIN_THRESHOLD", "55.0"))
+
 # =========================
 # CONFIGURATION GÉNÉRALE
 # =========================
