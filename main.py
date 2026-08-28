@@ -1,5 +1,5 @@
 # ============================================================
-# main.py - Version PROD "2R Strict"
+# main.py - Version PROD "2R Strict" (v133)
 # Stratégie : Biais H4/H1 → Retracement → Confirmation → 2R
 # ============================================================
 
@@ -56,6 +56,9 @@ MAX_MARGIN_USAGE_PER_TRADE_PERCENT = 5.0
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
 EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
+
+# --- NOUVEAU : marge de sécurité pour le slippage ---
+RR_MIN_EXECUTION = 2.10   # exigé avant ordre, pour absorber le slippage normal
 
 PIP_SIZE_V88 = {
     "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
@@ -446,7 +449,7 @@ def detect_bos(df: pd.DataFrame) -> dict:
     return {"type": None}
 
 def detect_setups(pair: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, bias: str) -> List[Dict]:
-    """Détecte les setups FVG_RETEST et WICK_REJECTION dans le sens du biais."""
+    """Détecte uniquement les setups FVG_RETEST et WICK_REJECTION dans le sens du biais."""
     setups = []
     fvgs = detect_fvg(df_m15)
     for f in fvgs:
@@ -456,7 +459,7 @@ def detect_setups(pair: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, bias: st
     for w in wicks:
         if w["direction"] == bias:
             setups.append({"type": "WICK_REJECTION", "direction": bias, "entry_level": w["price_level"]})
-    # Suppression du BOS (BISI) car il s'agit d'un bypass potentiel
+    # Plus de BOS/BISI – strictement retracement + trigger
     return setups
 
 # ============================================================
@@ -539,6 +542,10 @@ def has_enough_room_to_tp(df_h1: pd.DataFrame, direction: str, entry: float, tp:
     return True
 
 def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame, df_h1: pd.DataFrame, current_price: float) -> dict:
+    # --- Filtrage du type de setup ---
+    if entry.get('type') not in ('FVG_RETEST', 'WICK_REJECTION'):
+        return {"passed": False, "reason": f"type non autorisé: {entry.get('type')}"}
+
     entry_level = float(entry["entry_level"])
     atr_price = calculate_atr(df_m15)
     # Distance max = 1.5 ATR
@@ -548,9 +555,17 @@ def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame,
     if not confirm_ok:
         return {"passed": False, "reason": f"confirmation: {msg}"}
     sl, tp, risk = calculate_sl_tp_structural(df_m15, direction, entry_level, pair)
+
+    # --- Vérification de la distance minimale du SL (structurel) ---
+    pip = 0.01 if "JPY" in pair else 0.0001
+    min_sl_distance = pip * 10   # 10 pips minimum absolu
+    if abs(entry_level - sl) < min_sl_distance:
+        return {"passed": False, "reason": f"SL trop proche ({abs(entry_level-sl):.5f} < {min_sl_distance:.5f})"}
+
     if not has_enough_room_to_tp(df_h1, direction, entry_level, tp):
         return {"passed": False, "reason": "RR réel impossible"}
     rr = abs(tp - entry_level) / abs(sl - entry_level)
+    # --- RR < 2.0 → rejet (déjà fait, mais redondant) ---
     if rr < 2.0:
         return {"passed": False, "reason": f"RR={rr:.2f} < 2.0"}
     return {
@@ -700,9 +715,9 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
         return None
     rr = reward / risk
 
-    # --- RÈGLE STRICTE : RR < 2.0 → REJET ---
-    if rr < 2.0:
-        logger.warning(f"[ORDER] RR={rr:.2f} < 2.0 → rejet")
+    # --- RÈGLE STRICTE : RR < RR_MIN_EXECUTION (2.10) → REJET ---
+    if rr < RR_MIN_EXECUTION:
+        logger.warning(f"[ORDER] RR={rr:.2f} < {RR_MIN_EXECUTION} → rejet")
         return None
 
     # Vérifications
@@ -722,25 +737,12 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
         return None
 
     pip = get_pip_value(pair)
-    min_sl_distance = pip * 10
-    risk = abs(expected_entry - sl)
+    min_sl_distance = pip * 10   # distance minimale absolue
+
+    # --- Vérification que le SL est suffisamment éloigné (structurel) ---
     if risk < min_sl_distance:
-        logger.warning(f"[ORDER] SL trop proche, ajusté à {min_sl_distance:.5f}")
-        if direction == "BUY":
-            sl = expected_entry - min_sl_distance
-            tp = expected_entry + 2*min_sl_distance
-        else:
-            sl = expected_entry + min_sl_distance
-            tp = expected_entry - 2*min_sl_distance
-        sl = float(round_price(pair, sl))
-        tp = float(round_price(pair, tp))
-        # Recalcul du RR après ajustement
-        risk = abs(expected_entry - sl)
-        reward = abs(tp - expected_entry)
-        rr = reward / risk if risk > 0 else 0
-        if rr < 2.0:
-            logger.warning(f"[ORDER] RR après ajustement SL = {rr:.2f} < 2.0 → rejet")
-            return None
+        logger.warning(f"[ORDER] SL trop proche ({risk:.5f} < {min_sl_distance:.5f}) → rejet")
+        return None
 
     # Risque en ASIA réduit (mais pas de bypass, juste un ajustement de sizing)
     hour = datetime.utcnow().hour
@@ -1133,7 +1135,7 @@ def send_telegram(pair, direction, entry, sl, tp, rr, setup_type):
 # ============================================================
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du Bot 2R Strict")
-    logger.info("✅ SL structurel | TP = 2R (immuable) | RR strict ≥ 2 avant ordre")
+    logger.info("✅ SL structurel | TP = 2R (immuable) | RR ≥ 2.10 avant ordre")
     logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
