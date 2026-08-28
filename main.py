@@ -708,33 +708,33 @@ class TradingStatsV101:
         else:
             return "NEUTRAL"
 
-    def detect_retracement_zones(df: pd.DataFrame, direction: str, current_price: float, pair: str) -> List[Dict]:
-    """
-    Retourne les zones (FVG / imbalance) dans le sens du biais, proches du prix.
-    Une zone est valide si le prix actuel est dans ou proche (< 1.5 ATR) de la zone.
-    """
-    zones = []
-    fvgs = detect_fvg_advanced(df, max_lookback_hours=36)
-    # On ne garde que les FVG dans le sens du biais
-    for fvg in fvgs:
-        if fvg.get("direction", "").upper() != direction:
-            continue
-        low = float(fvg["low_level"])
-        high = float(fvg["high_level"])
-        mid = (low + high) / 2
-        distance = abs(current_price - mid)
-        atr = calculate_atr(df)
-        if distance <= atr * 1.5:
-            zones.append({
-                "type": "FVG",
-                "direction": direction,
-                "entry_zone": (low, high),
-                "midpoint": mid,
-                "fvg": fvg,
-                "distance_pips": price_to_pips(distance, pair)
-            })
-    # On peut aussi ajouter les imbalances détectées par detect_imbalances() si besoin
-    return zones
+        def detect_retracement_zones(df: pd.DataFrame, direction: str, current_price: float, pair: str) -> List[Dict]:
+        """
+        Retourne les zones (FVG / imbalance) dans le sens du biais, proches du prix.
+        Une zone est valide si le prix actuel est dans ou proche (< 1.5 ATR) de la zone.
+        """
+        zones = []
+        fvgs = detect_fvg_advanced(df, max_lookback_hours=36)
+        # On ne garde que les FVG dans le sens du biais
+        for fvg in fvgs:
+            if fvg.get("direction", "").upper() != direction:
+                continue
+            low = float(fvg["low_level"])
+            high = float(fvg["high_level"])
+            mid = (low + high) / 2
+            distance = abs(current_price - mid)
+            atr = calculate_atr(df)
+            if distance <= atr * 1.5:
+                zones.append({
+                    "type": "FVG",
+                    "direction": direction,
+                    "entry_zone": (low, high),
+                    "midpoint": mid,
+                    "fvg": fvg,
+                    "distance_pips": price_to_pips(distance, pair)
+                })
+        # On peut aussi ajouter les imbalances détectées par detect_imbalances() si besoin
+        return zones
 
     def has_enough_room_to_tp(
     df_h1: pd.DataFrame,
