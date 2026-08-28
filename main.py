@@ -1,6 +1,6 @@
 # ============================================================
 # main.py - Version PROD "2R Strict"
-# Stratégie simplifiée : Biais H4/H1 → Retracement → Confirmation → 2R
+# Stratégie : Biais H4/H1 → Retracement → Confirmation → 2R
 # ============================================================
 
 import os
@@ -446,6 +446,7 @@ def detect_bos(df: pd.DataFrame) -> dict:
     return {"type": None}
 
 def detect_setups(pair: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, bias: str) -> List[Dict]:
+    """Détecte les setups FVG_RETEST et WICK_REJECTION dans le sens du biais."""
     setups = []
     fvgs = detect_fvg(df_m15)
     for f in fvgs:
@@ -455,13 +456,7 @@ def detect_setups(pair: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, bias: st
     for w in wicks:
         if w["direction"] == bias:
             setups.append({"type": "WICK_REJECTION", "direction": bias, "entry_level": w["price_level"]})
-    bos = detect_bos(df_h1)
-    if bos["type"] and bos["type"].startswith("BOS_"):
-        bos_dir = "BUY" if "BUY" in bos["type"] else "SELL"
-        if bos_dir == bias:
-            for f in fvgs:
-                if f["direction"] == bias and abs(f["midpoint"] - bos["level"]) < 0.0003:
-                    setups.append({"type": "BISI", "direction": bias, "entry_level": f["midpoint"], "bosis": bos})
+    # Suppression du BOS (BISI) car il s'agit d'un bypass potentiel
     return setups
 
 # ============================================================
@@ -705,17 +700,10 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
         return None
     rr = reward / risk
 
-    # RR doit être >= 2.0
+    # --- RÈGLE STRICTE : RR < 2.0 → REJET ---
     if rr < 2.0:
-        logger.warning(f"[ORDER] RR={rr:.2f} < 2.0, ajustement du TP")
-        # Ajuster TP pour atteindre 2R
-        if direction == "BUY":
-            tp = expected_entry + 2*risk
-        else:
-            tp = expected_entry - 2*risk
-        tp = float(round_price(pair, tp))
-        logger.info(f"[ORDER] TP ajusté à {tp:.5f} pour RR=2.0")
-        rr = 2.0
+        logger.warning(f"[ORDER] RR={rr:.2f} < 2.0 → rejet")
+        return None
 
     # Vérifications
     if ONE_TRADE_PER_PAIR and has_open_trade(pair):
@@ -746,8 +734,15 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
             tp = expected_entry - 2*min_sl_distance
         sl = float(round_price(pair, sl))
         tp = float(round_price(pair, tp))
+        # Recalcul du RR après ajustement
+        risk = abs(expected_entry - sl)
+        reward = abs(tp - expected_entry)
+        rr = reward / risk if risk > 0 else 0
+        if rr < 2.0:
+            logger.warning(f"[ORDER] RR après ajustement SL = {rr:.2f} < 2.0 → rejet")
+            return None
 
-    # Risque en ASIA réduit
+    # Risque en ASIA réduit (mais pas de bypass, juste un ajustement de sizing)
     hour = datetime.utcnow().hour
     is_asia = (21 <= hour or hour < 7)
     risk_pct = 0.5 if is_asia else RISK_PERCENTAGE
@@ -820,7 +815,7 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
         if actual_entry is None:
             actual_entry = expected_entry
 
-        # Recalcul du RR avec le prix de fill réel
+        # Recalcul du RR réel à titre informatif (non utilisé pour modifier le TP)
         risk_real = abs(actual_entry - sl)
         reward_real = abs(tp - actual_entry)
         rr_real = reward_real / risk_real if risk_real > 0 else 0
@@ -828,24 +823,8 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
 
         logger.info(f"[FILL_REAL] {pair} | ID={trade_id} | ENTRY_EXPECTED={expected_entry:.5f} | ENTRY_FILLED={actual_entry:.5f} | SLIPPAGE={slippage:+.1f} pips | RR={rr_real:.2f}")
 
-        # Si RR réel < 2.0, on ajuste le TP pour rétablir 2R
-        if rr_real < 2.0 - 0.05:
-            logger.warning(f"[SLIPPAGE] RR réel {rr_real:.2f} < 2.0, ajustement du TP")
-            if direction == "BUY":
-                new_tp = actual_entry + 2*risk_real
-            else:
-                new_tp = actual_entry - 2*risk_real
-            new_tp = float(round_price(pair, new_tp))
-            # Modification du TP via API
-            try:
-                data = {"takeProfit": {"price": round_price(pair, new_tp), "timeInForce": "GTC"}}
-                r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
-                api.request(r)
-                tp = new_tp
-                logger.info(f"[ORDER] TP ajusté à {tp:.5f} pour RR=2.0")
-            except Exception as e:
-                logger.error(f"[ORDER] Échec ajustement TP: {e}")
-                # On pourrait annuler le trade, mais on continue
+        if rr_real < 2.0:
+            logger.warning(f"[SLIPPAGE] RR réel {rr_real:.2f} < 2.0 (TP inchangé)")
 
         # Enregistrement du trade
         trade_tracker.add_trade(trade_id, pair, direction, actual_entry, sl, tp, setup_type, eqs)
@@ -879,9 +858,7 @@ def modify_sl(trade_id: str, pair: str, new_sl: float, adjust_tp: bool = False) 
             return False
         api = v88_client()
         data = {"stopLoss": {"price": round_price(pair, new_sl), "timeInForce": "GTC"}}
-        if adjust_tp:
-            # Ne pas modifier le TP (conservé à 2R initial)
-            pass
+        # TP ne doit pas être modifié
         r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
         api.request(r)
         logger.info(f"[BE] SL modifié pour {trade_id} -> {new_sl:.5f}")
@@ -1156,7 +1133,7 @@ def send_telegram(pair, direction, entry, sl, tp, rr, setup_type):
 # ============================================================
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du Bot 2R Strict")
-    logger.info("✅ SL structurel | TP = 2R | Pas de réduction du TP | RR vérifié après fill")
+    logger.info("✅ SL structurel | TP = 2R (immuable) | RR strict ≥ 2 avant ordre")
     logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
