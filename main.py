@@ -548,26 +548,64 @@ def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame,
 
     entry_level = float(entry["entry_level"])
     atr_price = calculate_atr(df_m15)
-    # Distance max = 1.5 ATR
+    
+    # --- 1. DISTANCE (log enrichi) ---
+    distance_ratio = abs(current_price - entry_level) / atr_price if atr_price > 0 else 999
     if abs(current_price - entry_level) > atr_price * 1.5:
-        return {"passed": False, "reason": "prix hors zone"}
+        return {
+            "passed": False,
+            "reason": f"prix hors zone (target={entry_level:.5f}, price={current_price:.5f}, dist={distance_ratio:.2f}ATR, max=1.5ATR)"
+        }
+    
+    # --- 2. CONFIRMATION (log enrichi) ---
     confirm_ok, msg = get_confirmation_signal(df_m15, direction)
     if not confirm_ok:
-        return {"passed": False, "reason": f"confirmation: {msg}"}
+        # Calcul des métriques de confirmation pour le log
+        last = df_m15.iloc[-1]
+        prev = df_m15.iloc[-2]
+        total = last["high"] - last["low"]
+        if total == 0:
+            rejet_ratio = 0.0
+        else:
+            if direction == "BUY":
+                rejet_ratio = (min(last["open"], last["close"]) - last["low"]) / total
+            else:
+                rejet_ratio = (last["high"] - max(last["open"], last["close"])) / total
+        micro_break = last["close"] > prev["high"] if direction == "BUY" else last["close"] < prev["low"]
+        return {
+            "passed": False,
+            "reason": f"confirmation: {msg} (rejet={rejet_ratio:.2f}, micro_break={micro_break})"
+        }
+    
+    # --- Calcul SL/TP ---
     sl, tp, risk = calculate_sl_tp_structural(df_m15, direction, entry_level, pair)
-
-    # --- Vérification de la distance minimale du SL (structurel) ---
     pip = 0.01 if "JPY" in pair else 0.0001
-    min_sl_distance = pip * 10   # 10 pips minimum absolu
+    min_sl_distance = pip * 10
+    
+    # --- 3. SL trop proche (log enrichi) ---
     if abs(entry_level - sl) < min_sl_distance:
-        return {"passed": False, "reason": f"SL trop proche ({abs(entry_level-sl):.5f} < {min_sl_distance:.5f})"}
-
+        return {
+            "passed": False,
+            "reason": f"SL trop proche ({abs(entry_level-sl):.5f} < {min_sl_distance:.5f})"
+        }
+    
+    # --- 4. RR réel impossible (log enrichi) ---
     if not has_enough_room_to_tp(df_h1, direction, entry_level, tp):
-        return {"passed": False, "reason": "RR réel impossible"}
+        return {
+            "passed": False,
+            "reason": f"RR réel impossible (swing H1 bloque le TP à {tp:.5f})"
+        }
+    
     rr = abs(tp - entry_level) / abs(sl - entry_level)
-    # --- RR < 2.0 → rejet (déjà fait, mais redondant) ---
+    
+    # --- 5. RR < 2.0 (log enrichi) ---
     if rr < 2.0:
-        return {"passed": False, "reason": f"RR={rr:.2f} < 2.0"}
+        return {
+            "passed": False,
+            "reason": f"RR={rr:.3f} < 2.0 (SL={sl:.5f}, TP={tp:.5f}, entry={entry_level:.5f})"
+        }
+    
+    # --- SUCCÈS ---
     return {
         "passed": True,
         "entry_level": entry_level,
@@ -1043,6 +1081,19 @@ def advanced_main():
         logger.error(f"❌ Échec API: {e}")
         return
 
+    # Petite fonction interne pour diagnostiquer la structure HTF
+    def _struct_brief(df, label):
+        highs, lows = detect_swing_points(df, 5)
+        if len(highs) >= 2 and len(lows) >= 2:
+            hh = highs[-1]["price"] > highs[-2]["price"]
+            hl = lows[-1]["price"] > lows[-2]["price"]
+            lh = highs[-1]["price"] < highs[-2]["price"]
+            ll = lows[-1]["price"] < lows[-2]["price"]
+            if hh and hl: return f"{label} BULLISH"
+            if lh and ll: return f"{label} BEARISH"
+            return f"{label} MIXED (HH={hh},HL={hl},LH={lh},LL={ll})"
+        return f"{label} INDETERMINE"
+
     for pair in PAIR_LIST:
         if has_open_trade(pair):
             logger.info(f"[INFO] {pair}: trade déjà ouvert")
@@ -1057,14 +1108,21 @@ def advanced_main():
 
             current_price = float(df_m15["close"].iloc[-1])
             bias = get_directional_bias(df_h4, df_h1)
+            
+            # --- LOG DIAGNOSTIC STRUCTURE NEUTRAL (enrichi) ---
             if bias == "NEUTRAL":
-                logger.info(f"{pair} | Régime NEUTRAL → pas de trade")
+                logger.info(f"{pair} | BIAS_DIAG: H4={_struct_brief(df_h4,'H4')} | H1={_struct_brief(df_h1,'H1')} | -> NEUTRAL")
                 continue
 
             setups = detect_setups(pair, df_m15, df_h1, bias)
+            
+            # --- LOG DES SETUPS DÉTECTÉS (enrichi) ---
             if not setups:
                 logger.info(f"{pair} | Aucun setup {bias} détecté")
                 continue
+            else:
+                setup_summary = ", ".join([f"{s.get('type')}@{round(s.get('entry_level',0),5)}" for s in setups[:3]])
+                logger.info(f"{pair} | SETUPS_FOUND: {len(setups)} | Types: {setup_summary}{' ...' if len(setups)>3 else ''}")
 
             valid_trades = []
             for entry in setups:
@@ -1105,7 +1163,6 @@ def advanced_main():
 
             if trade_id:
                 logger.info(f"✅ {pair} trade exécuté (ID {trade_id})")
-                # Envoi Telegram simplifié
                 send_telegram(pair, bias, entry_level, stop_loss, take_profit, rr, best["entry"]["type"])
             else:
                 logger.error(f"❌ {pair} échec exécution")
@@ -1114,7 +1171,6 @@ def advanced_main():
             logger.error(f"💥 Erreur sur {pair}: {e}")
 
     stats.log_summary()
-
 # ============================================================
 # TELEGRAM (optionnel)
 # ============================================================
