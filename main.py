@@ -466,23 +466,46 @@ def detect_setups(pair: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, bias: st
 # STRATÉGIE SIMPLIFIÉE
 # ============================================================
 def get_directional_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> str:
-    def bias_from_structure(df):
+    def bias_from_structure(df, label=""):
         highs, lows = detect_swing_points(df, 5)
         if len(highs) < 2 or len(lows) < 2:
-            return "NEUTRAL"
+            return "NEUTRAL", 0, 0
         hh = highs[-1]["price"] > highs[-2]["price"]
         hl = lows[-1]["price"] > lows[-2]["price"]
         lh = highs[-1]["price"] < highs[-2]["price"]
         ll = lows[-1]["price"] < lows[-2]["price"]
-        if hh and hl:
-            return "BUY"
-        if lh and ll:
-            return "SELL"
-        return "NEUTRAL"
-    b4 = bias_from_structure(df_h4)
-    b1 = bias_from_structure(df_h1)
+        
+        # NOUVEAU : comptage des signaux (2/3 suffisent)
+        buy_signals = sum([hh, hl])
+        sell_signals = sum([lh, ll])
+        
+        if buy_signals >= 2 and sell_signals <= 1:
+            return "BUY", buy_signals, sell_signals
+        if sell_signals >= 2 and buy_signals <= 1:
+            return "SELL", buy_signals, sell_signals
+        return "NEUTRAL", buy_signals, sell_signals
+
+    b4, b4_buy, b4_sell = bias_from_structure(df_h4, "H4")
+    b1, b1_buy, b1_sell = bias_from_structure(df_h1, "H1")
+
+    # --- Cas 1 : alignement parfait ---
     if b4 == b1 and b4 != "NEUTRAL":
         return b4
+
+    # --- Cas 2 : H4 fort contre H1 faible (retracement) ---
+    if b4 != "NEUTRAL" and b1 != "NEUTRAL" and b4 != b1:
+        adx_h1 = calculate_adx(df_h1)
+        if b4 == "BUY" and adx_h1 > 30 and b1 == "SELL":
+            logger.debug(f"[BIAS] H4 BUY fort (ADX={adx_h1:.1f}) vs H1 SELL → accepté")
+            return "BUY"
+        if b4 == "SELL" and adx_h1 > 30 and b1 == "BUY":
+            logger.debug(f"[BIAS] H4 SELL fort (ADX={adx_h1:.1f}) vs H1 BUY → accepté")
+            return "SELL"
+
+    # --- Cas 3 : H4 NEUTRAL mais H1 directionnel ---
+    if b4 == "NEUTRAL" and b1 != "NEUTRAL":
+        return b1
+
     return "NEUTRAL"
 
 def get_confirmation_signal(df_m15: pd.DataFrame, direction: str) -> Tuple[bool, str]:
@@ -501,15 +524,21 @@ def get_confirmation_signal(df_m15: pd.DataFrame, direction: str) -> Tuple[bool,
     else:
         rejet = upper > total * 0.4
         micro = last["close"] < prev["low"]
+    
+    # --- NOUVEAU : rejet OU micro-break ---
     if rejet and micro:
         return True, "rejet + micro-break OK"
-    
     if rejet:
         return True, "rejet OK (sans micro-break)"
-
-    if rejet:
+    if micro:
         return True, "micro-break OK (sans rejet)"
-    return False, f"rejet={rejet}, micro_break={micro}"
+    
+    reasons = []
+    if not rejet:
+        reasons.append("pas de rejet")
+    if not micro:
+        reasons.append("pas de micro-break")
+    return False, ", ".join(reasons)
 
 def calculate_sl_tp_structural(df_m15: pd.DataFrame, direction: str, entry: float, pair: str) -> Tuple[float, float, float]:
     highs, lows = detect_swing_points(df_m15, 5)
@@ -550,15 +579,15 @@ def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame,
     entry_level = float(entry["entry_level"])
     atr_price = calculate_atr(df_m15)
     
-    # --- 1. DISTANCE (log enrichi) ---
+    # --- 1. DISTANCE (2.0 ATR au lieu de 1.5) ---
     distance_ratio = abs(current_price - entry_level) / atr_price if atr_price > 0 else 999
     if abs(current_price - entry_level) > atr_price * 2.0:
         return {
             "passed": False,
-            "reason": f"prix hors zone (target={entry_level:.5f}, price={current_price:.5f}, dist={distance_ratio:.2f}ATR, max=1.5ATR)"
+            "reason": f"prix hors zone (target={entry_level:.5f}, price={current_price:.5f}, dist={distance_ratio:.2f}ATR, max=2.0ATR)"
         }
     
-    # --- 2. CONFIRMATION (log enrichi) ---
+    # --- 2. CONFIRMATION (rejet OU micro-break) ---
     confirm_ok, msg = get_confirmation_signal(df_m15, direction)
     if not confirm_ok:
         # Calcul des métriques de confirmation pour le log
@@ -583,14 +612,14 @@ def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame,
     pip = 0.01 if "JPY" in pair else 0.0001
     min_sl_distance = pip * 10
     
-    # --- 3. SL trop proche (log enrichi) ---
+    # --- 3. SL trop proche ---
     if abs(entry_level - sl) < min_sl_distance:
         return {
             "passed": False,
             "reason": f"SL trop proche ({abs(entry_level-sl):.5f} < {min_sl_distance:.5f})"
         }
     
-    # --- 4. RR réel impossible (log enrichi) ---
+    # --- 4. RR réel impossible ---
     if not has_enough_room_to_tp(df_h1, direction, entry_level, tp):
         return {
             "passed": False,
@@ -599,7 +628,7 @@ def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame,
     
     rr = abs(tp - entry_level) / abs(sl - entry_level)
     
-    # --- 5. RR < 2.0 (log enrichi) ---
+    # --- 5. RR < 2.0 ---
     if rr < 2.0:
         return {
             "passed": False,
@@ -622,7 +651,6 @@ def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame,
             "session": get_session_label()
         }
     }
-
 def get_session_label() -> str:
     h = datetime.utcnow().hour
     if 7 <= h < 16:
