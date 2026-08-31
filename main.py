@@ -1220,7 +1220,7 @@ def send_telegram(pair, direction, entry, sl, tp, rr, setup_type):
 # ============================================================
 if __name__ == "__main__":
     logger.info("🚀 Démarrage du Bot 2R Strict")
-    logger.info("✅ SL structurel | TP = 2R (immuable) | RR ≥ 2.10 avant ordre")
+    logger.info("✅ SL structurel | TP = 2R (immuable) | RR ≥ 2.0 avant ordre")
     logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
