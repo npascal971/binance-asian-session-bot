@@ -58,7 +58,7 @@ OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
 EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
 
 # --- NOUVEAU : marge de sécurité pour le slippage ---
-RR_MIN_EXECUTION = 2.10   # exigé avant ordre, pour absorber le slippage normal
+RR_MIN_EXECUTION = 2.0   # exigé avant ordre, pour absorber le slippage normal
 
 PIP_SIZE_V88 = {
     "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
@@ -503,12 +503,13 @@ def get_confirmation_signal(df_m15: pd.DataFrame, direction: str) -> Tuple[bool,
         micro = last["close"] < prev["low"]
     if rejet and micro:
         return True, "rejet + micro-break OK"
-    reasons = []
-    if not rejet:
-        reasons.append("pas de rejet")
-    if not micro:
-        reasons.append("pas de micro-break")
-    return False, ", ".join(reasons)
+    
+    if rejet:
+        return True, "rejet OK (sans micro-break)"
+
+    if rejet:
+        return True, "micro-break OK (sans rejet)"
+    return False, f"rejet={rejet}, micro_break={micro}"
 
 def calculate_sl_tp_structural(df_m15: pd.DataFrame, direction: str, entry: float, pair: str) -> Tuple[float, float, float]:
     highs, lows = detect_swing_points(df_m15, 5)
@@ -551,7 +552,7 @@ def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame,
     
     # --- 1. DISTANCE (log enrichi) ---
     distance_ratio = abs(current_price - entry_level) / atr_price if atr_price > 0 else 999
-    if abs(current_price - entry_level) > atr_price * 1.5:
+    if abs(current_price - entry_level) > atr_price * 2.0:
         return {
             "passed": False,
             "reason": f"prix hors zone (target={entry_level:.5f}, price={current_price:.5f}, dist={distance_ratio:.2f}ATR, max=1.5ATR)"
