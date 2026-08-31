@@ -543,16 +543,29 @@ def get_confirmation_signal(df_m15: pd.DataFrame, direction: str) -> Tuple[bool,
 def calculate_sl_tp_structural(df_m15: pd.DataFrame, direction: str, entry: float, pair: str) -> Tuple[float, float, float]:
     highs, lows = detect_swing_points(df_m15, 5)
     pip = 0.01 if "JPY" in pair else 0.0001
+    atr = calculate_atr(df_m15)
+    
     if direction == "BUY":
         if lows:
             sl = min(lows[-1]["price"], entry - 5*pip)
         else:
-            sl = entry - calculate_atr(df_m15) * 1.5
+            sl = entry - atr * 1.5
     else:
         if highs:
             sl = max(highs[-1]["price"], entry + 5*pip)
         else:
-            sl = entry + calculate_atr(df_m15) * 1.5
+            sl = entry + atr * 1.5
+    
+    # --- NOUVEAU : LIMITER LE SL À 2 × ATR ---
+    max_sl_distance = atr * 2.0
+    current_risk = abs(entry - sl)
+    if current_risk > max_sl_distance:
+        if direction == "BUY":
+            sl = entry - max_sl_distance
+        else:
+            sl = entry + max_sl_distance
+        logger.debug(f"[SL] SL structurel trop large ({current_risk:.5f}), limité à {max_sl_distance:.5f}")
+    
     risk = abs(entry - sl)
     tp = entry + 2*risk if direction == "BUY" else entry - 2*risk
     sl = float(round_price(pair, sl))
@@ -561,14 +574,20 @@ def calculate_sl_tp_structural(df_m15: pd.DataFrame, direction: str, entry: floa
 
 def has_enough_room_to_tp(df_h1: pd.DataFrame, direction: str, entry: float, tp: float) -> bool:
     highs, lows = detect_swing_points(df_h1, 5)
+    total_distance = abs(tp - entry)
     if direction == "BUY":
         for h in highs:
             if entry < h["price"] < tp:
-                return False
+                # Assouplissement : on accepte si le swing est petit (< 30% de la distance)
+                swing_size = h["price"] - entry
+                if swing_size > total_distance * 0.3:
+                    return False
     else:
         for l in lows:
             if tp < l["price"] < entry:
-                return False
+                swing_size = entry - l["price"]
+                if swing_size > total_distance * 0.3:
+                    return False
     return True
 
 def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame, df_h1: pd.DataFrame, current_price: float) -> dict:
@@ -1219,8 +1238,11 @@ def send_telegram(pair, direction, entry, sl, tp, rr, setup_type):
 # BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot 2R Strict")
+    logger.info("🚀 Démarrage du Bot 2R Strict - Version Optimisée")
     logger.info("✅ SL structurel | TP = 2R (immuable) | RR ≥ 2.0 avant ordre")
+    logger.info("✅ Structure H1 assouplie (2/3) + tolérance retracement H4 fort")
+    logger.info("✅ Distance max 2.0 ATR | Confirmation rejet OU micro-break")
+    logger.info("✅ SL limité à 2×ATR | has_enough_room_to_tp() assoupli")
     logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
@@ -1249,7 +1271,12 @@ if __name__ == "__main__":
                 logger.info("⏰ Scan des signaux")
                 last_signal_scan = time.time()
                 if current_open < MAX_TRADES_TOTAL:
-                    advanced_main()
+                    # --- AJOUT : vérification du marché ouvert ---
+                    now_utc = datetime.utcnow()
+                    if not is_market_open(now_utc):
+                        logger.info(f"Marché fermé ({now_utc.strftime('%A %H:%M')} UTC) → pas de scan")
+                    else:
+                        advanced_main()
                 else:
                     logger.info("Limite trades atteinte")
 
