@@ -376,7 +376,8 @@ def get_last_rsi(prices: pd.Series, period: int = 14) -> float:
     except:
         return 50.0
 
-def detect_swing_points(df: pd.DataFrame, lookback: int = SWING_LOOKBACK) -> tuple:
+def detect_swing_points(df: pd.DataFrame, lookback: int = 5) -> tuple:
+    """Détecte les swings sur la base des extrêmes de prix."""
     highs, lows = [], []
     for i in range(lookback, len(df) - lookback):
         if df["high"].iloc[i] == df["high"].iloc[i-lookback:i+lookback+1].max():
@@ -470,44 +471,59 @@ def get_directional_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> str:
         highs, lows = detect_swing_points(df, 5)
         if len(highs) < 2 or len(lows) < 2:
             return "NEUTRAL", 0, 0
-        hh = highs[-1]["price"] > highs[-2]["price"]
-        hl = lows[-1]["price"] > lows[-2]["price"]
-        lh = highs[-1]["price"] < highs[-2]["price"]
-        ll = lows[-1]["price"] < lows[-2]["price"]
         
-        # NOUVEAU : comptage des signaux (2/3 suffisent)
+        hh = highs[-1]["price"] > highs[-2]["price"]
+        hl = lows[-1]["price"] > highs[-2]["price"]  # ← CORRECTION : comparer avec le dernier plus bas, pas le précédent
+        lh = highs[-1]["price"] < highs[-2]["price"]
+        ll = lows[-1]["price"] < lows[-2]["price"]   # ← CORRECTION : comparer avec le dernier plus bas, pas le précédent
+        
         buy_signals = sum([hh, hl])
         sell_signals = sum([lh, ll])
         
-        if buy_signals >= 2 and sell_signals <= 1:
+        if buy_signals >= 2:
             return "BUY", buy_signals, sell_signals
-        if sell_signals >= 2 and buy_signals <= 1:
+        if sell_signals >= 2:
             return "SELL", buy_signals, sell_signals
+        if buy_signals == 1:
+            return "BUY_WEAK", buy_signals, sell_signals
+        if sell_signals == 1:
+            return "SELL_WEAK", buy_signals, sell_signals
         return "NEUTRAL", buy_signals, sell_signals
 
     b4, b4_buy, b4_sell = bias_from_structure(df_h4, "H4")
     b1, b1_buy, b1_sell = bias_from_structure(df_h1, "H1")
+    adx_h1 = calculate_adx(df_h1)
+    momentum_h1 = calculate_momentum(df_h1)
 
-    # --- Cas 1 : alignement parfait ---
-    if b4 == b1 and b4 != "NEUTRAL":
-        return b4
+    # --- RÈGLE 1 : H4 doit être confirmé (BUY ou SELL) ---
+    if b4 not in ("BUY", "SELL"):
+        result = "NEUTRAL"
+    
+    # --- RÈGLE 2 : H4 BUY → H1 BUY ou BUY_WEAK ---
+    elif b4 == "BUY" and b1 in ("BUY", "BUY_WEAK"):
+        result = "BUY"
+    
+    # --- RÈGLE 3 : H4 SELL → H1 SELL ou SELL_WEAK ---
+    elif b4 == "SELL" and b1 in ("SELL", "SELL_WEAK"):
+        result = "SELL"
+    
+    # --- RÈGLE 4 : H4 BUY vs H1 SELL_WEAK (retracement) ---
+    elif b4 == "BUY" and b1 == "SELL_WEAK" and adx_h1 > 25 and momentum_h1 > 0.3:
+        result = "BUY"
+    
+    # --- RÈGLE 5 : H4 SELL vs H1 BUY_WEAK (retracement) ---
+    elif b4 == "SELL" and b1 == "BUY_WEAK" and adx_h1 > 25 and momentum_h1 < -0.3:
+        result = "SELL"
+    
+    else:
+        result = "NEUTRAL"
 
-    # --- Cas 2 : H4 fort contre H1 faible (retracement) ---
-    if b4 != "NEUTRAL" and b1 != "NEUTRAL" and b4 != b1:
-        adx_h1 = calculate_adx(df_h1)
-        if b4 == "BUY" and adx_h1 > 30 and b1 == "SELL":
-            logger.debug(f"[BIAS] H4 BUY fort (ADX={adx_h1:.1f}) vs H1 SELL → accepté")
-            return "BUY"
-        if b4 == "SELL" and adx_h1 > 30 and b1 == "BUY":
-            logger.debug(f"[BIAS] H4 SELL fort (ADX={adx_h1:.1f}) vs H1 BUY → accepté")
-            return "SELL"
-
-    # --- Cas 3 : H4 NEUTRAL mais H1 directionnel ---
-    if b4 == "NEUTRAL" and b1 != "NEUTRAL":
-        return b1
-
-    return "NEUTRAL"
-
+    # Log de diagnostic
+    logger.debug(
+        f"[BIAS_DIAG] H4={b4} ({b4_buy}/{b4_sell}) | H1={b1} ({b1_buy}/{b1_sell}) | "
+        f"ADX_H1={adx_h1:.1f} | MOM_H1={momentum_h1:+.2f}% | RESULT={result}"
+    )
+    return result
 def get_confirmation_signal(df_m15: pd.DataFrame, direction: str) -> Tuple[bool, str]:
     if len(df_m15) < 3:
         return False, "données insuffisantes"
