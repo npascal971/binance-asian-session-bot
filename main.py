@@ -467,62 +467,105 @@ def detect_setups(pair: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, bias: st
 # STRATÉGIE SIMPLIFIÉE
 # ============================================================
 def get_directional_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> str:
-    def bias_from_structure(df, label=""):
+
+    def bias_from_structure(df):
         highs, lows = detect_swing_points(df, 5)
+
         if len(highs) < 2 or len(lows) < 2:
             return "NEUTRAL", 0, 0
-        
+
+        # Structure des sommets
         hh = highs[-1]["price"] > highs[-2]["price"]
-        hl = lows[-1]["price"] > highs[-2]["price"]  # ← CORRECTION : comparer avec le dernier plus bas, pas le précédent
         lh = highs[-1]["price"] < highs[-2]["price"]
-        ll = lows[-1]["price"] < lows[-2]["price"]   # ← CORRECTION : comparer avec le dernier plus bas, pas le précédent
-        
-        buy_signals = sum([hh, hl])
-        sell_signals = sum([lh, ll])
-        
-        if buy_signals >= 2:
+
+        # Structure des creux
+        hl = lows[-1]["price"] > lows[-2]["price"]
+        ll = lows[-1]["price"] < lows[-2]["price"]
+
+        buy_signals = int(hh) + int(hl)
+        sell_signals = int(lh) + int(ll)
+
+        # Structure contradictoire
+        if buy_signals > 0 and sell_signals > 0:
+            return "NEUTRAL", buy_signals, sell_signals
+
+        # Structure haussière confirmée
+        if buy_signals == 2:
             return "BUY", buy_signals, sell_signals
-        if sell_signals >= 2:
+
+        # Structure baissière confirmée
+        if sell_signals == 2:
             return "SELL", buy_signals, sell_signals
+
+        # Structure haussière en formation
         if buy_signals == 1:
             return "BUY_WEAK", buy_signals, sell_signals
+
+        # Structure baissière en formation
         if sell_signals == 1:
             return "SELL_WEAK", buy_signals, sell_signals
+
         return "NEUTRAL", buy_signals, sell_signals
 
-    b4, b4_buy, b4_sell = bias_from_structure(df_h4, "H4")
-    b1, b1_buy, b1_sell = bias_from_structure(df_h1, "H1")
+    b4, b4_buy, b4_sell = bias_from_structure(df_h4)
+    b1, b1_buy, b1_sell = bias_from_structure(df_h1)
+
     adx_h1 = calculate_adx(df_h1)
     momentum_h1 = calculate_momentum(df_h1)
 
-    # --- RÈGLE 1 : H4 doit être confirmé (BUY ou SELL) ---
-    if b4 not in ("BUY", "SELL"):
+    # =========================================================
+    # H4 NEUTRAL = aucune prise de position
+    # =========================================================
+
+    if b4 == "NEUTRAL":
         result = "NEUTRAL"
-    
-    # --- RÈGLE 2 : H4 BUY → H1 BUY ou BUY_WEAK ---
+
+    # =========================================================
+    # ALIGNEMENT HAUSSIER
+    # =========================================================
+
     elif b4 == "BUY" and b1 in ("BUY", "BUY_WEAK"):
         result = "BUY"
-    
-    # --- RÈGLE 3 : H4 SELL → H1 SELL ou SELL_WEAK ---
+
+    # =========================================================
+    # ALIGNEMENT BAISSIER
+    # =========================================================
+
     elif b4 == "SELL" and b1 in ("SELL", "SELL_WEAK"):
         result = "SELL"
-    
-    # --- RÈGLE 4 : H4 BUY vs H1 SELL_WEAK (retracement) ---
-    elif b4 == "BUY" and b1 == "SELL_WEAK" and adx_h1 > 25 and momentum_h1 > 0.3:
+
+    # =========================================================
+    # RETRACEMENT H1 CONTRE H4
+    # =========================================================
+
+    elif (
+        b4 == "BUY"
+        and b1 == "SELL_WEAK"
+        and adx_h1 > 25
+        and momentum_h1 > 0.3
+    ):
         result = "BUY"
-    
-    # --- RÈGLE 5 : H4 SELL vs H1 BUY_WEAK (retracement) ---
-    elif b4 == "SELL" and b1 == "BUY_WEAK" and adx_h1 > 25 and momentum_h1 < -0.3:
+
+    elif (
+        b4 == "SELL"
+        and b1 == "BUY_WEAK"
+        and adx_h1 > 25
+        and momentum_h1 < -0.3
+    ):
         result = "SELL"
-    
+
     else:
         result = "NEUTRAL"
 
-    # Log de diagnostic
     logger.debug(
-        f"[BIAS_DIAG] H4={b4} ({b4_buy}/{b4_sell}) | H1={b1} ({b1_buy}/{b1_sell}) | "
-        f"ADX_H1={adx_h1:.1f} | MOM_H1={momentum_h1:+.2f}% | RESULT={result}"
+        f"[BIAS_DIAG] "
+        f"H4={b4} ({b4_buy}/{b4_sell}) | "
+        f"H1={b1} ({b1_buy}/{b1_sell}) | "
+        f"ADX_H1={adx_h1:.1f} | "
+        f"MOM_H1={momentum_h1:+.2f}% | "
+        f"RESULT={result}"
     )
+
     return result
 def get_confirmation_signal(df_m15: pd.DataFrame, direction: str) -> Tuple[bool, str]:
     if len(df_m15) < 3:
