@@ -467,8 +467,20 @@ def detect_setups(pair: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, bias: st
 # STRATÉGIE SIMPLIFIÉE
 # ============================================================
 def get_directional_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> str:
+    """
+    Détermine le biais directionnel H4/H1.
 
-    def bias_from_structure(df):
+    Règles :
+    - H4 est le timeframe directeur.
+    - H4 NEUTRAL => aucun trade.
+    - Structure confirmée : HH + HL = BUY / LH + LL = SELL.
+    - Structure faible : un seul signal directionnel, sans contradiction.
+    - Une structure contradictoire reste NEUTRAL.
+    - H4/H1 alignés => direction acceptée.
+    - H4 fort contre H1 faible => retracement autorisé si ADX + momentum confirment.
+    """
+
+    def bias_from_structure(df, label=""):
         highs, lows = detect_swing_points(df, 5)
 
         if len(highs) < 2 or len(lows) < 2:
@@ -485,77 +497,104 @@ def get_directional_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> str:
         buy_signals = int(hh) + int(hl)
         sell_signals = int(lh) + int(ll)
 
-        # Structure contradictoire
+        # ---------------------------------------------------------
+        # STRUCTURE CONTRADICTOIRE
+        # ---------------------------------------------------------
+        # Exemple :
+        # HH=True + LL=True
+        # ou
+        # HL=True + LH=True
+        #
+        # On ne force surtout pas une direction.
         if buy_signals > 0 and sell_signals > 0:
             return "NEUTRAL", buy_signals, sell_signals
 
-        # Structure haussière confirmée
+        # ---------------------------------------------------------
+        # STRUCTURE CONFIRMÉE
+        # ---------------------------------------------------------
         if buy_signals == 2:
             return "BUY", buy_signals, sell_signals
 
-        # Structure baissière confirmée
         if sell_signals == 2:
             return "SELL", buy_signals, sell_signals
 
-        # Structure haussière en formation
+        # ---------------------------------------------------------
+        # STRUCTURE FAIBLE / EN FORMATION
+        # ---------------------------------------------------------
         if buy_signals == 1:
             return "BUY_WEAK", buy_signals, sell_signals
 
-        # Structure baissière en formation
         if sell_signals == 1:
             return "SELL_WEAK", buy_signals, sell_signals
 
         return "NEUTRAL", buy_signals, sell_signals
 
-    b4, b4_buy, b4_sell = bias_from_structure(df_h4)
-    b1, b1_buy, b1_sell = bias_from_structure(df_h1)
+    # =============================================================
+    # CALCUL H4 / H1
+    # =============================================================
 
+    b4, b4_buy, b4_sell = bias_from_structure(df_h4, "H4")
+    b1, b1_buy, b1_sell = bias_from_structure(df_h1, "H1")
+
+    # Indicateurs H1 uniquement utilisés pour le retracement
     adx_h1 = calculate_adx(df_h1)
     momentum_h1 = calculate_momentum(df_h1)
 
-    # =========================================================
-    # H4 NEUTRAL = aucune prise de position
-    # =========================================================
+    # =============================================================
+    # RÈGLE 1 — H4 DOIT ÊTRE DIRECTIONNEL
+    # =============================================================
 
     if b4 == "NEUTRAL":
         result = "NEUTRAL"
 
-    # =========================================================
-    # ALIGNEMENT HAUSSIER
-    # =========================================================
+    # =============================================================
+    # RÈGLE 2 — H4 BUY
+    # =============================================================
 
-    elif b4 == "BUY" and b1 in ("BUY", "BUY_WEAK"):
-        result = "BUY"
+    elif b4 == "BUY":
 
-    # =========================================================
-    # ALIGNEMENT BAISSIER
-    # =========================================================
+        # Alignement
+        if b1 in ("BUY", "BUY_WEAK"):
+            result = "BUY"
 
-    elif b4 == "SELL" and b1 in ("SELL", "SELL_WEAK"):
-        result = "SELL"
+        # Retracement H1 faible contre H4
+        elif (
+            b1 == "SELL_WEAK"
+            and adx_h1 > 25
+            and momentum_h1 > 0.3
+        ):
+            result = "BUY"
 
-    # =========================================================
-    # RETRACEMENT H1 CONTRE H4
-    # =========================================================
+        else:
+            result = "NEUTRAL"
 
-    elif (
-        b4 == "BUY"
-        and b1 == "SELL_WEAK"
-        and adx_h1 > 25
-        and momentum_h1 > 0.3
-    ):
-        result = "BUY"
+    # =============================================================
+    # RÈGLE 3 — H4 SELL
+    # =============================================================
 
-    elif (
-        b4 == "SELL"
-        and b1 == "BUY_WEAK"
-        and adx_h1 > 25
-        and momentum_h1 < -0.3
-    ):
-        result = "SELL"
+    elif b4 == "SELL":
+
+        # Alignement
+        if b1 in ("SELL", "SELL_WEAK"):
+            result = "SELL"
+
+        # Retracement H1 faible contre H4
+        elif (
+            b1 == "BUY_WEAK"
+            and adx_h1 > 25
+            and momentum_h1 < -0.3
+        ):
+            result = "SELL"
+
+        else:
+            result = "NEUTRAL"
 
     else:
         result = "NEUTRAL"
+
+    # =============================================================
+    # DIAGNOSTIC
+    # =============================================================
 
     logger.debug(
         f"[BIAS_DIAG] "
@@ -567,37 +606,108 @@ def get_directional_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> str:
     )
 
     return result
-def get_confirmation_signal(df_m15: pd.DataFrame, direction: str) -> Tuple[bool, str]:
+    
+def get_confirmation_signal(
+    df_m15: pd.DataFrame,
+    direction: str
+) -> Tuple[bool, str]:
+    """
+    Confirmation M15.
+
+    Une confirmation valide peut être :
+    - un rejet significatif de la zone
+    OU
+    - un micro-break de la bougie précédente.
+
+    Le but est d'éviter de rater un setup simplement parce
+    que les deux confirmations ne se produisent pas simultanément.
+    """
+
     if len(df_m15) < 3:
         return False, "données insuffisantes"
+
     last = df_m15.iloc[-1]
     prev = df_m15.iloc[-2]
+
     total = last["high"] - last["low"]
-    if total == 0:
+
+    if total <= 0:
         return False, "range nul"
-    upper = last["high"] - max(last["open"], last["close"])
-    lower = min(last["open"], last["close"]) - last["low"]
+
+    upper_wick = last["high"] - max(last["open"], last["close"])
+    lower_wick = min(last["open"], last["close"]) - last["low"]
+
+    # =============================================================
+    # BUY
+    # =============================================================
+
     if direction == "BUY":
-        rejet = lower > total * 0.4
-        micro = last["close"] > prev["high"]
-    else:
-        rejet = upper > total * 0.4
-        micro = last["close"] < prev["low"]
-    
-    # --- NOUVEAU : rejet OU micro-break ---
-    if rejet and micro:
-        return True, "rejet + micro-break OK"
-    if rejet:
-        return True, "rejet OK (sans micro-break)"
-    if micro:
-        return True, "micro-break OK (sans rejet)"
-    
-    reasons = []
-    if not rejet:
-        reasons.append("pas de rejet")
-    if not micro:
-        reasons.append("pas de micro-break")
-    return False, ", ".join(reasons)
+
+        rejection_ratio = lower_wick / total
+        rejection = rejection_ratio > 0.40
+
+        micro_break = last["close"] > prev["high"]
+
+        if rejection and micro_break:
+            return True, (
+                f"rejet + micro-break OK "
+                f"(rejet={rejection_ratio:.2f})"
+            )
+
+        if rejection:
+            return True, (
+                f"rejet OK "
+                f"(rejet={rejection_ratio:.2f}, sans micro-break)"
+            )
+
+        if micro_break:
+            return True, (
+                f"micro-break OK "
+                f"(sans rejet significatif)"
+            )
+
+        return False, (
+            f"pas de confirmation "
+            f"(rejet={rejection_ratio:.2f}, "
+            f"micro_break=False)"
+        )
+
+    # =============================================================
+    # SELL
+    # =============================================================
+
+    elif direction == "SELL":
+
+        rejection_ratio = upper_wick / total
+        rejection = rejection_ratio > 0.40
+
+        micro_break = last["close"] < prev["low"]
+
+        if rejection and micro_break:
+            return True, (
+                f"rejet + micro-break OK "
+                f"(rejet={rejection_ratio:.2f})"
+            )
+
+        if rejection:
+            return True, (
+                f"rejet OK "
+                f"(rejet={rejection_ratio:.2f}, sans micro-break)"
+            )
+
+        if micro_break:
+            return True, (
+                f"micro-break OK "
+                f"(sans rejet significatif)"
+            )
+
+        return False, (
+            f"pas de confirmation "
+            f"(rejet={rejection_ratio:.2f}, "
+            f"micro_break=False)"
+        )
+
+    return False, f"direction inconnue: {direction}"
 
 def calculate_sl_tp_structural(df_m15: pd.DataFrame, direction: str, entry: float, pair: str) -> Tuple[float, float, float]:
     highs, lows = detect_swing_points(df_m15, 5)
@@ -649,71 +759,207 @@ def has_enough_room_to_tp(df_h1: pd.DataFrame, direction: str, entry: float, tp:
                     return False
     return True
 
-def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame, df_h1: pd.DataFrame, current_price: float) -> dict:
-    # --- Filtrage du type de setup ---
-    if entry.get('type') not in ('FVG_RETEST', 'WICK_REJECTION'):
-        return {"passed": False, "reason": f"type non autorisé: {entry.get('type')}"}
+def evaluate_setup(
+    pair: str,
+    direction: str,
+    entry: dict,
+    df_m15: pd.DataFrame,
+    df_h1: pd.DataFrame,
+    current_price: float
+) -> dict:
+    """
+    Évalue un setup avant exécution.
 
-    entry_level = float(entry["entry_level"])
+    Règles :
+    - Setup FVG_RETEST ou WICK_REJECTION uniquement.
+    - Distance maximale de 2 ATR.
+    - Confirmation M15 = rejet OU micro-break.
+    - SL structurel.
+    - SL minimum.
+    - TP doit avoir suffisamment de place sur H1.
+    - RR réel >= 2.0.
+    """
+
+    # =============================================================
+    # 1. TYPE DE SETUP
+    # =============================================================
+
+    setup_type = entry.get("type")
+
+    if setup_type not in ("FVG_RETEST", "WICK_REJECTION"):
+        return {
+            "passed": False,
+            "reason": f"type non autorisé: {setup_type}"
+        }
+
+    # =============================================================
+    # 2. NIVEAU D'ENTRÉE
+    # =============================================================
+
+    try:
+        entry_level = float(entry["entry_level"])
+    except (KeyError, TypeError, ValueError):
+        return {
+            "passed": False,
+            "reason": "entry_level invalide"
+        }
+
+    # =============================================================
+    # 3. ATR / DISTANCE À LA ZONE
+    # =============================================================
+
     atr_price = calculate_atr(df_m15)
-    
-    # --- 1. DISTANCE (2.0 ATR au lieu de 1.5) ---
-    distance_ratio = abs(current_price - entry_level) / atr_price if atr_price > 0 else 999
-    if abs(current_price - entry_level) > atr_price * 2.0:
+
+    if atr_price <= 0:
         return {
             "passed": False,
-            "reason": f"prix hors zone (target={entry_level:.5f}, price={current_price:.5f}, dist={distance_ratio:.2f}ATR, max=2.0ATR)"
+            "reason": "ATR invalide"
         }
-    
-    # --- 2. CONFIRMATION (rejet OU micro-break) ---
-    confirm_ok, msg = get_confirmation_signal(df_m15, direction)
+
+    distance_ratio = (
+        abs(current_price - entry_level) / atr_price
+    )
+
+    MAX_DISTANCE_ATR = 2.0
+
+    if distance_ratio > MAX_DISTANCE_ATR:
+        return {
+            "passed": False,
+            "reason": (
+                f"prix hors zone "
+                f"(target={entry_level:.5f}, "
+                f"price={current_price:.5f}, "
+                f"dist={distance_ratio:.2f}ATR, "
+                f"max={MAX_DISTANCE_ATR:.1f}ATR)"
+            )
+        }
+
+    # =============================================================
+    # 4. CONFIRMATION M15
+    # =============================================================
+
+    confirm_ok, confirm_msg = get_confirmation_signal(
+        df_m15,
+        direction
+    )
+
     if not confirm_ok:
-        # Calcul des métriques de confirmation pour le log
+
         last = df_m15.iloc[-1]
-        prev = df_m15.iloc[-2]
+
         total = last["high"] - last["low"]
-        if total == 0:
-            rejet_ratio = 0.0
-        else:
+
+        if total > 0:
+
             if direction == "BUY":
-                rejet_ratio = (min(last["open"], last["close"]) - last["low"]) / total
+                rejection_ratio = (
+                    min(last["open"], last["close"]) - last["low"]
+                ) / total
+
+                micro_break = (
+                    last["close"] > df_m15.iloc[-2]["high"]
+                )
+
             else:
-                rejet_ratio = (last["high"] - max(last["open"], last["close"])) / total
-        micro_break = last["close"] > prev["high"] if direction == "BUY" else last["close"] < prev["low"]
+                rejection_ratio = (
+                    last["high"] - max(last["open"], last["close"])
+                ) / total
+
+                micro_break = (
+                    last["close"] < df_m15.iloc[-2]["low"]
+                )
+
+        else:
+            rejection_ratio = 0.0
+            micro_break = False
+
         return {
             "passed": False,
-            "reason": f"confirmation: {msg} (rejet={rejet_ratio:.2f}, micro_break={micro_break})"
+            "reason": (
+                f"confirmation: {confirm_msg} "
+                f"(rejet={rejection_ratio:.2f}, "
+                f"micro_break={micro_break})"
+            )
         }
-    
-    # --- Calcul SL/TP ---
-    sl, tp, risk = calculate_sl_tp_structural(df_m15, direction, entry_level, pair)
+
+    # =============================================================
+    # 5. CALCUL SL / TP
+    # =============================================================
+
+    sl, tp, risk = calculate_sl_tp_structural(
+        df_m15,
+        direction,
+        entry_level,
+        pair
+    )
+
+    if risk <= 0:
+        return {
+            "passed": False,
+            "reason": "risk invalide"
+        }
+
+    # =============================================================
+    # 6. DISTANCE SL MINIMUM
+    # =============================================================
+
     pip = 0.01 if "JPY" in pair else 0.0001
+
     min_sl_distance = pip * 10
-    
-    # --- 3. SL trop proche ---
-    if abs(entry_level - sl) < min_sl_distance:
+
+    actual_sl_distance = abs(entry_level - sl)
+
+    if actual_sl_distance < min_sl_distance:
         return {
             "passed": False,
-            "reason": f"SL trop proche ({abs(entry_level-sl):.5f} < {min_sl_distance:.5f})"
+            "reason": (
+                f"SL trop proche "
+                f"({actual_sl_distance:.5f} "
+                f"< {min_sl_distance:.5f})"
+            )
         }
-    
-    # --- 4. RR réel impossible ---
-    if not has_enough_room_to_tp(df_h1, direction, entry_level, tp):
+
+    # =============================================================
+    # 7. ESPACE DISPONIBLE POUR LE TP
+    # =============================================================
+
+    if not has_enough_room_to_tp(
+        df_h1,
+        direction,
+        entry_level,
+        tp
+    ):
         return {
             "passed": False,
-            "reason": f"RR réel impossible (swing H1 bloque le TP à {tp:.5f})"
+            "reason": (
+                f"RR réel impossible "
+                f"(swing H1 bloque le TP à {tp:.5f})"
+            )
         }
-    
+
+    # =============================================================
+    # 8. RR RÉEL
+    # =============================================================
+
     rr = abs(tp - entry_level) / abs(sl - entry_level)
-    
-    # --- 5. RR < 2.0 ---
-    if rr < 2.0:
+
+    RR_MIN = 2.0
+
+    if rr < RR_MIN:
         return {
             "passed": False,
-            "reason": f"RR={rr:.3f} < 2.0 (SL={sl:.5f}, TP={tp:.5f}, entry={entry_level:.5f})"
+            "reason": (
+                f"RR={rr:.3f} < {RR_MIN:.1f} "
+                f"(SL={sl:.5f}, "
+                f"TP={tp:.5f}, "
+                f"entry={entry_level:.5f})"
+            )
         }
-    
-    # --- SUCCÈS ---
+
+    # =============================================================
+    # 9. SETUP VALIDÉ
+    # =============================================================
+
     return {
         "passed": True,
         "entry_level": entry_level,
@@ -725,10 +971,12 @@ def evaluate_setup(pair: str, direction: str, entry: dict, df_m15: pd.DataFrame,
             "atr": price_to_pips(atr_price, pair),
             "adx": calculate_adx(df_h1),
             "momentum": calculate_momentum(df_m15),
-            "rsi": get_last_rsi(df_m15["close"]),
-            "session": get_session_label()
+            "session": get_session_label(),
+            "distance_atr": distance_ratio,
+            "confirmation": confirm_msg
         }
     }
+    
 def get_session_label() -> str:
     h = datetime.utcnow().hour
     if 7 <= h < 16:
