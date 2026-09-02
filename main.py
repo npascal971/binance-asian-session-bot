@@ -709,38 +709,202 @@ def get_confirmation_signal(
 
     return False, f"direction inconnue: {direction}"
 
-def calculate_sl_tp_structural(df_m15: pd.DataFrame, direction: str, entry: float, pair: str) -> Tuple[float, float, float]:
+def calculate_sl_tp_structural(
+    df_m15: pd.DataFrame,
+    direction: str,
+    entry: float,
+    pair: str
+) -> Tuple[float, float, float]:
+    """
+    Calcule un SL structurel puis un TP exactement à 2R.
+
+    Règles :
+    - SL basé sur le dernier swing M15.
+    - Si aucun swing : fallback ATR 1.5x.
+    - SL maximum = 2x ATR.
+    - TP = exactement 2R.
+    - Utilise le pip/tick propre à l'instrument.
+    """
+
+    pair = pair.upper()
+    direction = direction.upper()
+
     highs, lows = detect_swing_points(df_m15, 5)
-    pip = 0.01 if "JPY" in pair else 0.0001
+
+    pip = get_pip_value(pair)
     atr = calculate_atr(df_m15)
-    
+
+    if atr <= 0:
+        atr = pip * 10
+
+    # ============================================================
+    # 1. CALCUL DU SL STRUCTUREL
+    # ============================================================
+
     if direction == "BUY":
+
         if lows:
-            sl = min(lows[-1]["price"], entry - 5*pip)
+            last_swing_low = float(lows[-1]["price"])
+
+            # Le SL doit rester sous l'entrée.
+            sl = min(
+                last_swing_low,
+                entry - 5 * pip
+            )
         else:
             sl = entry - atr * 1.5
-    else:
+
+    elif direction == "SELL":
+
         if highs:
-            sl = max(highs[-1]["price"], entry + 5*pip)
+            last_swing_high = float(highs[-1]["price"])
+
+            # Le SL doit rester au-dessus de l'entrée.
+            sl = max(
+                last_swing_high,
+                entry + 5 * pip
+            )
         else:
             sl = entry + atr * 1.5
-    
-    # --- NOUVEAU : LIMITER LE SL À 2 × ATR ---
+
+    else:
+        raise ValueError(
+            f"Direction inconnue: {direction}"
+        )
+
+    # ============================================================
+    # 2. PROTECTION : SL DU BON CÔTÉ
+    # ============================================================
+
+    if direction == "BUY" and sl >= entry:
+        sl = entry - max(5 * pip, atr * 1.0)
+
+    if direction == "SELL" and sl <= entry:
+        sl = entry + max(5 * pip, atr * 1.0)
+
+    # ============================================================
+    # 3. LIMITATION SL À 2 ATR
+    # ============================================================
+
     max_sl_distance = atr * 2.0
     current_risk = abs(entry - sl)
+
     if current_risk > max_sl_distance:
+
+        logger.debug(
+            f"[SL] {pair} | "
+            f"SL structurel trop large "
+            f"({current_risk:.5f}) → "
+            f"limité à {max_sl_distance:.5f}"
+        )
+
         if direction == "BUY":
             sl = entry - max_sl_distance
         else:
             sl = entry + max_sl_distance
-        logger.debug(f"[SL] SL structurel trop large ({current_risk:.5f}), limité à {max_sl_distance:.5f}")
-    
-    risk = abs(entry - sl)
-    tp = entry + 2*risk if direction == "BUY" else entry - 2*risk
-    sl = float(round_price(pair, sl))
-    tp = float(round_price(pair, tp))
-    return sl, tp, risk
 
+    # ============================================================
+    # 4. DISTANCE MINIMUM DU SL
+    # ============================================================
+
+    min_sl_distance = pip * 10
+
+    current_risk = abs(entry - sl)
+
+    if current_risk < min_sl_distance:
+
+        logger.debug(
+            f"[SL] {pair} | "
+            f"SL trop proche ({current_risk:.5f}) → "
+            f"minimum={min_sl_distance:.5f}"
+        )
+
+        if direction == "BUY":
+            sl = entry - min_sl_distance
+        else:
+            sl = entry + min_sl_distance
+
+    # ============================================================
+    # 5. ARRONDI SL
+    # ============================================================
+
+    sl = float(
+        round_price(pair, sl)
+    )
+
+    # Recalcul du risque APRÈS arrondi
+    risk = abs(entry - sl)
+
+    if risk <= 0:
+        raise ValueError(
+            f"Risk nul après arrondi {pair}"
+        )
+
+    # ============================================================
+    # 6. TP EXACTEMENT À 2R
+    # ============================================================
+
+    if direction == "BUY":
+        tp = entry + (risk * 2.0)
+    else:
+        tp = entry - (risk * 2.0)
+
+    tp = float(
+        round_price(pair, tp)
+    )
+
+    # ============================================================
+    # 7. RR FINAL APRÈS ARRONDI
+    # ============================================================
+
+    final_reward = abs(tp - entry)
+    final_risk = abs(sl - entry)
+
+    rr = (
+        final_reward / final_risk
+        if final_risk > 0
+        else 0
+    )
+
+    # ============================================================
+    # 8. GARANTIE RR >= 2
+    # ============================================================
+
+    if rr < 2.0:
+
+        if direction == "BUY":
+            tp = float(
+                round_price(
+                    pair,
+                    entry + final_risk * 2.01
+                )
+            )
+        else:
+            tp = float(
+                round_price(
+                    pair,
+                    entry - final_risk * 2.01
+                )
+            )
+
+        final_reward = abs(tp - entry)
+
+        rr = (
+            final_reward / final_risk
+            if final_risk > 0
+            else 0
+        )
+
+    logger.debug(
+        f"[SLTP] {pair} | {direction} | "
+        f"ENTRY={entry:.5f} | "
+        f"SL={sl:.5f} | "
+        f"TP={tp:.5f} | "
+        f"RISK={final_risk:.5f} | "
+        f"RR={rr:.3f}"
+    )
+
+    return sl, tp, final_risk
 def has_enough_room_to_tp(df_h1: pd.DataFrame, direction: str, entry: float, tp: float) -> bool:
     highs, lows = detect_swing_points(df_h1, 5)
     total_distance = abs(tp - entry)
@@ -770,43 +934,55 @@ def evaluate_setup(
     """
     Évalue un setup avant exécution.
 
-    Règles :
-    - Setup FVG_RETEST ou WICK_REJECTION uniquement.
-    - Distance maximale de 2 ATR.
-    - Confirmation M15 = rejet OU micro-break.
-    - SL structurel.
-    - SL minimum.
-    - TP doit avoir suffisamment de place sur H1.
-    - RR réel >= 2.0.
+    Objectif :
+    - ne prendre que FVG_RETEST / WICK_REJECTION
+    - distance <= 2 ATR
+    - confirmation M15
+    - SL structurel
+    - SL minimum
+    - espace H1 suffisant
+    - RR >= 2.0
     """
 
-    # =============================================================
+    pair = pair.upper()
+    direction = direction.upper()
+
+    # ============================================================
     # 1. TYPE DE SETUP
-    # =============================================================
+    # ============================================================
 
     setup_type = entry.get("type")
 
-    if setup_type not in ("FVG_RETEST", "WICK_REJECTION"):
+    if setup_type not in (
+        "FVG_RETEST",
+        "WICK_REJECTION"
+    ):
         return {
             "passed": False,
             "reason": f"type non autorisé: {setup_type}"
         }
 
-    # =============================================================
-    # 2. NIVEAU D'ENTRÉE
-    # =============================================================
+    # ============================================================
+    # 2. ENTRY LEVEL
+    # ============================================================
 
     try:
-        entry_level = float(entry["entry_level"])
-    except (KeyError, TypeError, ValueError):
+        entry_level = float(
+            entry["entry_level"]
+        )
+    except (
+        KeyError,
+        TypeError,
+        ValueError
+    ):
         return {
             "passed": False,
             "reason": "entry_level invalide"
         }
 
-    # =============================================================
-    # 3. ATR / DISTANCE À LA ZONE
-    # =============================================================
+    # ============================================================
+    # 3. ATR
+    # ============================================================
 
     atr_price = calculate_atr(df_m15)
 
@@ -816,13 +992,19 @@ def evaluate_setup(
             "reason": "ATR invalide"
         }
 
+    # ============================================================
+    # 4. DISTANCE DU PRIX À LA ZONE
+    # ============================================================
+
     distance_ratio = (
-        abs(current_price - entry_level) / atr_price
+        abs(current_price - entry_level)
+        / atr_price
     )
 
     MAX_DISTANCE_ATR = 2.0
 
     if distance_ratio > MAX_DISTANCE_ATR:
+
         return {
             "passed": False,
             "reason": (
@@ -834,42 +1016,61 @@ def evaluate_setup(
             )
         }
 
-    # =============================================================
-    # 4. CONFIRMATION M15
-    # =============================================================
+    # ============================================================
+    # 5. CONFIRMATION
+    # ============================================================
 
-    confirm_ok, confirm_msg = get_confirmation_signal(
-        df_m15,
-        direction
+    confirm_ok, confirm_msg = (
+        get_confirmation_signal(
+            df_m15,
+            direction
+        )
     )
 
     if not confirm_ok:
 
         last = df_m15.iloc[-1]
+        prev = df_m15.iloc[-2]
 
-        total = last["high"] - last["low"]
+        total = (
+            last["high"]
+            - last["low"]
+        )
 
         if total > 0:
 
             if direction == "BUY":
+
                 rejection_ratio = (
-                    min(last["open"], last["close"]) - last["low"]
+                    min(
+                        last["open"],
+                        last["close"]
+                    )
+                    - last["low"]
                 ) / total
 
                 micro_break = (
-                    last["close"] > df_m15.iloc[-2]["high"]
+                    last["close"]
+                    > prev["high"]
                 )
 
             else:
+
                 rejection_ratio = (
-                    last["high"] - max(last["open"], last["close"])
+                    last["high"]
+                    - max(
+                        last["open"],
+                        last["close"]
+                    )
                 ) / total
 
                 micro_break = (
-                    last["close"] < df_m15.iloc[-2]["low"]
+                    last["close"]
+                    < prev["low"]
                 )
 
         else:
+
             rejection_ratio = 0.0
             micro_break = False
 
@@ -882,34 +1083,49 @@ def evaluate_setup(
             )
         }
 
-    # =============================================================
-    # 5. CALCUL SL / TP
-    # =============================================================
+    # ============================================================
+    # 6. SL / TP
+    # ============================================================
 
-    sl, tp, risk = calculate_sl_tp_structural(
-        df_m15,
-        direction,
-        entry_level,
-        pair
-    )
+    try:
+
+        sl, tp, risk = (
+            calculate_sl_tp_structural(
+                df_m15,
+                direction,
+                entry_level,
+                pair
+            )
+        )
+
+    except Exception as e:
+
+        return {
+            "passed": False,
+            "reason": f"erreur calcul SL/TP: {e}"
+        }
 
     if risk <= 0:
+
         return {
             "passed": False,
             "reason": "risk invalide"
         }
 
-    # =============================================================
-    # 6. DISTANCE SL MINIMUM
-    # =============================================================
+    # ============================================================
+    # 7. DISTANCE SL MINIMUM
+    # ============================================================
 
-    pip = 0.01 if "JPY" in pair else 0.0001
+    pip = get_pip_value(pair)
 
     min_sl_distance = pip * 10
 
-    actual_sl_distance = abs(entry_level - sl)
+    actual_sl_distance = abs(
+        entry_level - sl
+    )
 
     if actual_sl_distance < min_sl_distance:
+
         return {
             "passed": False,
             "reason": (
@@ -919,9 +1135,9 @@ def evaluate_setup(
             )
         }
 
-    # =============================================================
-    # 7. ESPACE DISPONIBLE POUR LE TP
-    # =============================================================
+    # ============================================================
+    # 8. ESPACE H1
+    # ============================================================
 
     if not has_enough_room_to_tp(
         df_h1,
@@ -929,48 +1145,68 @@ def evaluate_setup(
         entry_level,
         tp
     ):
+
         return {
             "passed": False,
             "reason": (
                 f"RR réel impossible "
-                f"(swing H1 bloque le TP à {tp:.5f})"
+                f"(swing H1 bloque le TP "
+                f"à {tp:.5f})"
             )
         }
 
-    # =============================================================
-    # 8. RR RÉEL
-    # =============================================================
+    # ============================================================
+    # 9. RR FINAL
+    # ============================================================
 
-    rr = abs(tp - entry_level) / abs(sl - entry_level)
+    final_risk = abs(
+        entry_level - sl
+    )
 
-    RR_MIN = 2.0
+    final_reward = abs(
+        tp - entry_level
+    )
 
-    if rr < RR_MIN:
+    rr = (
+        final_reward / final_risk
+        if final_risk > 0
+        else 0
+    )
+
+    if rr < 2.0:
+
         return {
             "passed": False,
             "reason": (
-                f"RR={rr:.3f} < {RR_MIN:.1f} "
+                f"RR={rr:.3f} < 2.0 "
                 f"(SL={sl:.5f}, "
                 f"TP={tp:.5f}, "
                 f"entry={entry_level:.5f})"
             )
         }
 
-    # =============================================================
-    # 9. SETUP VALIDÉ
-    # =============================================================
+    # ============================================================
+    # 10. VALIDÉ
+    # ============================================================
 
     return {
         "passed": True,
         "entry_level": entry_level,
         "sl": sl,
         "tp": tp,
-        "risk": risk,
+        "risk": final_risk,
         "rr": rr,
         "metrics": {
-            "atr": price_to_pips(atr_price, pair),
-            "adx": calculate_adx(df_h1),
-            "momentum": calculate_momentum(df_m15),
+            "atr": price_to_pips(
+                atr_price,
+                pair
+            ),
+            "adx": calculate_adx(
+                df_h1
+            ),
+            "momentum": calculate_momentum(
+                df_m15
+            ),
             "session": get_session_label(),
             "distance_atr": distance_ratio,
             "confirmation": confirm_msg
@@ -993,12 +1229,23 @@ def price_to_pips(price_diff: float, pair: str) -> float:
 
 def get_pip_value(pair: str) -> float:
     """
-    Retourne la taille de pip/tick adaptée à chaque instrument.
-    Utilise la configuration PIP_SIZE_V88 pour éviter de traiter
-    XAU/USD ou les indices comme des paires Forex classiques.
+    Taille de pip / unité de prix propre à chaque instrument.
+
+    IMPORTANT :
+    - Forex classique : 0.0001
+    - JPY : 0.01
+    - XAU/USD : 0.01
+
+    Utilise PIP_SIZE_V88 comme source unique.
     """
     pair = pair.upper()
-    return float(PIP_SIZE_V88.get(pair, 0.01 if "JPY" in pair else 0.0001))
+
+    return float(
+        PIP_SIZE_V88.get(
+            pair,
+            0.01 if "JPY" in pair else 0.0001
+        )
+    )
 
 # ============================================================
 # CLASSE TRADE TRACKER (MFE/MAE)
