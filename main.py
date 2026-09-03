@@ -449,20 +449,229 @@ def detect_bos(df: pd.DataFrame) -> dict:
         return {"type": "BOS_SELL", "level": lows[-1]["price"]}
     return {"type": None}
 
-def detect_setups(pair: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, bias: str) -> List[Dict]:
-    """Détecte uniquement les setups FVG_RETEST et WICK_REJECTION dans le sens du biais."""
-    setups = []
-    fvgs = detect_fvg(df_m15)
-    for f in fvgs:
-        if f["direction"] == bias:
-            setups.append({"type": "FVG_RETEST", "direction": bias, "entry_level": f["midpoint"], "fvg": f})
-    wicks = detect_wick_rejection(df_m15, bias)
-    for w in wicks:
-        if w["direction"] == bias:
-            setups.append({"type": "WICK_REJECTION", "direction": bias, "entry_level": w["price_level"]})
-    # Plus de BOS/BISI – strictement retracement + trigger
-    return setups
+def detect_setups(
+    pair: str,
+    df_m15: pd.DataFrame,
+    df_h1: pd.DataFrame,
+    bias: str
+) -> List[Dict]:
+    """
+    Détecte les setups dans le sens du biais.
 
+    Setups autorisés :
+        - FVG_RETEST
+        - WICK_REJECTION
+        - BOS_RETEST
+
+    Le BOS n'est pas pris sur simple cassure :
+        BOS -> retest du niveau cassé -> confirmation
+    """
+
+    setups = []
+
+    # =========================================================
+    # SÉCURITÉ
+    # =========================================================
+
+    if df_m15 is None or len(df_m15) < 20:
+        return setups
+
+    if bias not in ("BUY", "SELL"):
+        return setups
+
+    # =========================================================
+    # 1. FVG RETEST
+    # =========================================================
+
+    try:
+        fvgs = detect_fvg(df_m15)
+    except Exception as e:
+        logger.warning(
+            f"{pair} | FVG detection error: {e}"
+        )
+        fvgs = []
+
+    for f in fvgs:
+
+        if f.get("direction") != bias:
+            continue
+
+        try:
+            entry_level = float(
+                f["midpoint"]
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        setups.append({
+            "type": "FVG_RETEST",
+            "direction": bias,
+            "entry_level": entry_level,
+            "fvg": f,
+        })
+
+        logger.debug(
+            f"[SETUP] {pair} | "
+            f"FVG_RETEST | "
+            f"{bias} | "
+            f"entry={entry_level:.5f}"
+        )
+
+    # =========================================================
+    # 2. WICK REJECTION
+    # =========================================================
+
+    try:
+        wicks = detect_wick_rejection(
+            df_m15,
+            bias
+        )
+    except Exception as e:
+        logger.warning(
+            f"{pair} | WICK detection error: {e}"
+        )
+        wicks = []
+
+    for w in wicks:
+
+        if w.get("direction") != bias:
+            continue
+
+        try:
+            entry_level = float(
+                w["price_level"]
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        setups.append({
+            "type": "WICK_REJECTION",
+            "direction": bias,
+            "entry_level": entry_level,
+        })
+
+        logger.debug(
+            f"[SETUP] {pair} | "
+            f"WICK_REJECTION | "
+            f"{bias} | "
+            f"entry={entry_level:.5f}"
+        )
+
+    # =========================================================
+    # 3. BOS RETEST
+    # =========================================================
+    #
+    # IMPORTANT :
+    # detect_bos_retest() doit être définie au niveau global
+    # du fichier.
+    #
+    # Elle renvoie None si aucun BOS + retest + confirmation
+    # n'est présent.
+    # =========================================================
+
+    try:
+        bos_setup = detect_bos_retest(
+            df_m15,
+            bias
+        )
+    except Exception as e:
+        logger.warning(
+            f"{pair} | BOS_RETEST detection error: {e}"
+        )
+        bos_setup = None
+
+    if bos_setup is not None:
+
+        # Sécurité : on force la direction du biais
+        bos_setup["direction"] = bias
+
+        try:
+            bos_entry = float(
+                bos_setup["entry_level"]
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError
+        ):
+            bos_entry = None
+
+        if bos_entry is not None:
+
+            # =================================================
+            # ÉVITER LES DOUBLONS
+            # =================================================
+
+            duplicate = any(
+                s["type"] == "BOS_RETEST"
+                and abs(
+                    float(s["entry_level"])
+                    - bos_entry
+                ) < 1e-10
+                for s in setups
+            )
+
+            if not duplicate:
+
+                setups.append({
+                    **bos_setup,
+                    "type": "BOS_RETEST",
+                    "direction": bias,
+                    "entry_level": bos_entry,
+                })
+
+                logger.info(
+                    f"[SETUP] {pair} | "
+                    f"BOS_RETEST | "
+                    f"{bias} | "
+                    f"entry={bos_entry:.5f} | "
+                    f"confirmation="
+                    f"{bos_setup.get('confirmation', 'OK')}"
+                )
+
+    # =========================================================
+    # 4. NETTOYAGE DES DOUBLONS
+    # =========================================================
+
+    unique_setups = []
+    seen = set()
+
+    for setup in setups:
+
+        try:
+            key = (
+                setup["type"],
+                setup["direction"],
+                round(
+                    float(setup["entry_level"]),
+                    8
+                )
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError
+        ):
+            continue
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique_setups.append(setup)
+
+    # =========================================================
+    # 5. LOG FINAL
+    # =========================================================
+
+    logger.info(
+        f"[SETUPS] {pair} | "
+        f"BIAS={bias} | "
+        f"FVG/WICK/BOS="
+        f"{len(unique_setups)}"
+    )
+
+    return unique_setups
 # ============================================================
 # STRATÉGIE SIMPLIFIÉE
 # ============================================================
