@@ -449,383 +449,154 @@ def detect_bos(df: pd.DataFrame) -> dict:
         return {"type": "BOS_SELL", "level": lows[-1]["price"]}
     return {"type": None}
 
-def detect_setups(
-    pair: str,
-    df_m15: pd.DataFrame,
-    df_h1: pd.DataFrame,
-    bias: str
-) -> List[Dict]:
-    """
-    Détecte les setups dans le sens du biais.
-
-    Setups autorisés :
-        - FVG_RETEST
-        - WICK_REJECTION
-        - BOS_RETEST
-
-    Le BOS n'est pas pris sur simple cassure :
-        BOS -> retest du niveau cassé -> confirmation
-    """
-
+def detect_setups(pair: str, df_m15: pd.DataFrame, df_h1: pd.DataFrame, bias: str) -> List[Dict]:
+    """Détecte uniquement les setups FVG_RETEST et WICK_REJECTION dans le sens du biais."""
     setups = []
-
-    # =========================================================
-    # SÉCURITÉ
-    # =========================================================
-
-    if df_m15 is None or len(df_m15) < 20:
-        return setups
-
-    if bias not in ("BUY", "SELL"):
-        return setups
-
-    # =========================================================
-    # 1. FVG RETEST
-    # =========================================================
-
-    try:
-        fvgs = detect_fvg(df_m15)
-    except Exception as e:
-        logger.warning(
-            f"{pair} | FVG detection error: {e}"
-        )
-        fvgs = []
-
+    fvgs = detect_fvg(df_m15)
     for f in fvgs:
-
-        if f.get("direction") != bias:
-            continue
-
-        try:
-            entry_level = float(
-                f["midpoint"]
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-
-        setups.append({
-            "type": "FVG_RETEST",
-            "direction": bias,
-            "entry_level": entry_level,
-            "fvg": f,
-        })
-
-        logger.debug(
-            f"[SETUP] {pair} | "
-            f"FVG_RETEST | "
-            f"{bias} | "
-            f"entry={entry_level:.5f}"
-        )
-
-    # =========================================================
-    # 2. WICK REJECTION
-    # =========================================================
-
-    try:
-        wicks = detect_wick_rejection(
-            df_m15,
-            bias
-        )
-    except Exception as e:
-        logger.warning(
-            f"{pair} | WICK detection error: {e}"
-        )
-        wicks = []
-
+        if f["direction"] == bias:
+            setups.append({"type": "FVG_RETEST", "direction": bias, "entry_level": f["midpoint"], "fvg": f})
+    wicks = detect_wick_rejection(df_m15, bias)
     for w in wicks:
+        if w["direction"] == bias:
+            setups.append({"type": "WICK_REJECTION", "direction": bias, "entry_level": w["price_level"]})
+    # Plus de BOS/BISI – strictement retracement + trigger
+    return setups
 
-        if w.get("direction") != bias:
-            continue
-
-        try:
-            entry_level = float(
-                w["price_level"]
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-
-        setups.append({
-            "type": "WICK_REJECTION",
-            "direction": bias,
-            "entry_level": entry_level,
-        })
-
-        logger.debug(
-            f"[SETUP] {pair} | "
-            f"WICK_REJECTION | "
-            f"{bias} | "
-            f"entry={entry_level:.5f}"
-        )
-
-    # =========================================================
-    # 3. BOS RETEST
-    # =========================================================
-    #
-    # IMPORTANT :
-    # detect_bos_retest() doit être définie au niveau global
-    # du fichier.
-    #
-    # Elle renvoie None si aucun BOS + retest + confirmation
-    # n'est présent.
-    # =========================================================
-
-    try:
-        bos_setup = detect_bos_retest(
-            df_m15,
-            bias
-        )
-    except Exception as e:
-        logger.warning(
-            f"{pair} | BOS_RETEST detection error: {e}"
-        )
-        bos_setup = None
-
-    if bos_setup is not None:
-
-        # Sécurité : on force la direction du biais
-        bos_setup["direction"] = bias
-
-        try:
-            bos_entry = float(
-                bos_setup["entry_level"]
-            )
-        except (
-            KeyError,
-            TypeError,
-            ValueError
-        ):
-            bos_entry = None
-
-        if bos_entry is not None:
-
-            # =================================================
-            # ÉVITER LES DOUBLONS
-            # =================================================
-
-            duplicate = any(
-                s["type"] == "BOS_RETEST"
-                and abs(
-                    float(s["entry_level"])
-                    - bos_entry
-                ) < 1e-10
-                for s in setups
-            )
-
-            if not duplicate:
-
-                setups.append({
-                    **bos_setup,
-                    "type": "BOS_RETEST",
-                    "direction": bias,
-                    "entry_level": bos_entry,
-                })
-
-                logger.info(
-                    f"[SETUP] {pair} | "
-                    f"BOS_RETEST | "
-                    f"{bias} | "
-                    f"entry={bos_entry:.5f} | "
-                    f"confirmation="
-                    f"{bos_setup.get('confirmation', 'OK')}"
-                )
-
-    # =========================================================
-    # 4. NETTOYAGE DES DOUBLONS
-    # =========================================================
-
-    unique_setups = []
-    seen = set()
-
-    for setup in setups:
-
-        try:
-            key = (
-                setup["type"],
-                setup["direction"],
-                round(
-                    float(setup["entry_level"]),
-                    8
-                )
-            )
-        except (
-            KeyError,
-            TypeError,
-            ValueError
-        ):
-            continue
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        unique_setups.append(setup)
-
-    # =========================================================
-    # 5. LOG FINAL
-    # =========================================================
-
-    logger.info(
-        f"[SETUPS] {pair} | "
-        f"BIAS={bias} | "
-        f"FVG/WICK/BOS="
-        f"{len(unique_setups)}"
-    )
-
-    return unique_setups
 # ============================================================
 # STRATÉGIE SIMPLIFIÉE
 # ============================================================
-def get_directional_bias(
-    df_h4: pd.DataFrame,
-    df_h1: pd.DataFrame
-) -> str:
+def get_directional_bias(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> str:
     """
     Détermine le biais directionnel H4/H1.
 
-    H4 = timeframe directeur.
-    H1 = confirmation / retracement.
-
-    Retour :
-        BUY
-        SELL
-        NEUTRAL
+    Règles :
+    - H4 est le timeframe directeur.
+    - H4 NEUTRAL => aucun trade.
+    - Structure confirmée : HH + HL = BUY / LH + LL = SELL.
+    - Structure faible : un seul signal directionnel, sans contradiction.
+    - Une structure contradictoire reste NEUTRAL.
+    - H4/H1 alignés => direction acceptée.
+    - H4 fort contre H1 faible => retracement autorisé si ADX + momentum confirment.
     """
 
-    def bias_from_structure(
-        df: pd.DataFrame,
-        label: str = ""
-    ):
+    def bias_from_structure(df, label=""):
         highs, lows = detect_swing_points(df, 5)
 
         if len(highs) < 2 or len(lows) < 2:
             return "NEUTRAL", 0, 0
 
+        # Structure des sommets
         hh = highs[-1]["price"] > highs[-2]["price"]
-        hl = lows[-1]["price"] > lows[-2]["price"]
-
         lh = highs[-1]["price"] < highs[-2]["price"]
+
+        # Structure des creux
+        hl = lows[-1]["price"] > lows[-2]["price"]
         ll = lows[-1]["price"] < lows[-2]["price"]
 
         buy_signals = int(hh) + int(hl)
         sell_signals = int(lh) + int(ll)
 
+        # ---------------------------------------------------------
+        # STRUCTURE CONTRADICTOIRE
+        # ---------------------------------------------------------
+        # Exemple :
+        # HH=True + LL=True
+        # ou
+        # HL=True + LH=True
+        #
+        # On ne force surtout pas une direction.
+        if buy_signals > 0 and sell_signals > 0:
+            return "NEUTRAL", buy_signals, sell_signals
+
+        # ---------------------------------------------------------
+        # STRUCTURE CONFIRMÉE
+        # ---------------------------------------------------------
         if buy_signals == 2:
             return "BUY", buy_signals, sell_signals
 
         if sell_signals == 2:
             return "SELL", buy_signals, sell_signals
 
-        if buy_signals == 1 and sell_signals == 0:
+        # ---------------------------------------------------------
+        # STRUCTURE FAIBLE / EN FORMATION
+        # ---------------------------------------------------------
+        if buy_signals == 1:
             return "BUY_WEAK", buy_signals, sell_signals
 
-        if sell_signals == 1 and buy_signals == 0:
+        if sell_signals == 1:
             return "SELL_WEAK", buy_signals, sell_signals
 
         return "NEUTRAL", buy_signals, sell_signals
 
-    # =========================================================
-    # STRUCTURE H4 / H1
-    # =========================================================
+    # =============================================================
+    # CALCUL H4 / H1
+    # =============================================================
 
-    b4, b4_buy, b4_sell = bias_from_structure(
-        df_h4,
-        "H4"
-    )
+    b4, b4_buy, b4_sell = bias_from_structure(df_h4, "H4")
+    b1, b1_buy, b1_sell = bias_from_structure(df_h1, "H1")
 
-    b1, b1_buy, b1_sell = bias_from_structure(
-        df_h1,
-        "H1"
-    )
+    # Indicateurs H1 uniquement utilisés pour le retracement
+    adx_h1 = calculate_adx(df_h1)
+    momentum_h1 = calculate_momentum(df_h1)
 
-    # =========================================================
-    # INDICATEURS H1
-    # =========================================================
-
-    try:
-        adx_h1 = float(calculate_adx(df_h1))
-    except Exception:
-        adx_h1 = 0.0
-
-    try:
-        momentum_h1 = float(calculate_momentum(df_h1))
-    except Exception:
-        momentum_h1 = 0.0
-
-    # =========================================================
-    # H4 NEUTRAL = PAS DE TRADE
-    # =========================================================
+    # =============================================================
+    # RÈGLE 1 — H4 DOIT ÊTRE DIRECTIONNEL
+    # =============================================================
 
     if b4 == "NEUTRAL":
         result = "NEUTRAL"
 
-    # =========================================================
-    # H4 BUY
-    # =========================================================
+    # =============================================================
+    # RÈGLE 2 — H4 BUY
+    # =============================================================
 
     elif b4 == "BUY":
 
-        # H1 confirme la tendance
+        # Alignement
         if b1 in ("BUY", "BUY_WEAK"):
             result = "BUY"
 
-        # H1 neutre mais momentum haussier
-        elif b1 == "NEUTRAL":
+        # Retracement H1 faible contre H4
+        elif (
+            b1 == "SELL_WEAK"
+            and adx_h1 > 25
+            and momentum_h1 > 0.3
+        ):
+            result = "BUY"
 
-            if adx_h1 >= 20 and momentum_h1 > 0.15:
-                result = "BUY"
-            else:
-                result = "NEUTRAL"
-
-        # H1 en retracement baissier faible
-        elif b1 == "SELL_WEAK":
-
-            if adx_h1 >= 25 and momentum_h1 > 0.15:
-                result = "BUY"
-            else:
-                result = "NEUTRAL"
-
-        # H1 SELL confirmé = contradiction
         else:
             result = "NEUTRAL"
 
-    # =========================================================
-    # H4 SELL
-    # =========================================================
+    # =============================================================
+    # RÈGLE 3 — H4 SELL
+    # =============================================================
 
     elif b4 == "SELL":
 
-        # H1 confirme la tendance
+        # Alignement
         if b1 in ("SELL", "SELL_WEAK"):
             result = "SELL"
 
-        # H1 neutre mais momentum baissier
-        elif b1 == "NEUTRAL":
+        # Retracement H1 faible contre H4
+        elif (
+            b1 == "BUY_WEAK"
+            and adx_h1 > 25
+            and momentum_h1 < -0.3
+        ):
+            result = "SELL"
 
-            if adx_h1 >= 20 and momentum_h1 < -0.15:
-                result = "SELL"
-            else:
-                result = "NEUTRAL"
-
-        # H1 en retracement haussier faible
-        elif b1 == "BUY_WEAK":
-
-            if adx_h1 >= 25 and momentum_h1 < -0.15:
-                result = "SELL"
-            else:
-                result = "NEUTRAL"
-
-        # H1 BUY confirmé = contradiction
         else:
             result = "NEUTRAL"
 
     else:
         result = "NEUTRAL"
 
-    # =========================================================
-    # LOG DIAGNOSTIC
-    # =========================================================
+    # =============================================================
+    # DIAGNOSTIC
+    # =============================================================
 
-    logger.info(
+    logger.debug(
         f"[BIAS_DIAG] "
         f"H4={b4} ({b4_buy}/{b4_sell}) | "
         f"H1={b1} ({b1_buy}/{b1_sell}) | "
@@ -836,455 +607,6 @@ def get_directional_bias(
 
     return result
     
-def detect_bos_retest(
-    df: pd.DataFrame,
-    direction: str
-) -> Optional[dict]:
-    """
-    Détecte un véritable BOS suivi d'un RETEST.
-
-    Structure recherchée :
-
-        BUY :
-            1. cassure d'un swing high
-            2. retour du prix sur le niveau cassé
-            3. maintien au-dessus du niveau
-            4. rejet OU micro-break haussier
-
-        SELL :
-            1. cassure d'un swing low
-            2. retour du prix sur le niveau cassé
-            3. maintien sous le niveau
-            4. rejet OU micro-break baissier
-
-    IMPORTANT :
-    Le BOS et le retest peuvent se produire sur des bougies
-    différentes.
-    """
-
-    # =========================================================
-    # SÉCURITÉ
-    # =========================================================
-
-    if df is None or len(df) < 30:
-        return None
-
-    if direction not in ("BUY", "SELL"):
-        return None
-
-    # =========================================================
-    # UNIQUEMENT LES BOUGIES CLÔTURÉES
-    # =========================================================
-
-    data = df.iloc[:-1].copy()
-
-    if len(data) < 25:
-        return None
-
-    atr = calculate_atr(data)
-
-    if atr is None or atr <= 0:
-        return None
-
-    atr = float(atr)
-
-    # =========================================================
-    # PARAMÈTRES
-    # =========================================================
-
-    # On cherche un BOS relativement récent.
-    MAX_BOS_AGE = 8
-
-    # Tolérance autour du niveau de retest.
-    # 0.25 ATR permet de ne pas rater les retests légèrement
-    # imparfaits.
-    RETEST_TOLERANCE_ATR = 0.25
-
-    retest_tolerance = atr * RETEST_TOLERANCE_ATR
-
-    # =========================================================
-    # SWINGS
-    # =========================================================
-
-    # Les swings doivent être établis AVANT le BOS.
-    structure_df = data.iloc[:-MAX_BOS_AGE]
-
-    swing_highs, swing_lows = detect_swing_points(
-        structure_df,
-        5
-    )
-
-    if direction == "BUY" and not swing_highs:
-        return None
-
-    if direction == "SELL" and not swing_lows:
-        return None
-
-    # =========================================================
-    # FONCTION DE CONFIRMATION
-    # =========================================================
-
-    def get_confirmation(
-        candle,
-        previous_candle,
-        side: str
-    ):
-        candle_high = float(candle["high"])
-        candle_low = float(candle["low"])
-        candle_open = float(candle["open"])
-        candle_close = float(candle["close"])
-
-        candle_range = candle_high - candle_low
-
-        if candle_range <= 0:
-            return False, 0.0, False
-
-        if side == "BUY":
-
-            lower_wick = (
-                min(
-                    candle_open,
-                    candle_close
-                )
-                - candle_low
-            )
-
-            rejection_ratio = (
-                lower_wick / candle_range
-            )
-
-            micro_break = (
-                candle_close
-                > float(previous_candle["high"])
-            )
-
-        else:
-
-            upper_wick = (
-                candle_high
-                - max(
-                    candle_open,
-                    candle_close
-                )
-            )
-
-            rejection_ratio = (
-                upper_wick / candle_range
-            )
-
-            micro_break = (
-                candle_close
-                < float(previous_candle["low"])
-            )
-
-        confirmation_ok = (
-            rejection_ratio >= 0.30
-            or micro_break
-        )
-
-        return (
-            confirmation_ok,
-            rejection_ratio,
-            micro_break
-        )
-
-    # =========================================================
-    # RECHERCHE DU BOS + RETEST
-    # =========================================================
-
-    # On part du BOS le plus récent.
-    # Cela évite de prendre un ancien niveau alors qu'un
-    # nouveau BOS vient d'apparaître.
-
-    for bos_offset in range(
-        1,
-        min(MAX_BOS_AGE, len(data) - 2) + 1
-    ):
-
-        bos_index = len(data) - 1 - bos_offset
-
-        if bos_index < 2:
-            continue
-
-        bos_candle = data.iloc[bos_index]
-        before_bos = data.iloc[bos_index - 1]
-
-        # =====================================================
-        # BUY
-        # =====================================================
-
-        if direction == "BUY":
-
-            # -------------------------------------------------
-            # Dernier swing high disponible avant le BOS
-            # -------------------------------------------------
-
-            valid_highs = [
-                h for h in swing_highs
-                if h.get("index", -1) < bos_index
-            ]
-
-            if not valid_highs:
-                continue
-
-            swing_level = float(
-                valid_highs[-1]["price"]
-            )
-
-            # -------------------------------------------------
-            # BOS HAUSSIER
-            # -------------------------------------------------
-
-            bos_confirmed = (
-                float(bos_candle["close"])
-                > swing_level
-                and
-                float(before_bos["close"])
-                <= swing_level
-            )
-
-            if not bos_confirmed:
-                continue
-
-            # -------------------------------------------------
-            # RETEST APRÈS LE BOS
-            # -------------------------------------------------
-
-            retest_found = False
-
-            for retest_index in range(
-                bos_index + 1,
-                len(data)
-            ):
-
-                retest_candle = data.iloc[
-                    retest_index
-                ]
-
-                retest_low = float(
-                    retest_candle["low"]
-                )
-
-                retest_close = float(
-                    retest_candle["close"]
-                )
-
-                # Le prix revient sur le niveau cassé.
-                touched_level = (
-                    retest_low
-                    <= swing_level + retest_tolerance
-                )
-
-                # On ne veut pas une cassure profonde
-                # qui invaliderait le BOS.
-                held_level = (
-                    retest_close
-                    >= swing_level - retest_tolerance
-                )
-
-                if not touched_level or not held_level:
-                    continue
-
-                retest_found = True
-
-                # ---------------------------------------------
-                # Confirmation du retest
-                # ---------------------------------------------
-
-                previous_retest = (
-                    data.iloc[retest_index - 1]
-                )
-
-                (
-                    confirmation_ok,
-                    rejection_ratio,
-                    micro_break
-                ) = get_confirmation(
-                    retest_candle,
-                    previous_retest,
-                    "BUY"
-                )
-
-                if not confirmation_ok:
-                    continue
-
-                # ---------------------------------------------
-                # Le retest doit être récent.
-                # ---------------------------------------------
-
-                bars_since_retest = (
-                    len(data) - 1 - retest_index
-                )
-
-                if bars_since_retest > 2:
-                    continue
-
-                current_price = float(
-                    data.iloc[-1]["close"]
-                )
-
-                return {
-                    "type": "BOS_RETEST",
-                    "direction": "BUY",
-                    "entry_level": swing_level,
-                    "bos_level": swing_level,
-                    "bos_index": bos_index,
-                    "retest_index": retest_index,
-                    "confirmation": (
-                        "rejection"
-                        if rejection_ratio >= 0.30
-                        else "micro_break"
-                    ),
-                    "strength": max(
-                        rejection_ratio,
-                        1.0 if micro_break else 0.0
-                    ),
-                    "distance_atr": (
-                        abs(
-                            current_price
-                            - swing_level
-                        ) / atr
-                    ),
-                }
-
-        # =====================================================
-        # SELL
-        # =====================================================
-
-        else:
-
-            # -------------------------------------------------
-            # Dernier swing low disponible avant le BOS
-            # -------------------------------------------------
-
-            valid_lows = [
-                l for l in swing_lows
-                if l.get("index", -1) < bos_index
-            ]
-
-            if not valid_lows:
-                continue
-
-            swing_level = float(
-                valid_lows[-1]["price"]
-            )
-
-            # -------------------------------------------------
-            # BOS BAISSIER
-            # -------------------------------------------------
-
-            bos_confirmed = (
-                float(bos_candle["close"])
-                < swing_level
-                and
-                float(before_bos["close"])
-                >= swing_level
-            )
-
-            if not bos_confirmed:
-                continue
-
-            # -------------------------------------------------
-            # RETEST APRÈS LE BOS
-            # -------------------------------------------------
-
-            retest_found = False
-
-            for retest_index in range(
-                bos_index + 1,
-                len(data)
-            ):
-
-                retest_candle = data.iloc[
-                    retest_index
-                ]
-
-                retest_high = float(
-                    retest_candle["high"]
-                )
-
-                retest_close = float(
-                    retest_candle["close"]
-                )
-
-                # Retour sur le niveau cassé.
-                touched_level = (
-                    retest_high
-                    >= swing_level - retest_tolerance
-                )
-
-                # Le prix reste sous le niveau.
-                held_level = (
-                    retest_close
-                    <= swing_level + retest_tolerance
-                )
-
-                if not touched_level or not held_level:
-                    continue
-
-                retest_found = True
-
-                # ---------------------------------------------
-                # Confirmation
-                # ---------------------------------------------
-
-                previous_retest = (
-                    data.iloc[retest_index - 1]
-                )
-
-                (
-                    confirmation_ok,
-                    rejection_ratio,
-                    micro_break
-                ) = get_confirmation(
-                    retest_candle,
-                    previous_retest,
-                    "SELL"
-                )
-
-                if not confirmation_ok:
-                    continue
-
-                # ---------------------------------------------
-                # Retest récent
-                # ---------------------------------------------
-
-                bars_since_retest = (
-                    len(data) - 1 - retest_index
-                )
-
-                if bars_since_retest > 2:
-                    continue
-
-                current_price = float(
-                    data.iloc[-1]["close"]
-                )
-
-                return {
-                    "type": "BOS_RETEST",
-                    "direction": "SELL",
-                    "entry_level": swing_level,
-                    "bos_level": swing_level,
-                    "bos_index": bos_index,
-                    "retest_index": retest_index,
-                    "confirmation": (
-                        "rejection"
-                        if rejection_ratio >= 0.30
-                        else "micro_break"
-                    ),
-                    "strength": max(
-                        rejection_ratio,
-                        1.0 if micro_break else 0.0
-                    ),
-                    "distance_atr": (
-                        abs(
-                            current_price
-                            - swing_level
-                        ) / atr
-                    ),
-                }
-
-    return None
 def get_confirmation_signal(
     df_m15: pd.DataFrame,
     direction: str
@@ -1387,521 +709,56 @@ def get_confirmation_signal(
 
     return False, f"direction inconnue: {direction}"
 
-def calculate_sl_tp_structural(
-    df_m15: pd.DataFrame,
-    direction: str,
-    entry: float,
-    pair: str
-) -> Tuple[float, float, float]:
-    """
-    Calcule un SL structurel et un TP à 2R.
-
-    Règles :
-    - BUY  : SL sous le dernier swing low M15.
-    - SELL : SL au-dessus du dernier swing high M15.
-    - Buffer de sécurité de 5 pips.
-    - Fallback ATR 1.5x si aucun swing exploitable.
-    - SL structurel maximum = 2 ATR.
-    - Si le SL structurel dépasse 2 ATR : setup rejeté.
-      On ne déplace PAS artificiellement le SL.
-    - Distance SL minimum = 10 pips.
-    - TP = exactement 2R après arrondi.
-    - Garantie finale RR >= 2.0.
-    """
-
-    pair = pair.upper()
-    direction = direction.upper()
-    entry = float(entry)
-
-    if direction not in ("BUY", "SELL"):
-        raise ValueError(
-            f"Direction inconnue: {direction}"
-        )
-
-    if df_m15 is None or len(df_m15) < 20:
-        raise ValueError(
-            f"Données M15 insuffisantes pour {pair}"
-        )
-
-    # ============================================================
-    # 1. INDICATEURS
-    # ============================================================
-
-    highs, lows = detect_swing_points(
-        df_m15,
-        5
-    )
-
-    pip = float(
-        get_pip_value(pair)
-    )
-
+def calculate_sl_tp_structural(df_m15: pd.DataFrame, direction: str, entry: float, pair: str) -> Tuple[float, float, float]:
+    highs, lows = detect_swing_points(df_m15, 5)
+    pip = 0.01 if "JPY" in pair else 0.0001
     atr = calculate_atr(df_m15)
-
-    if atr is None or atr <= 0:
-        atr = pip * 10
-
-    atr = float(atr)
-
-    if pip <= 0:
-        raise ValueError(
-            f"Valeur pip invalide pour {pair}"
-        )
-
-    # ============================================================
-    # 2. PARAMÈTRES
-    # ============================================================
-
-    SL_BUFFER_PIPS = 5
-    MIN_SL_PIPS = 10
-    MAX_SL_ATR = 2.0
-    FALLBACK_SL_ATR = 1.5
-    TARGET_RR = 2.0
-
-    sl_buffer = SL_BUFFER_PIPS * pip
-    min_sl_distance = MIN_SL_PIPS * pip
-    max_sl_distance = atr * MAX_SL_ATR
-
-    # ============================================================
-    # 3. SL STRUCTUREL
-    # ============================================================
-
+    
     if direction == "BUY":
-
-        # Dernier swing low réellement sous l'entrée.
-        valid_lows = [
-            low for low in lows
-            if float(low["price"]) < entry
-        ]
-
-        if valid_lows:
-
-            last_swing_low = float(
-                valid_lows[-1]["price"]
-            )
-
-            # SL sous le swing + buffer.
-            sl = (
-                last_swing_low
-                - sl_buffer
-            )
-
-            sl_source = (
-                f"SWING_LOW "
-                f"{last_swing_low:.5f}"
-            )
-
+        if lows:
+            sl = min(lows[-1]["price"], entry - 5*pip)
         else:
-
-            # Aucun swing exploitable.
-            sl = (
-                entry
-                - atr * FALLBACK_SL_ATR
-            )
-
-            sl_source = "ATR_FALLBACK"
-
-    else:  # SELL
-
-        # Dernier swing high réellement au-dessus
-        # de l'entrée.
-        valid_highs = [
-            high for high in highs
-            if float(high["price"]) > entry
-        ]
-
-        if valid_highs:
-
-            last_swing_high = float(
-                valid_highs[-1]["price"]
-            )
-
-            # SL au-dessus du swing + buffer.
-            sl = (
-                last_swing_high
-                + sl_buffer
-            )
-
-            sl_source = (
-                f"SWING_HIGH "
-                f"{last_swing_high:.5f}"
-            )
-
-        else:
-
-            # Aucun swing exploitable.
-            sl = (
-                entry
-                + atr * FALLBACK_SL_ATR
-            )
-
-            sl_source = "ATR_FALLBACK"
-
-    # ============================================================
-    # 4. PROTECTION : SL DU BON CÔTÉ
-    # ============================================================
-
-    if direction == "BUY" and sl >= entry:
-
-        sl = (
-            entry
-            - max(
-                min_sl_distance,
-                atr * FALLBACK_SL_ATR
-            )
-        )
-
-        sl_source = "ATR_FALLBACK_INVALID_STRUCTURE"
-
-    elif direction == "SELL" and sl <= entry:
-
-        sl = (
-            entry
-            + max(
-                min_sl_distance,
-                atr * FALLBACK_SL_ATR
-            )
-        )
-
-        sl_source = "ATR_FALLBACK_INVALID_STRUCTURE"
-
-    # ============================================================
-    # 5. RISQUE AVANT ARRONDI
-    # ============================================================
-
-    risk_before_rounding = abs(
-        entry - sl
-    )
-
-    if risk_before_rounding <= 0:
-        raise ValueError(
-            f"Risque nul {pair}"
-        )
-
-    # ============================================================
-    # 6. SL MAXIMUM = 2 ATR
-    #
-    # IMPORTANT :
-    # On REJETTE si la structure est trop éloignée.
-    # On ne coupe pas artificiellement le SL.
-    # ============================================================
-
-    if risk_before_rounding > max_sl_distance:
-
-        logger.debug(
-            f"[SL] {pair} | "
-            f"{direction} | "
-            f"SL structurel trop large | "
-            f"risk={risk_before_rounding:.5f} | "
-            f"max={max_sl_distance:.5f} | "
-            f"atr={atr:.5f} | "
-            f"source={sl_source} | "
-            f"→ SETUP REJECTED"
-        )
-
-        raise ValueError(
-            f"SL structurel > {MAX_SL_ATR:.1f} ATR "
-            f"(risk={risk_before_rounding:.5f}, "
-            f"max={max_sl_distance:.5f})"
-        )
-
-    # ============================================================
-    # 7. SL MINIMUM
-    # ============================================================
-
-    if risk_before_rounding < min_sl_distance:
-
-        logger.debug(
-            f"[SL] {pair} | "
-            f"{direction} | "
-            f"SL structurel trop proche | "
-            f"risk={risk_before_rounding:.5f} | "
-            f"min={min_sl_distance:.5f} | "
-            f"→ ajustement minimum"
-        )
-
-        if direction == "BUY":
-
-            sl = (
-                entry
-                - min_sl_distance
-            )
-
-        else:
-
-            sl = (
-                entry
-                + min_sl_distance
-            )
-
-    # ============================================================
-    # 8. ARRONDI DU SL
-    # ============================================================
-
-    sl = float(
-        round_price(
-            pair,
-            sl
-        )
-    )
-
-    # ============================================================
-    # 9. VÉRIFICATION APRÈS ARRONDI
-    # ============================================================
-
-    if direction == "BUY" and sl >= entry:
-
-        sl = float(
-            round_price(
-                pair,
-                entry - min_sl_distance
-            )
-        )
-
-    elif direction == "SELL" and sl <= entry:
-
-        sl = float(
-            round_price(
-                pair,
-                entry + min_sl_distance
-            )
-        )
-
-    risk = abs(
-        entry - sl
-    )
-
-    if risk <= 0:
-        raise ValueError(
-            f"Risk nul après arrondi {pair}"
-        )
-
-    # Vérification finale du plafond 2 ATR
-    if risk > max_sl_distance:
-
-        raise ValueError(
-            f"SL après arrondi > "
-            f"{MAX_SL_ATR:.1f} ATR "
-            f"(risk={risk:.5f}, "
-            f"max={max_sl_distance:.5f})"
-        )
-
-    # ============================================================
-    # 10. TP = 2R
-    # ============================================================
-
-    if direction == "BUY":
-
-        tp = (
-            entry
-            + risk * TARGET_RR
-        )
-
+            sl = entry - atr * 1.5
     else:
-
-        tp = (
-            entry
-            - risk * TARGET_RR
-        )
-
-    tp = float(
-        round_price(
-            pair,
-            tp
-        )
-    )
-
-    # ============================================================
-    # 11. RR FINAL APRÈS ARRONDI
-    # ============================================================
-
-    final_risk = abs(
-        entry - sl
-    )
-
-    final_reward = abs(
-        tp - entry
-    )
-
-    if final_risk <= 0:
-        raise ValueError(
-            f"Risque final nul {pair}"
-        )
-
-    rr = (
-        final_reward
-        / final_risk
-    )
-
-    # ============================================================
-    # 12. GARANTIE RR >= 2
-    # ============================================================
-
-    if rr < TARGET_RR:
-
-        if direction == "BUY":
-
-            tp = float(
-                round_price(
-                    pair,
-                    entry
-                    + final_risk * 2.01
-                )
-            )
-
+        if highs:
+            sl = max(highs[-1]["price"], entry + 5*pip)
         else:
+            sl = entry + atr * 1.5
+    
+    # --- NOUVEAU : LIMITER LE SL À 2 × ATR ---
+    max_sl_distance = atr * 2.0
+    current_risk = abs(entry - sl)
+    if current_risk > max_sl_distance:
+        if direction == "BUY":
+            sl = entry - max_sl_distance
+        else:
+            sl = entry + max_sl_distance
+        logger.debug(f"[SL] SL structurel trop large ({current_risk:.5f}), limité à {max_sl_distance:.5f}")
+    
+    risk = abs(entry - sl)
+    tp = entry + 2*risk if direction == "BUY" else entry - 2*risk
+    sl = float(round_price(pair, sl))
+    tp = float(round_price(pair, tp))
+    return sl, tp, risk
 
-            tp = float(
-                round_price(
-                    pair,
-                    entry
-                    - final_risk * 2.01
-                )
-            )
-
-        final_reward = abs(
-            tp - entry
-        )
-
-        rr = (
-            final_reward
-            / final_risk
-        )
-
-    # ============================================================
-    # 13. GARANTIE FINALE
-    # ============================================================
-
-    if rr < TARGET_RR:
-
-        raise ValueError(
-            f"RR final insuffisant après arrondi "
-            f"(RR={rr:.3f})"
-        )
-
-    # ============================================================
-    # 14. LOG
-    # ============================================================
-
-    logger.debug(
-        f"[SLTP] {pair} | "
-        f"{direction} | "
-        f"ENTRY={entry:.5f} | "
-        f"SL={sl:.5f} | "
-        f"TP={tp:.5f} | "
-        f"RISK={final_risk:.5f} | "
-        f"ATR={atr:.5f} | "
-        f"SL_ATR={final_risk / atr:.2f} | "
-        f"RR={rr:.3f} | "
-        f"SOURCE={sl_source}"
-    )
-
-    return (
-        sl,
-        tp,
-        final_risk
-    )
-def has_enough_room_to_tp(
-    df_h1: pd.DataFrame,
-    direction: str,
-    entry: float,
-    tp: float
-) -> bool:
-    """
-    Vérifie que le TP à 2R dispose d'un espace structurel suffisant.
-
-    On ne bloque pas un trade simplement parce qu'un swing H1
-    historique se trouve sur le chemin.
-
-    BUY :
-        on recherche uniquement les résistances H1 significatives
-        proches du TP.
-
-    SELL :
-        on recherche uniquement les supports H1 significatifs
-        proches du TP.
-
-    Le TP est considéré bloqué uniquement si un swing se trouve
-    dans les 15 derniers pourcents du trajet vers le TP.
-    """
-
-    if df_h1 is None or len(df_h1) < 20:
-        return True
-
-    try:
-        highs, lows = detect_swing_points(df_h1, 5)
-    except Exception as e:
-        logger.warning(
-            f"[TP_SPACE] erreur swings H1: {e}"
-        )
-        return True
-
+def has_enough_room_to_tp(df_h1: pd.DataFrame, direction: str, entry: float, tp: float) -> bool:
+    highs, lows = detect_swing_points(df_h1, 5)
     total_distance = abs(tp - entry)
-
-    if total_distance <= 0:
-        return False
-
-    # Zone réellement critique autour du TP.
-    # On laisse le prix traverser les petits swings intermédiaires.
-    critical_zone = total_distance * 0.15
-
-    # =========================================================
-    # BUY
-    # =========================================================
-
     if direction == "BUY":
-
         for h in highs:
-
-            level = float(h["price"])
-
-            if not (entry < level < tp):
-                continue
-
-            distance_to_tp = tp - level
-
-            # Seulement un swing très proche du TP bloque.
-            if distance_to_tp <= critical_zone:
-
-                logger.debug(
-                    f"[TP_SPACE] BUY | "
-                    f"résistance H1 proche du TP | "
-                    f"level={level:.5f} | "
-                    f"TP={tp:.5f} | "
-                    f"distance={distance_to_tp:.5f}"
-                )
-
-                return False
-
-    # =========================================================
-    # SELL
-    # =========================================================
-
-    elif direction == "SELL":
-
+            if entry < h["price"] < tp:
+                # Assouplissement : on accepte si le swing est petit (< 30% de la distance)
+                swing_size = h["price"] - entry
+                if swing_size > total_distance * 0.3:
+                    return False
+    else:
         for l in lows:
-
-            level = float(l["price"])
-
-            if not (tp < level < entry):
-                continue
-
-            distance_to_tp = level - tp
-
-            # Seulement un swing très proche du TP bloque.
-            if distance_to_tp <= critical_zone:
-
-                logger.debug(
-                    f"[TP_SPACE] SELL | "
-                    f"support H1 proche du TP | "
-                    f"level={level:.5f} | "
-                    f"TP={tp:.5f} | "
-                    f"distance={distance_to_tp:.5f}"
-                )
-
-                return False
-
+            if tp < l["price"] < entry:
+                swing_size = entry - l["price"]
+                if swing_size > total_distance * 0.3:
+                    return False
     return True
+
 def evaluate_setup(
     pair: str,
     direction: str,
@@ -1910,62 +767,62 @@ def evaluate_setup(
     df_h1: pd.DataFrame,
     current_price: float
 ) -> dict:
+    """
+    Évalue un setup avant exécution.
 
-    # =========================================================
-    # TYPES DE SETUPS AUTORISÉS
-    # =========================================================
+    Règles :
+    - Setup FVG_RETEST ou WICK_REJECTION uniquement.
+    - Distance maximale de 2 ATR.
+    - Confirmation M15 = rejet OU micro-break.
+    - SL structurel.
+    - SL minimum.
+    - TP doit avoir suffisamment de place sur H1.
+    - RR réel >= 2.0.
+    """
+
+    # =============================================================
+    # 1. TYPE DE SETUP
+    # =============================================================
 
     setup_type = entry.get("type")
 
-    if setup_type not in (
-        "FVG_RETEST",
-        "WICK_REJECTION",
-        "BOS_RETEST",
-    ):
+    if setup_type not in ("FVG_RETEST", "WICK_REJECTION"):
         return {
             "passed": False,
-            "reason": (
-                f"type non autorisé: "
-                f"{setup_type}"
-            ),
+            "reason": f"type non autorisé: {setup_type}"
         }
 
-    # =========================================================
-    # ENTRY LEVEL
-    # =========================================================
+    # =============================================================
+    # 2. NIVEAU D'ENTRÉE
+    # =============================================================
 
     try:
-        entry_level = float(
-            entry["entry_level"]
-        )
-    except Exception:
+        entry_level = float(entry["entry_level"])
+    except (KeyError, TypeError, ValueError):
         return {
             "passed": False,
-            "reason": "entry_level invalide",
+            "reason": "entry_level invalide"
         }
 
-    # =========================================================
-    # ATR
-    # =========================================================
+    # =============================================================
+    # 3. ATR / DISTANCE À LA ZONE
+    # =============================================================
 
     atr_price = calculate_atr(df_m15)
 
-    if atr_price is None or atr_price <= 0:
+    if atr_price <= 0:
         return {
             "passed": False,
-            "reason": "ATR invalide",
+            "reason": "ATR invalide"
         }
 
-    # =========================================================
-    # DISTANCE MAXIMALE
-    # =========================================================
-
     distance_ratio = (
-        abs(current_price - entry_level)
-        / atr_price
+        abs(current_price - entry_level) / atr_price
     )
 
-    if distance_ratio > 2.0:
+    MAX_DISTANCE_ATR = 2.0
+
+    if distance_ratio > MAX_DISTANCE_ATR:
         return {
             "passed": False,
             "reason": (
@@ -1973,91 +830,61 @@ def evaluate_setup(
                 f"(target={entry_level:.5f}, "
                 f"price={current_price:.5f}, "
                 f"dist={distance_ratio:.2f}ATR, "
-                f"max=2.0ATR)"
-            ),
+                f"max={MAX_DISTANCE_ATR:.1f}ATR)"
+            )
         }
 
-    # =========================================================
-    # CONFIRMATION
-    #
-    # BOS_RETEST possède déjà sa confirmation.
-    # Pour FVG/WICK on utilise la confirmation classique.
-    # =========================================================
+    # =============================================================
+    # 4. CONFIRMATION M15
+    # =============================================================
 
-    if setup_type == "BOS_RETEST":
+    confirm_ok, confirm_msg = get_confirmation_signal(
+        df_m15,
+        direction
+    )
 
-        confirmation_ok = True
+    if not confirm_ok:
 
-        confirmation_msg = (
-            f"BOS_RETEST "
-            f"{entry.get('confirmation', 'OK')}"
-        )
+        last = df_m15.iloc[-1]
 
-    else:
+        total = last["high"] - last["low"]
 
-        confirmation_ok, confirmation_msg = (
-            get_confirmation_signal(
-                df_m15,
-                direction
-            )
-        )
+        if total > 0:
 
-        if not confirmation_ok:
-
-            last = df_m15.iloc[-1]
-
-            total = (
-                float(last["high"])
-                - float(last["low"])
-            )
-
-            if total <= 0:
-                rejection_ratio = 0.0
-
-            elif direction == "BUY":
-
+            if direction == "BUY":
                 rejection_ratio = (
-                    min(
-                        float(last["open"]),
-                        float(last["close"])
-                    )
-                    - float(last["low"])
+                    min(last["open"], last["close"]) - last["low"]
                 ) / total
+
+                micro_break = (
+                    last["close"] > df_m15.iloc[-2]["high"]
+                )
 
             else:
-
                 rejection_ratio = (
-                    float(last["high"])
-                    - max(
-                        float(last["open"]),
-                        float(last["close"])
-                    )
+                    last["high"] - max(last["open"], last["close"])
                 ) / total
 
-            prev = df_m15.iloc[-2]
+                micro_break = (
+                    last["close"] < df_m15.iloc[-2]["low"]
+                )
 
-            micro_break = (
-                float(last["close"])
-                > float(prev["high"])
-                if direction == "BUY"
-                else
-                float(last["close"])
-                < float(prev["low"])
+        else:
+            rejection_ratio = 0.0
+            micro_break = False
+
+        return {
+            "passed": False,
+            "reason": (
+                f"confirmation: {confirm_msg} "
+                f"(rejet={rejection_ratio:.2f}, "
+                f"micro_break={micro_break})"
             )
+        }
 
-            return {
-                "passed": False,
-                "reason": (
-                    f"confirmation: "
-                    f"{confirmation_msg} "
-                    f"(rejet={rejection_ratio:.2f}, "
-                    f"micro_break={micro_break})"
-                ),
-            }
-
-    # =========================================================
-    # SL / TP STRUCTURELS
-    # =========================================================
+    # =============================================================
+    # 5. CALCUL SL / TP
+    # =============================================================
 
     sl, tp, risk = calculate_sl_tp_structural(
         df_m15,
@@ -2066,65 +893,35 @@ def evaluate_setup(
         pair
     )
 
-    if sl is None or tp is None:
+    if risk <= 0:
         return {
             "passed": False,
-            "reason": "SL/TP impossible à calculer",
+            "reason": "risk invalide"
         }
 
-    sl = float(sl)
-    tp = float(tp)
-    risk = float(risk)
+    # =============================================================
+    # 6. DISTANCE SL MINIMUM
+    # =============================================================
 
-    # =========================================================
-    # DISTANCE MINIMALE SL
-    # =========================================================
-
-    pip = (
-        0.01
-        if "JPY" in pair
-        else 0.0001
-    )
+    pip = 0.01 if "JPY" in pair else 0.0001
 
     min_sl_distance = pip * 10
 
-    if abs(entry_level - sl) < min_sl_distance:
+    actual_sl_distance = abs(entry_level - sl)
 
+    if actual_sl_distance < min_sl_distance:
         return {
             "passed": False,
             "reason": (
                 f"SL trop proche "
-                f"({abs(entry_level - sl):.5f} "
+                f"({actual_sl_distance:.5f} "
                 f"< {min_sl_distance:.5f})"
-            ),
+            )
         }
 
-    # =========================================================
-    # RR THÉORIQUE
-    # =========================================================
-
-    risk_distance = abs(
-        entry_level - sl
-    )
-
-    reward_distance = abs(
-        tp - entry_level
-    )
-
-    if risk_distance <= 0:
-        return {
-            "passed": False,
-            "reason": "risque nul",
-        }
-
-    rr = (
-        reward_distance
-        / risk_distance
-    )
-
-    # =========================================================
-    # VÉRIFICATION ESPACE H1
-    # =========================================================
+    # =============================================================
+    # 7. ESPACE DISPONIBLE POUR LE TP
+    # =============================================================
 
     if not has_enough_room_to_tp(
         df_h1,
@@ -2136,81 +933,48 @@ def evaluate_setup(
             "passed": False,
             "reason": (
                 f"RR réel impossible "
-                f"(swing H1 bloque le TP "
-                f"à {tp:.5f})"
-            ),
+                f"(swing H1 bloque le TP à {tp:.5f})"
+            )
         }
 
-    # =========================================================
-    # RR MINIMUM = 2R
-    # =========================================================
+    # =============================================================
+    # 8. RR RÉEL
+    # =============================================================
 
-    if rr < 2.0:
+    rr = abs(tp - entry_level) / abs(sl - entry_level)
 
+    RR_MIN = 2.0
+
+    if rr < RR_MIN:
         return {
             "passed": False,
             "reason": (
-                f"RR={rr:.3f} < 2.0 "
+                f"RR={rr:.3f} < {RR_MIN:.1f} "
                 f"(SL={sl:.5f}, "
                 f"TP={tp:.5f}, "
                 f"entry={entry_level:.5f})"
-            ),
+            )
         }
 
-    # =========================================================
-    # SUCCÈS
-    # =========================================================
-
-    try:
-        adx = calculate_adx(df_h1)
-    except Exception:
-        adx = 0.0
-
-    try:
-        momentum = calculate_momentum(df_m15)
-    except Exception:
-        momentum = 0.0
-
-    try:
-        rsi = get_last_rsi(
-            df_m15["close"]
-        )
-    except Exception:
-        rsi = 0.0
+    # =============================================================
+    # 9. SETUP VALIDÉ
+    # =============================================================
 
     return {
         "passed": True,
-
-        "type": setup_type,
-
-        "direction": direction,
-
         "entry_level": entry_level,
-
         "sl": sl,
-
         "tp": tp,
-
         "risk": risk,
-
         "rr": rr,
-
-        "confirmation": confirmation_msg,
-
         "metrics": {
-            "atr": price_to_pips(
-                atr_price,
-                pair
-            ),
-
-            "adx": adx,
-
-            "momentum": momentum,
-
-            "rsi": rsi,
-
+            "atr": price_to_pips(atr_price, pair),
+            "adx": calculate_adx(df_h1),
+            "momentum": calculate_momentum(df_m15),
             "session": get_session_label(),
-        },
+            "distance_atr": distance_ratio,
+            "confirmation": confirm_msg
+        }
     }
     
 def get_session_label() -> str:
@@ -2228,24 +992,7 @@ def price_to_pips(price_diff: float, pair: str) -> float:
     return abs(price_diff) / pip
 
 def get_pip_value(pair: str) -> float:
-    """
-    Taille de pip / unité de prix propre à chaque instrument.
-
-    IMPORTANT :
-    - Forex classique : 0.0001
-    - JPY : 0.01
-    - XAU/USD : 0.01
-
-    Utilise PIP_SIZE_V88 comme source unique.
-    """
-    pair = pair.upper()
-
-    return float(
-        PIP_SIZE_V88.get(
-            pair,
-            0.01 if "JPY" in pair else 0.0001
-        )
-    )
+    return 0.01 if "JPY" in pair else 0.0001
 
 # ============================================================
 # CLASSE TRADE TRACKER (MFE/MAE)
@@ -2339,469 +1086,143 @@ last_execution_attempt = {}
 def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: float, take_profit: float,
                   score: int, entry_type: str, eqs: int, setup_type: str, metrics: dict) -> str | None:
     global last_execution_attempt
-
-    pair = pair.upper()
+    pair_upper = pair.upper()
     direction = direction.upper()
 
-    # ========================================================
-    # 1. COOLDOWN
-    # ========================================================
+    # Cooldown
     now = time.time()
-
-    if (
-        pair in last_execution_attempt
-        and now - last_execution_attempt[pair] < EXECUTION_COOLDOWN_SECONDS
-    ):
-        logger.warning(f"[ORDER] Cooldown actif pour {pair}")
+    if pair_upper in last_execution_attempt and now - last_execution_attempt[pair_upper] < EXECUTION_COOLDOWN_SECONDS:
+        logger.warning(f"[ORDER] Cooldown actif pour {pair_upper}")
         return None
+    last_execution_attempt[pair_upper] = now
 
-    last_execution_attempt[pair] = now
-
-    # ========================================================
-    # 2. PARAMÈTRES
-    # ========================================================
     expected_entry = float(entry_price)
     sl = float(stop_loss)
     tp = float(take_profit)
 
+    # Calcul du RR initial
     risk = abs(expected_entry - sl)
     reward = abs(tp - expected_entry)
-
     if risk <= 0:
-        logger.error(f"[ORDER] {pair} | Risque nul")
+        logger.error("[ORDER] Risque nul")
         return None
-
     rr = reward / risk
 
-    # ========================================================
-    # 3. RR INITIAL STRICT
-    # ========================================================
+    # --- RÈGLE STRICTE : RR < RR_MIN_EXECUTION (2.10) → REJET ---
     if rr < RR_MIN_EXECUTION:
-        logger.warning(
-            f"[ORDER] {pair} | RR={rr:.2f} < {RR_MIN_EXECUTION} → rejet"
-        )
+        logger.warning(f"[ORDER] RR={rr:.2f} < {RR_MIN_EXECUTION} → rejet")
         return None
 
-    # ========================================================
-    # 4. VÉRIFICATIONS
-    # ========================================================
+    # Vérifications
     if ONE_TRADE_PER_PAIR and has_open_trade(pair):
-        logger.info(f"[ORDER] {pair}: trade déjà ouvert")
+        logger.info(f"{pair}: trade déjà ouvert")
         return None
-
     if open_trade_count() >= MAX_TRADES_TOTAL:
-        logger.info(f"[ORDER] Limite trades atteinte ({MAX_TRADES_TOTAL})")
+        logger.info("Limite trades atteinte")
         return None
-
     if is_maintenance_suspended():
-        logger.warning(f"[ORDER] {pair} | OANDA maintenance")
+        logger.warning("[ORDER] OANDA maintenance")
         return None
 
-    # ========================================================
-    # 5. VÉRIFICATION DU PRIX ACTUEL AVANT MARKET ORDER
-    #
-    # IMPORTANT :
-    # On ne déclenche PAS une MARKET ORDER si le marché
-    # est déjà trop éloigné du niveau d'entrée calculé.
-    # ========================================================
-    pricing = get_price_spread(pair)
-
-    bid = float(pricing.get("bid", 0) or 0)
-    ask = float(pricing.get("ask", 0) or 0)
-
-    if direction == "BUY":
-        market_entry = ask if ask > 0 else float(pricing.get("mid", 0) or 0)
-    else:
-        market_entry = bid if bid > 0 else float(pricing.get("mid", 0) or 0)
-
-    if market_entry <= 0:
-        logger.warning(
-            f"[ORDER] {pair} | Prix marché indisponible → rejet"
-        )
+    balance = get_balance()
+    if balance <= 0:
+        logger.error("Balance invalide")
         return None
 
     pip = get_pip_value(pair)
+    min_sl_distance = pip * 10   # distance minimale absolue
 
-    # Tolérance d'entrée.
-    #
-    # Forex : 5 pips minimum
-    # JPY    : 5 pips
-    # XAU    : 20 pips = 0.20
-    # Indices : 5 pips selon leur taille configurée
-    #
-    # On ajoute également une petite marge proportionnelle pour
-    # éviter qu'un instrument à prix élevé soit bloqué inutilement.
-    if pair == "XAU_USD":
-        max_entry_deviation = max(pip * 20, expected_entry * 0.00005)
-    elif "JPY" in pair:
-        max_entry_deviation = max(pip * 5, expected_entry * 0.00003)
-    else:
-        max_entry_deviation = max(pip * 5, expected_entry * 0.00003)
-
-    entry_deviation = abs(market_entry - expected_entry)
-
-    logger.info(
-        f"[ENTRY_CHECK] {pair} | {direction} | "
-        f"TARGET={expected_entry:.5f} | MARKET={market_entry:.5f} | "
-        f"DEV={entry_deviation:.5f} | MAX={max_entry_deviation:.5f}"
-    )
-
-    if entry_deviation > max_entry_deviation:
-        logger.warning(
-            f"[ENTRY_REJECT] {pair} | marché trop éloigné du niveau d'entrée | "
-            f"target={expected_entry:.5f} | market={market_entry:.5f} | "
-            f"écart={entry_deviation:.5f} > max={max_entry_deviation:.5f}"
-        )
-        return None
-
-    # ========================================================
-    # 6. BALANCE / RISK
-    # ========================================================
-    balance = get_balance()
-
-    if balance <= 0:
-        logger.error(f"[ORDER] {pair} | Balance invalide")
-        return None
-
-    min_sl_distance = pip * 10
-
+    # --- Vérification que le SL est suffisamment éloigné (structurel) ---
     if risk < min_sl_distance:
-        logger.warning(
-            f"[ORDER] {pair} | SL trop proche "
-            f"({risk:.5f} < {min_sl_distance:.5f}) → rejet"
-        )
+        logger.warning(f"[ORDER] SL trop proche ({risk:.5f} < {min_sl_distance:.5f}) → rejet")
         return None
 
-    # ========================================================
-    # 7. RISK PERCENTAGE
-    # ========================================================
+    # Risque en ASIA réduit (mais pas de bypass, juste un ajustement de sizing)
     hour = datetime.utcnow().hour
     is_asia = (21 <= hour or hour < 7)
     risk_pct = 0.5 if is_asia else RISK_PERCENTAGE
 
-    units = calculate_units(
-        pair,
-        expected_entry,
-        sl,
-        balance,
-        risk_pct
-    )
-
+    units = calculate_units(pair, expected_entry, sl, balance, risk_pct)
     if units <= 0:
-        logger.error(f"[ORDER] {pair} | Units invalides: {units}")
+        logger.error(f"Units invalides: {units}")
         return None
 
-    # ========================================================
-    # 8. MARGE
-    # ========================================================
-    margin_info = calculate_margin(
-        pair,
-        units,
-        expected_entry
-    )
-
+    margin_info = calculate_margin(pair, units, expected_entry)
     if not margin_info["sufficient"]:
-        units = cap_units_by_margin(
-            pair,
-            units,
-            expected_entry,
-            balance
-        )
-
+        units = cap_units_by_margin(pair, units, expected_entry, balance)
         if units <= 0:
-            logger.error(
-                f"[RISK] {pair} | Marge insuffisante"
-            )
+            logger.error("[RISK] Marge insuffisante")
             return None
 
-    # ========================================================
-    # 9. MARKET ORDER
-    # ========================================================
     signed_units = units if direction == "BUY" else -units
-
     order_data = {
         "order": {
             "type": "MARKET",
             "instrument": pair,
             "units": str(int(signed_units)),
             "positionFill": "DEFAULT",
-
-            "stopLossOnFill": {
-                "price": round_price(pair, sl),
-                "timeInForce": "GTC"
-            },
-
-            "takeProfitOnFill": {
-                "price": round_price(pair, tp),
-                "timeInForce": "GTC"
-            }
+            "stopLossOnFill": {"price": round_price(pair, sl), "timeInForce": "GTC"},
+            "takeProfitOnFill": {"price": round_price(pair, tp), "timeInForce": "GTC"}
         }
     }
 
-    logger.info(
-        f"[ORDER_EXPECTED] {pair} | {direction} | "
-        f"ENTRY={expected_entry:.5f} | "
-        f"SL={sl:.5f} | "
-        f"TP={tp:.5f} | "
-        f"RR={rr:.2f} | "
-        f"UNITS={units}"
-    )
+    logger.info(f"[ORDER_EXPECTED] {pair} | {direction} | ENTRY={expected_entry:.5f} | SL={sl:.5f} | TP={tp:.5f} | RR={rr:.2f}")
 
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false")
         return "SIMULATION"
 
-    # ========================================================
-    # 10. ENVOI OANDA
-    # ========================================================
     try:
         api = v88_client()
-
-        r = orders.OrderCreate(
-            accountID=OANDA_ACCOUNT_ID,
-            data=order_data
-        )
-
+        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
         api.request(r)
         resp = r.response
 
-        # ----------------------------------------------------
-        # REJET OANDA
-        # ----------------------------------------------------
         if resp.get("orderRejectTransaction"):
             reject = resp["orderRejectTransaction"]
-
-            logger.error(
-                f"[ORDER] REJECT {pair}: "
-                f"{reject.get('rejectReason')}"
-            )
-
+            logger.error(f"[ORDER] REJECT {pair}: {reject.get('rejectReason')}")
             return None
 
-        # ----------------------------------------------------
-        # RÉCUPÉRATION DU FILL
-        # ----------------------------------------------------
         fill = resp.get("orderFillTransaction", {})
-
         trade_id = None
         actual_entry = None
-
         if fill.get("tradeOpened"):
             trade_id = fill["tradeOpened"].get("tradeID")
+        if fill.get("price"):
+            actual_entry = float(fill["price"])
 
-        if fill.get("price") is not None:
-            try:
-                actual_entry = float(fill["price"])
-            except Exception:
-                actual_entry = None
-
-        # ----------------------------------------------------
-        # FALLBACK : RECHERCHE DU TRADE OUVERT
-        # ----------------------------------------------------
         if not trade_id:
-
+            # Fallback : chercher dans les trades ouverts
             time.sleep(1)
-
-            open_trades = get_open_trades(
-                force_refresh=True
-            )
-
-            candidates = []
-
+            open_trades = get_open_trades(force_refresh=True)
             for t in open_trades:
+                if t.get("instrument") == pair:
+                    t_dir = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
+                    if t_dir == direction and abs(float(t.get("price")) - expected_entry) < pip*5:
+                        trade_id = t.get("id")
+                        actual_entry = float(t.get("price"))
+                        break
 
-                if t.get("instrument") != pair:
-                    continue
-
-                current_units = float(
-                    t.get("currentUnits", 0)
-                )
-
-                t_direction = (
-                    "BUY"
-                    if current_units > 0
-                    else "SELL"
-                )
-
-                if t_direction != direction:
-                    continue
-
-                t_entry = float(
-                    t.get("price", 0)
-                )
-
-                if t_entry <= 0:
-                    continue
-
-                candidates.append(
-                    (
-                        abs(t_entry - expected_entry),
-                        t
-                    )
-                )
-
-            if candidates:
-
-                candidates.sort(
-                    key=lambda x: x[0]
-                )
-
-                _, best_trade = candidates[0]
-
-                trade_id = best_trade.get("id")
-
-                actual_entry = float(
-                    best_trade.get("price")
-                )
-
-        # ----------------------------------------------------
-        # TRADE NON CONFIRMÉ
-        # ----------------------------------------------------
         if not trade_id:
-
-            logger.error(
-                f"[ORDER] {pair} | "
-                f"Trade non confirmé"
-            )
-
+            logger.error(f"[ORDER] Trade non confirmé {pair}")
             return None
-
-        # ----------------------------------------------------
-        # FALLBACK PRIX
-        # ----------------------------------------------------
-        if actual_entry is None:
-
-            try:
-
-                trade_details = get_trade_details(
-                    trade_id
-                )
-
-                if trade_details:
-                    actual_entry = float(
-                        trade_details.get(
-                            "price",
-                            expected_entry
-                        )
-                    )
-
-            except Exception as e:
-
-                logger.warning(
-                    f"[ORDER] {pair} | "
-                    f"Impossible récupérer fill réel: {e}"
-                )
 
         if actual_entry is None:
             actual_entry = expected_entry
 
-        # ====================================================
-        # 11. VÉRIFICATION DU FILL RÉEL
-        # ====================================================
-        fill_deviation = abs(
-            actual_entry - expected_entry
-        )
+        # Recalcul du RR réel à titre informatif (non utilisé pour modifier le TP)
+        risk_real = abs(actual_entry - sl)
+        reward_real = abs(tp - actual_entry)
+        rr_real = reward_real / risk_real if risk_real > 0 else 0
+        slippage = (actual_entry - expected_entry) / pip
 
-        # IMPORTANT :
-        # Le prix de fill ne doit pas pouvoir détruire
-        # complètement le RR.
-        risk_real = abs(
-            actual_entry - sl
-        )
+        logger.info(f"[FILL_REAL] {pair} | ID={trade_id} | ENTRY_EXPECTED={expected_entry:.5f} | ENTRY_FILLED={actual_entry:.5f} | SLIPPAGE={slippage:+.1f} pips | RR={rr_real:.2f}")
 
-        reward_real = abs(
-            tp - actual_entry
-        )
+        if rr_real < 2.0:
+            logger.warning(f"[SLIPPAGE] RR réel {rr_real:.2f} < 2.0 (TP inchangé)")
 
-        rr_real = (
-            reward_real / risk_real
-            if risk_real > 0
-            else 0
-        )
-
-        slippage_pips = (
-            (actual_entry - expected_entry) / pip
-        )
-
-        logger.info(
-            f"[FILL_REAL] {pair} | "
-            f"ID={trade_id} | "
-            f"ENTRY_EXPECTED={expected_entry:.5f} | "
-            f"ENTRY_FILLED={actual_entry:.5f} | "
-            f"SLIPPAGE={slippage_pips:+.2f} pips | "
-            f"RR_REAL={rr_real:.2f}"
-        )
-
-        # ====================================================
-        # 12. PROTECTION ABSOLUE DU RR
-        # ====================================================
-        if rr_real < RR_MIN_EXECUTION:
-
-            logger.error(
-                f"[ORDER_ABORT] {pair} | "
-                f"RR réel {rr_real:.2f} < "
-                f"{RR_MIN_EXECUTION} après exécution"
-            )
-
-            # Le trade existe déjà.
-            # On ne laisse surtout pas courir une position
-            # avec un RR dégradé.
-            try:
-
-                close_data = {
-                    "units": "ALL"
-                }
-
-                close_request = trades.TradeClose(
-                    accountID=OANDA_ACCOUNT_ID,
-                    tradeID=str(trade_id),
-                    data=close_data
-                )
-
-                api.request(close_request)
-
-                logger.error(
-                    f"[ORDER_ABORT] {pair} | "
-                    f"Trade {trade_id} fermé immédiatement "
-                    f"car RR réel insuffisant"
-                )
-
-            except Exception as close_error:
-
-                logger.critical(
-                    f"[ORDER_ABORT] {pair} | "
-                    f"IMPOSSIBLE DE FERMER LE TRADE "
-                    f"{trade_id}: {close_error}"
-                )
-
-            return None
-
-        # ====================================================
-        # 13. LOG SLIPPAGE
-        # ====================================================
-        if fill_deviation > max_entry_deviation:
-
-            logger.warning(
-                f"[SLIPPAGE] {pair} | "
-                f"Fill hors tolérance malgré contrôle pré-ordre | "
-                f"écart={fill_deviation:.5f} | "
-                f"max={max_entry_deviation:.5f}"
-            )
-
-        # ====================================================
-        # 14. ENREGISTREMENT
-        # ====================================================
-        trade_tracker.add_trade(
-            trade_id,
-            pair,
-            direction,
-            actual_entry,
-            sl,
-            tp,
-            setup_type,
-            eqs
-        )
-
+        # Enregistrement du trade
+        trade_tracker.add_trade(trade_id, pair, direction, actual_entry, sl, tp, setup_type, eqs)
         open_trade_details[str(trade_id)] = {
             "entry": actual_entry,
             "sl": sl,
@@ -2814,27 +1235,13 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
             **metrics
         }
 
-        logger.info(
-            f"[ORDER_CONFIRMED] {pair} | "
-            f"{direction} | "
-            f"ID={trade_id} | "
-            f"ENTRY={actual_entry:.5f} | "
-            f"SL={sl:.5f} | "
-            f"TP={tp:.5f} | "
-            f"RR={rr_real:.2f}"
-        )
-
+        logger.info(f"[ORDER_CONFIRMED] {pair} | {direction} | ID={trade_id} | ENTRY={actual_entry:.5f} | SL={sl:.5f} | TP={tp:.5f} | RR={rr_real:.2f}")
         return str(trade_id)
 
     except Exception as e:
-
-        logger.error(
-            f"[ORDER] Erreur {pair}: {e}"
-        )
-
+        logger.error(f"[ORDER] Erreur {pair}: {e}")
         if is_oanda_maintenance(e):
             handle_api_error(e)
-
         return None
 
 # ============================================================
