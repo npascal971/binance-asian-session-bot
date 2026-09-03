@@ -992,7 +992,13 @@ def price_to_pips(price_diff: float, pair: str) -> float:
     return abs(price_diff) / pip
 
 def get_pip_value(pair: str) -> float:
-    return 0.01 if "JPY" in pair else 0.0001
+    """
+    Retourne la taille de pip/tick adaptée à chaque instrument.
+    Utilise la configuration PIP_SIZE_V88 pour éviter de traiter
+    XAU/USD ou les indices comme des paires Forex classiques.
+    """
+    pair = pair.upper()
+    return float(PIP_SIZE_V88.get(pair, 0.01 if "JPY" in pair else 0.0001))
 
 # ============================================================
 # CLASSE TRADE TRACKER (MFE/MAE)
@@ -1086,143 +1092,469 @@ last_execution_attempt = {}
 def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: float, take_profit: float,
                   score: int, entry_type: str, eqs: int, setup_type: str, metrics: dict) -> str | None:
     global last_execution_attempt
-    pair_upper = pair.upper()
+
+    pair = pair.upper()
     direction = direction.upper()
 
-    # Cooldown
+    # ========================================================
+    # 1. COOLDOWN
+    # ========================================================
     now = time.time()
-    if pair_upper in last_execution_attempt and now - last_execution_attempt[pair_upper] < EXECUTION_COOLDOWN_SECONDS:
-        logger.warning(f"[ORDER] Cooldown actif pour {pair_upper}")
-        return None
-    last_execution_attempt[pair_upper] = now
 
+    if (
+        pair in last_execution_attempt
+        and now - last_execution_attempt[pair] < EXECUTION_COOLDOWN_SECONDS
+    ):
+        logger.warning(f"[ORDER] Cooldown actif pour {pair}")
+        return None
+
+    last_execution_attempt[pair] = now
+
+    # ========================================================
+    # 2. PARAMÈTRES
+    # ========================================================
     expected_entry = float(entry_price)
     sl = float(stop_loss)
     tp = float(take_profit)
 
-    # Calcul du RR initial
     risk = abs(expected_entry - sl)
     reward = abs(tp - expected_entry)
+
     if risk <= 0:
-        logger.error("[ORDER] Risque nul")
+        logger.error(f"[ORDER] {pair} | Risque nul")
         return None
+
     rr = reward / risk
 
-    # --- RÈGLE STRICTE : RR < RR_MIN_EXECUTION (2.10) → REJET ---
+    # ========================================================
+    # 3. RR INITIAL STRICT
+    # ========================================================
     if rr < RR_MIN_EXECUTION:
-        logger.warning(f"[ORDER] RR={rr:.2f} < {RR_MIN_EXECUTION} → rejet")
+        logger.warning(
+            f"[ORDER] {pair} | RR={rr:.2f} < {RR_MIN_EXECUTION} → rejet"
+        )
         return None
 
-    # Vérifications
+    # ========================================================
+    # 4. VÉRIFICATIONS
+    # ========================================================
     if ONE_TRADE_PER_PAIR and has_open_trade(pair):
-        logger.info(f"{pair}: trade déjà ouvert")
-        return None
-    if open_trade_count() >= MAX_TRADES_TOTAL:
-        logger.info("Limite trades atteinte")
-        return None
-    if is_maintenance_suspended():
-        logger.warning("[ORDER] OANDA maintenance")
+        logger.info(f"[ORDER] {pair}: trade déjà ouvert")
         return None
 
-    balance = get_balance()
-    if balance <= 0:
-        logger.error("Balance invalide")
+    if open_trade_count() >= MAX_TRADES_TOTAL:
+        logger.info(f"[ORDER] Limite trades atteinte ({MAX_TRADES_TOTAL})")
+        return None
+
+    if is_maintenance_suspended():
+        logger.warning(f"[ORDER] {pair} | OANDA maintenance")
+        return None
+
+    # ========================================================
+    # 5. VÉRIFICATION DU PRIX ACTUEL AVANT MARKET ORDER
+    #
+    # IMPORTANT :
+    # On ne déclenche PAS une MARKET ORDER si le marché
+    # est déjà trop éloigné du niveau d'entrée calculé.
+    # ========================================================
+    pricing = get_price_spread(pair)
+
+    bid = float(pricing.get("bid", 0) or 0)
+    ask = float(pricing.get("ask", 0) or 0)
+
+    if direction == "BUY":
+        market_entry = ask if ask > 0 else float(pricing.get("mid", 0) or 0)
+    else:
+        market_entry = bid if bid > 0 else float(pricing.get("mid", 0) or 0)
+
+    if market_entry <= 0:
+        logger.warning(
+            f"[ORDER] {pair} | Prix marché indisponible → rejet"
+        )
         return None
 
     pip = get_pip_value(pair)
-    min_sl_distance = pip * 10   # distance minimale absolue
 
-    # --- Vérification que le SL est suffisamment éloigné (structurel) ---
-    if risk < min_sl_distance:
-        logger.warning(f"[ORDER] SL trop proche ({risk:.5f} < {min_sl_distance:.5f}) → rejet")
+    # Tolérance d'entrée.
+    #
+    # Forex : 5 pips minimum
+    # JPY    : 5 pips
+    # XAU    : 20 pips = 0.20
+    # Indices : 5 pips selon leur taille configurée
+    #
+    # On ajoute également une petite marge proportionnelle pour
+    # éviter qu'un instrument à prix élevé soit bloqué inutilement.
+    if pair == "XAU_USD":
+        max_entry_deviation = max(pip * 20, expected_entry * 0.00005)
+    elif "JPY" in pair:
+        max_entry_deviation = max(pip * 5, expected_entry * 0.00003)
+    else:
+        max_entry_deviation = max(pip * 5, expected_entry * 0.00003)
+
+    entry_deviation = abs(market_entry - expected_entry)
+
+    logger.info(
+        f"[ENTRY_CHECK] {pair} | {direction} | "
+        f"TARGET={expected_entry:.5f} | MARKET={market_entry:.5f} | "
+        f"DEV={entry_deviation:.5f} | MAX={max_entry_deviation:.5f}"
+    )
+
+    if entry_deviation > max_entry_deviation:
+        logger.warning(
+            f"[ENTRY_REJECT] {pair} | marché trop éloigné du niveau d'entrée | "
+            f"target={expected_entry:.5f} | market={market_entry:.5f} | "
+            f"écart={entry_deviation:.5f} > max={max_entry_deviation:.5f}"
+        )
         return None
 
-    # Risque en ASIA réduit (mais pas de bypass, juste un ajustement de sizing)
+    # ========================================================
+    # 6. BALANCE / RISK
+    # ========================================================
+    balance = get_balance()
+
+    if balance <= 0:
+        logger.error(f"[ORDER] {pair} | Balance invalide")
+        return None
+
+    min_sl_distance = pip * 10
+
+    if risk < min_sl_distance:
+        logger.warning(
+            f"[ORDER] {pair} | SL trop proche "
+            f"({risk:.5f} < {min_sl_distance:.5f}) → rejet"
+        )
+        return None
+
+    # ========================================================
+    # 7. RISK PERCENTAGE
+    # ========================================================
     hour = datetime.utcnow().hour
     is_asia = (21 <= hour or hour < 7)
     risk_pct = 0.5 if is_asia else RISK_PERCENTAGE
 
-    units = calculate_units(pair, expected_entry, sl, balance, risk_pct)
+    units = calculate_units(
+        pair,
+        expected_entry,
+        sl,
+        balance,
+        risk_pct
+    )
+
     if units <= 0:
-        logger.error(f"Units invalides: {units}")
+        logger.error(f"[ORDER] {pair} | Units invalides: {units}")
         return None
 
-    margin_info = calculate_margin(pair, units, expected_entry)
+    # ========================================================
+    # 8. MARGE
+    # ========================================================
+    margin_info = calculate_margin(
+        pair,
+        units,
+        expected_entry
+    )
+
     if not margin_info["sufficient"]:
-        units = cap_units_by_margin(pair, units, expected_entry, balance)
+        units = cap_units_by_margin(
+            pair,
+            units,
+            expected_entry,
+            balance
+        )
+
         if units <= 0:
-            logger.error("[RISK] Marge insuffisante")
+            logger.error(
+                f"[RISK] {pair} | Marge insuffisante"
+            )
             return None
 
+    # ========================================================
+    # 9. MARKET ORDER
+    # ========================================================
     signed_units = units if direction == "BUY" else -units
+
     order_data = {
         "order": {
             "type": "MARKET",
             "instrument": pair,
             "units": str(int(signed_units)),
             "positionFill": "DEFAULT",
-            "stopLossOnFill": {"price": round_price(pair, sl), "timeInForce": "GTC"},
-            "takeProfitOnFill": {"price": round_price(pair, tp), "timeInForce": "GTC"}
+
+            "stopLossOnFill": {
+                "price": round_price(pair, sl),
+                "timeInForce": "GTC"
+            },
+
+            "takeProfitOnFill": {
+                "price": round_price(pair, tp),
+                "timeInForce": "GTC"
+            }
         }
     }
 
-    logger.info(f"[ORDER_EXPECTED] {pair} | {direction} | ENTRY={expected_entry:.5f} | SL={sl:.5f} | TP={tp:.5f} | RR={rr:.2f}")
+    logger.info(
+        f"[ORDER_EXPECTED] {pair} | {direction} | "
+        f"ENTRY={expected_entry:.5f} | "
+        f"SL={sl:.5f} | "
+        f"TP={tp:.5f} | "
+        f"RR={rr:.2f} | "
+        f"UNITS={units}"
+    )
 
     if not EXECUTE_TRADES:
         logger.info("[ORDER] EXECUTE_TRADES=false")
         return "SIMULATION"
 
+    # ========================================================
+    # 10. ENVOI OANDA
+    # ========================================================
     try:
         api = v88_client()
-        r = orders.OrderCreate(accountID=OANDA_ACCOUNT_ID, data=order_data)
+
+        r = orders.OrderCreate(
+            accountID=OANDA_ACCOUNT_ID,
+            data=order_data
+        )
+
         api.request(r)
         resp = r.response
 
+        # ----------------------------------------------------
+        # REJET OANDA
+        # ----------------------------------------------------
         if resp.get("orderRejectTransaction"):
             reject = resp["orderRejectTransaction"]
-            logger.error(f"[ORDER] REJECT {pair}: {reject.get('rejectReason')}")
+
+            logger.error(
+                f"[ORDER] REJECT {pair}: "
+                f"{reject.get('rejectReason')}"
+            )
+
             return None
 
+        # ----------------------------------------------------
+        # RÉCUPÉRATION DU FILL
+        # ----------------------------------------------------
         fill = resp.get("orderFillTransaction", {})
+
         trade_id = None
         actual_entry = None
+
         if fill.get("tradeOpened"):
             trade_id = fill["tradeOpened"].get("tradeID")
-        if fill.get("price"):
-            actual_entry = float(fill["price"])
 
+        if fill.get("price") is not None:
+            try:
+                actual_entry = float(fill["price"])
+            except Exception:
+                actual_entry = None
+
+        # ----------------------------------------------------
+        # FALLBACK : RECHERCHE DU TRADE OUVERT
+        # ----------------------------------------------------
         if not trade_id:
-            # Fallback : chercher dans les trades ouverts
+
             time.sleep(1)
-            open_trades = get_open_trades(force_refresh=True)
-            for t in open_trades:
-                if t.get("instrument") == pair:
-                    t_dir = "BUY" if float(t.get("currentUnits", 0)) > 0 else "SELL"
-                    if t_dir == direction and abs(float(t.get("price")) - expected_entry) < pip*5:
-                        trade_id = t.get("id")
-                        actual_entry = float(t.get("price"))
-                        break
 
+            open_trades = get_open_trades(
+                force_refresh=True
+            )
+
+            candidates = []
+
+            for t in open_trades:
+
+                if t.get("instrument") != pair:
+                    continue
+
+                current_units = float(
+                    t.get("currentUnits", 0)
+                )
+
+                t_direction = (
+                    "BUY"
+                    if current_units > 0
+                    else "SELL"
+                )
+
+                if t_direction != direction:
+                    continue
+
+                t_entry = float(
+                    t.get("price", 0)
+                )
+
+                if t_entry <= 0:
+                    continue
+
+                candidates.append(
+                    (
+                        abs(t_entry - expected_entry),
+                        t
+                    )
+                )
+
+            if candidates:
+
+                candidates.sort(
+                    key=lambda x: x[0]
+                )
+
+                _, best_trade = candidates[0]
+
+                trade_id = best_trade.get("id")
+
+                actual_entry = float(
+                    best_trade.get("price")
+                )
+
+        # ----------------------------------------------------
+        # TRADE NON CONFIRMÉ
+        # ----------------------------------------------------
         if not trade_id:
-            logger.error(f"[ORDER] Trade non confirmé {pair}")
+
+            logger.error(
+                f"[ORDER] {pair} | "
+                f"Trade non confirmé"
+            )
+
             return None
+
+        # ----------------------------------------------------
+        # FALLBACK PRIX
+        # ----------------------------------------------------
+        if actual_entry is None:
+
+            try:
+
+                trade_details = get_trade_details(
+                    trade_id
+                )
+
+                if trade_details:
+                    actual_entry = float(
+                        trade_details.get(
+                            "price",
+                            expected_entry
+                        )
+                    )
+
+            except Exception as e:
+
+                logger.warning(
+                    f"[ORDER] {pair} | "
+                    f"Impossible récupérer fill réel: {e}"
+                )
 
         if actual_entry is None:
             actual_entry = expected_entry
 
-        # Recalcul du RR réel à titre informatif (non utilisé pour modifier le TP)
-        risk_real = abs(actual_entry - sl)
-        reward_real = abs(tp - actual_entry)
-        rr_real = reward_real / risk_real if risk_real > 0 else 0
-        slippage = (actual_entry - expected_entry) / pip
+        # ====================================================
+        # 11. VÉRIFICATION DU FILL RÉEL
+        # ====================================================
+        fill_deviation = abs(
+            actual_entry - expected_entry
+        )
 
-        logger.info(f"[FILL_REAL] {pair} | ID={trade_id} | ENTRY_EXPECTED={expected_entry:.5f} | ENTRY_FILLED={actual_entry:.5f} | SLIPPAGE={slippage:+.1f} pips | RR={rr_real:.2f}")
+        # IMPORTANT :
+        # Le prix de fill ne doit pas pouvoir détruire
+        # complètement le RR.
+        risk_real = abs(
+            actual_entry - sl
+        )
 
-        if rr_real < 2.0:
-            logger.warning(f"[SLIPPAGE] RR réel {rr_real:.2f} < 2.0 (TP inchangé)")
+        reward_real = abs(
+            tp - actual_entry
+        )
 
-        # Enregistrement du trade
-        trade_tracker.add_trade(trade_id, pair, direction, actual_entry, sl, tp, setup_type, eqs)
+        rr_real = (
+            reward_real / risk_real
+            if risk_real > 0
+            else 0
+        )
+
+        slippage_pips = (
+            (actual_entry - expected_entry) / pip
+        )
+
+        logger.info(
+            f"[FILL_REAL] {pair} | "
+            f"ID={trade_id} | "
+            f"ENTRY_EXPECTED={expected_entry:.5f} | "
+            f"ENTRY_FILLED={actual_entry:.5f} | "
+            f"SLIPPAGE={slippage_pips:+.2f} pips | "
+            f"RR_REAL={rr_real:.2f}"
+        )
+
+        # ====================================================
+        # 12. PROTECTION ABSOLUE DU RR
+        # ====================================================
+        if rr_real < RR_MIN_EXECUTION:
+
+            logger.error(
+                f"[ORDER_ABORT] {pair} | "
+                f"RR réel {rr_real:.2f} < "
+                f"{RR_MIN_EXECUTION} après exécution"
+            )
+
+            # Le trade existe déjà.
+            # On ne laisse surtout pas courir une position
+            # avec un RR dégradé.
+            try:
+
+                close_data = {
+                    "units": "ALL"
+                }
+
+                close_request = trades.TradeClose(
+                    accountID=OANDA_ACCOUNT_ID,
+                    tradeID=str(trade_id),
+                    data=close_data
+                )
+
+                api.request(close_request)
+
+                logger.error(
+                    f"[ORDER_ABORT] {pair} | "
+                    f"Trade {trade_id} fermé immédiatement "
+                    f"car RR réel insuffisant"
+                )
+
+            except Exception as close_error:
+
+                logger.critical(
+                    f"[ORDER_ABORT] {pair} | "
+                    f"IMPOSSIBLE DE FERMER LE TRADE "
+                    f"{trade_id}: {close_error}"
+                )
+
+            return None
+
+        # ====================================================
+        # 13. LOG SLIPPAGE
+        # ====================================================
+        if fill_deviation > max_entry_deviation:
+
+            logger.warning(
+                f"[SLIPPAGE] {pair} | "
+                f"Fill hors tolérance malgré contrôle pré-ordre | "
+                f"écart={fill_deviation:.5f} | "
+                f"max={max_entry_deviation:.5f}"
+            )
+
+        # ====================================================
+        # 14. ENREGISTREMENT
+        # ====================================================
+        trade_tracker.add_trade(
+            trade_id,
+            pair,
+            direction,
+            actual_entry,
+            sl,
+            tp,
+            setup_type,
+            eqs
+        )
+
         open_trade_details[str(trade_id)] = {
             "entry": actual_entry,
             "sl": sl,
@@ -1235,13 +1567,27 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
             **metrics
         }
 
-        logger.info(f"[ORDER_CONFIRMED] {pair} | {direction} | ID={trade_id} | ENTRY={actual_entry:.5f} | SL={sl:.5f} | TP={tp:.5f} | RR={rr_real:.2f}")
+        logger.info(
+            f"[ORDER_CONFIRMED] {pair} | "
+            f"{direction} | "
+            f"ID={trade_id} | "
+            f"ENTRY={actual_entry:.5f} | "
+            f"SL={sl:.5f} | "
+            f"TP={tp:.5f} | "
+            f"RR={rr_real:.2f}"
+        )
+
         return str(trade_id)
 
     except Exception as e:
-        logger.error(f"[ORDER] Erreur {pair}: {e}")
+
+        logger.error(
+            f"[ORDER] Erreur {pair}: {e}"
+        )
+
         if is_oanda_maintenance(e):
             handle_api_error(e)
+
         return None
 
 # ============================================================
