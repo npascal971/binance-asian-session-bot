@@ -865,7 +865,7 @@ def detect_bos_retest(
     # BOUGIES CLÔTURÉES UNIQUEMENT
     # =========================================================
 
-    data = df.iloc[:-1].copy()
+    data = df.copy()
 
     if len(data) < 25:
         return None
