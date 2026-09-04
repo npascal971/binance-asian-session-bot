@@ -718,6 +718,205 @@ def detect_setups(
         f"{len(unique_setups)}"
     )
 
+    return unique_setupsdef detect_setups(
+    pair: str,
+    df_m15: pd.DataFrame,
+    df_h1: pd.DataFrame,
+    bias: str
+) -> List[Dict]:
+    """
+    Détecte les setups dans le sens du biais.
+
+    Setups autorisés :
+        - FVG_RETEST
+        - WICK_REJECTION
+        - BOS_RETEST
+    """
+
+    setups = []
+
+    # =========================================================
+    # SÉCURITÉ
+    # =========================================================
+
+    if df_m15 is None or len(df_m15) < 20:
+        return setups
+
+    if bias not in ("BUY", "SELL"):
+        return setups
+
+    # =========================================================
+    # 1. FVG_RETEST
+    # =========================================================
+
+    try:
+        fvgs = detect_fvg(df_m15)
+    except Exception as e:
+        logger.warning(
+            f"{pair} | FVG detection error: {e}"
+        )
+        fvgs = []
+
+    for f in fvgs:
+
+        if f.get("direction") != bias:
+            continue
+
+        try:
+            entry_level = float(
+                f["midpoint"]
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError
+        ):
+            continue
+
+        setups.append({
+            "type": "FVG_RETEST",
+            "direction": bias,
+            "entry_level": entry_level,
+            "fvg": f,
+        })
+
+    # =========================================================
+    # 2. WICK_REJECTION
+    # =========================================================
+
+    try:
+        wicks = detect_wick_rejection(
+            df_m15,
+            bias
+        )
+    except Exception as e:
+        logger.warning(
+            f"{pair} | WICK detection error: {e}"
+        )
+        wicks = []
+
+    for w in wicks:
+
+        if w.get("direction") != bias:
+            continue
+
+        try:
+            entry_level = float(
+                w["price_level"]
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError
+        ):
+            continue
+
+        setups.append({
+            "type": "WICK_REJECTION",
+            "direction": bias,
+            "entry_level": entry_level,
+        })
+
+    # =========================================================
+    # 3. BOS_RETEST
+    # =========================================================
+
+    try:
+        bos_setup = detect_bos_retest(
+            df_m15,
+            bias
+        )
+    except Exception as e:
+        logger.warning(
+            f"{pair} | BOS_RETEST detection error: {e}"
+        )
+        bos_setup = None
+
+    if bos_setup is not None:
+
+        try:
+            bos_entry = float(
+                bos_setup["entry_level"]
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError
+        ):
+            bos_entry = None
+
+        if bos_entry is not None:
+
+            duplicate = any(
+                s.get("type") == "BOS_RETEST"
+                and
+                abs(
+                    float(s.get("entry_level", 0))
+                    - bos_entry
+                ) < 1e-8
+                for s in setups
+            )
+
+            if not duplicate:
+
+                setups.append({
+                    **bos_setup,
+                    "type": "BOS_RETEST",
+                    "direction": bias,
+                    "entry_level": bos_entry,
+                })
+
+                logger.info(
+                    f"[SETUP] {pair} | "
+                    f"BOS_RETEST | "
+                    f"{bias} | "
+                    f"entry={bos_entry:.5f} | "
+                    f"confirmation="
+                    f"{bos_setup.get('confirmation', 'OK')}"
+                )
+
+    # =========================================================
+    # 4. DÉDOUBLONNAGE
+    # =========================================================
+
+    unique_setups = []
+    seen = set()
+
+    for setup in setups:
+
+        try:
+            key = (
+                setup["type"],
+                setup["direction"],
+                round(
+                    float(setup["entry_level"]),
+                    8
+                )
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError
+        ):
+            continue
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique_setups.append(setup)
+
+    # =========================================================
+    # 5. LOG
+    # =========================================================
+
+    logger.info(
+        f"[SETUPS] {pair} | "
+        f"BIAS={bias} | "
+        f"FVG/WICK/BOS="
+        f"{len(unique_setups)}"
+    )
+
     return unique_setups
 # ============================================================
 # STRATÉGIE SIMPLIFIÉE
@@ -894,25 +1093,21 @@ def detect_bos_retest(
     direction: str
 ) -> Optional[dict]:
     """
-    Détecte un véritable BOS suivi d'un RETEST.
+    Détecte un véritable BOS suivi d'un retest.
 
-    Structure recherchée :
+    BUY :
+        1. cassure d'un swing high confirmé
+        2. retour du prix vers le niveau cassé
+        3. maintien au-dessus du niveau
+        4. rejet OU micro-break haussier
 
-        BUY :
-            1. cassure d'un swing high
-            2. retour du prix sur le niveau cassé
-            3. maintien au-dessus du niveau
-            4. rejet OU micro-break haussier
+    SELL :
+        1. cassure d'un swing low confirmé
+        2. retour du prix vers le niveau cassé
+        3. maintien sous le niveau
+        4. rejet OU micro-break baissier
 
-        SELL :
-            1. cassure d'un swing low
-            2. retour du prix sur le niveau cassé
-            3. maintien sous le niveau
-            4. rejet OU micro-break baissier
-
-    IMPORTANT :
-    Le BOS et le retest peuvent se produire sur des bougies
-    différentes.
+    Le BOS et le retest peuvent être sur des bougies différentes.
     """
 
     # =========================================================
@@ -922,11 +1117,13 @@ def detect_bos_retest(
     if df is None or len(df) < 30:
         return None
 
+    direction = direction.upper()
+
     if direction not in ("BUY", "SELL"):
         return None
 
     # =========================================================
-    # UNIQUEMENT LES BOUGIES CLÔTURÉES
+    # BOUGIES CLÔTURÉES UNIQUEMENT
     # =========================================================
 
     data = df.iloc[:-1].copy()
@@ -945,34 +1142,342 @@ def detect_bos_retest(
     # PARAMÈTRES
     # =========================================================
 
-    # On cherche un BOS relativement récent.
     MAX_BOS_AGE = 8
-
-    # Tolérance autour du niveau de retest.
-    # 0.25 ATR permet de ne pas rater les retests légèrement
-    # imparfaits.
     RETEST_TOLERANCE_ATR = 0.25
+    MAX_RETEST_AGE = 2
 
     retest_tolerance = atr * RETEST_TOLERANCE_ATR
 
     # =========================================================
-    # SWINGS
+    # SWINGS CONFIRMÉS
     # =========================================================
 
-    # Les swings doivent être établis AVANT le BOS.
-    structure_df = data.iloc[:-MAX_BOS_AGE]
+    # On évite d'utiliser les structures les plus récentes
+    # susceptibles d'être encore en formation.
+    structure_cutoff = max(
+        0,
+        len(data) - MAX_BOS_AGE
+    )
+
+    structure_df = data.iloc[
+        :structure_cutoff
+    ]
+
+    if len(structure_df) < 15:
+        return None
 
     swing_highs, swing_lows = detect_swing_points(
         structure_df,
         5
     )
 
-    if direction == "BUY" and not swing_highs:
-        return None
+    # =========================================================
+    # CONFIRMATION
+    # =========================================================
 
-    if direction == "SELL" and not swing_lows:
-        return None
+    def confirmation_signal(
+        candle,
+        previous_candle,
+        side: str
+    ):
+        high = float(candle["high"])
+        low = float(candle["low"])
+        open_ = float(candle["open"])
+        close = float(candle["close"])
 
+        candle_range = high - low
+
+        if candle_range <= 0:
+            return False, 0.0, False
+
+        if side == "BUY":
+
+            lower_wick = (
+                min(open_, close) - low
+            )
+
+            rejection_ratio = (
+                lower_wick / candle_range
+            )
+
+            micro_break = (
+                close > float(previous_candle["high"])
+            )
+
+        else:
+
+            upper_wick = (
+                high - max(open_, close)
+            )
+
+            rejection_ratio = (
+                upper_wick / candle_range
+            )
+
+            micro_break = (
+                close < float(previous_candle["low"])
+            )
+
+        ok = (
+            rejection_ratio >= 0.30
+            or micro_break
+        )
+
+        return (
+            ok,
+            rejection_ratio,
+            micro_break
+        )
+
+    # =========================================================
+    # RECHERCHE DU BOS LE PLUS RÉCENT
+    # =========================================================
+
+    for bos_index in range(
+        len(data) - 2,
+        max(1, len(data) - MAX_BOS_AGE - 2),
+        -1
+    ):
+
+        bos_candle = data.iloc[bos_index]
+        previous_bos_candle = data.iloc[bos_index - 1]
+
+        # =====================================================
+        # BUY
+        # =====================================================
+
+        if direction == "BUY":
+
+            valid_highs = [
+                h for h in swing_highs
+                if int(h.get("index", -1)) < bos_index
+            ]
+
+            if not valid_highs:
+                continue
+
+            swing_level = float(
+                valid_highs[-1]["price"]
+            )
+
+            # -------------------------------------------------
+            # BOS haussier
+            # -------------------------------------------------
+
+            bos_confirmed = (
+                float(bos_candle["close"]) > swing_level
+                and
+                float(previous_bos_candle["close"]) <= swing_level
+            )
+
+            if not bos_confirmed:
+                continue
+
+            # -------------------------------------------------
+            # Retest après le BOS
+            # -------------------------------------------------
+
+            for retest_index in range(
+                bos_index + 1,
+                len(data)
+            ):
+
+                retest_candle = data.iloc[
+                    retest_index
+                ]
+
+                retest_low = float(
+                    retest_candle["low"]
+                )
+
+                retest_close = float(
+                    retest_candle["close"]
+                )
+
+                # Le prix revient dans la zone du niveau cassé.
+                touched = (
+                    retest_low
+                    <= swing_level + retest_tolerance
+                )
+
+                # Le niveau reste globalement défendu.
+                held = (
+                    retest_close
+                    >= swing_level - retest_tolerance
+                )
+
+                if not touched or not held:
+                    continue
+
+                # Retest trop ancien = on ne prend pas.
+                bars_since_retest = (
+                    len(data) - 1 - retest_index
+                )
+
+                if bars_since_retest > MAX_RETEST_AGE:
+                    continue
+
+                previous_retest = data.iloc[
+                    retest_index - 1
+                ]
+
+                (
+                    confirmation_ok,
+                    rejection_ratio,
+                    micro_break
+                ) = confirmation_signal(
+                    retest_candle,
+                    previous_retest,
+                    "BUY"
+                )
+
+                if not confirmation_ok:
+                    continue
+
+                current_price = float(
+                    data.iloc[-1]["close"]
+                )
+
+                return {
+                    "type": "BOS_RETEST",
+                    "direction": "BUY",
+                    "entry_level": swing_level,
+                    "bos_level": swing_level,
+                    "bos_index": bos_index,
+                    "retest_index": retest_index,
+                    "confirmation": (
+                        "rejection"
+                        if rejection_ratio >= 0.30
+                        else "micro_break"
+                    ),
+                    "strength": max(
+                        rejection_ratio,
+                        1.0 if micro_break else 0.0
+                    ),
+                    "distance_atr": (
+                        abs(
+                            current_price - swing_level
+                        ) / atr
+                    ),
+                }
+
+        # =====================================================
+        # SELL
+        # =====================================================
+
+        else:
+
+            valid_lows = [
+                l for l in swing_lows
+                if int(l.get("index", -1)) < bos_index
+            ]
+
+            if not valid_lows:
+                continue
+
+            swing_level = float(
+                valid_lows[-1]["price"]
+            )
+
+            # -------------------------------------------------
+            # BOS baissier
+            # -------------------------------------------------
+
+            bos_confirmed = (
+                float(bos_candle["close"]) < swing_level
+                and
+                float(previous_bos_candle["close"]) >= swing_level
+            )
+
+            if not bos_confirmed:
+                continue
+
+            # -------------------------------------------------
+            # Retest après le BOS
+            # -------------------------------------------------
+
+            for retest_index in range(
+                bos_index + 1,
+                len(data)
+            ):
+
+                retest_candle = data.iloc[
+                    retest_index
+                ]
+
+                retest_high = float(
+                    retest_candle["high"]
+                )
+
+                retest_close = float(
+                    retest_candle["close"]
+                )
+
+                touched = (
+                    retest_high
+                    >= swing_level - retest_tolerance
+                )
+
+                held = (
+                    retest_close
+                    <= swing_level + retest_tolerance
+                )
+
+                if not touched or not held:
+                    continue
+
+                bars_since_retest = (
+                    len(data) - 1 - retest_index
+                )
+
+                if bars_since_retest > MAX_RETEST_AGE:
+                    continue
+
+                previous_retest = data.iloc[
+                    retest_index - 1
+                ]
+
+                (
+                    confirmation_ok,
+                    rejection_ratio,
+                    micro_break
+                ) = confirmation_signal(
+                    retest_candle,
+                    previous_retest,
+                    "SELL"
+                )
+
+                if not confirmation_ok:
+                    continue
+
+                current_price = float(
+                    data.iloc[-1]["close"]
+                )
+
+                return {
+                    "type": "BOS_RETEST",
+                    "direction": "SELL",
+                    "entry_level": swing_level,
+                    "bos_level": swing_level,
+                    "bos_index": bos_index,
+                    "retest_index": retest_index,
+                    "confirmation": (
+                        "rejection"
+                        if rejection_ratio >= 0.30
+                        else "micro_break"
+                    ),
+                    "strength": max(
+                        rejection_ratio,
+                        1.0 if micro_break else 0.0
+                    ),
+                    "distance_atr": (
+                        abs(
+                            current_price - swing_level
+                        ) / atr
+                    ),
+                }
+
+    return None
     # =========================================================
     # FONCTION DE CONFIRMATION
     # =========================================================
@@ -1849,7 +2354,349 @@ def calculate_sl_tp_structural(
         f"SOURCE={sl_source}"
     )
 
+    return (def calculate_sl_tp_structural(
+    df_m15: pd.DataFrame,
+    direction: str,
+    entry: float,
+    pair: str
+) -> Tuple[float, float, float]:
+    """
+    Calcule un SL structurel et un TP à 2R.
+
+    Règles :
+    - BUY  : SL sous le dernier swing low M15.
+    - SELL : SL au-dessus du dernier swing high M15.
+    - Buffer de sécurité de 5 pips.
+    - Fallback ATR 1.5x si aucun swing exploitable.
+    - SL structurel maximum = 2 ATR.
+    - Si le SL structurel dépasse 2 ATR : setup rejeté.
+    - Distance SL minimum = 10 pips.
+    - TP = exactement 2R après arrondi.
+    - Garantie finale RR >= 2.0.
+    """
+
+    pair = pair.upper()
+    direction = direction.upper()
+    entry = float(entry)
+
+    if direction not in ("BUY", "SELL"):
+        raise ValueError(
+            f"Direction inconnue: {direction}"
+        )
+
+    if df_m15 is None or len(df_m15) < 20:
+        raise ValueError(
+            f"Données M15 insuffisantes pour {pair}"
+        )
+
+    highs, lows = detect_swing_points(
+        df_m15,
+        5
+    )
+
+    pip = float(
+        get_pip_value(pair)
+    )
+
+    atr = calculate_atr(df_m15)
+
+    if atr is None or atr <= 0:
+        atr = pip * 10
+
+    atr = float(atr)
+
+    if pip <= 0:
+        raise ValueError(
+            f"Valeur pip invalide pour {pair}"
+        )
+
+    SL_BUFFER_PIPS = 5
+    MIN_SL_PIPS = 10
+    MAX_SL_ATR = 2.0
+    FALLBACK_SL_ATR = 1.5
+    TARGET_RR = 2.0
+
+    sl_buffer = SL_BUFFER_PIPS * pip
+    min_sl_distance = MIN_SL_PIPS * pip
+    max_sl_distance = atr * MAX_SL_ATR
+
+    # =========================================================
+    # SL STRUCTUREL
+    # =========================================================
+
+    if direction == "BUY":
+
+        valid_lows = [
+            low for low in lows
+            if float(low["price"]) < entry
+        ]
+
+        if valid_lows:
+
+            last_swing_low = float(
+                valid_lows[-1]["price"]
+            )
+
+            sl = (
+                last_swing_low
+                - sl_buffer
+            )
+
+            sl_source = (
+                f"SWING_LOW "
+                f"{last_swing_low:.5f}"
+            )
+
+        else:
+
+            sl = (
+                entry
+                - atr * FALLBACK_SL_ATR
+            )
+
+            sl_source = "ATR_FALLBACK"
+
+    else:
+
+        valid_highs = [
+            high for high in highs
+            if float(high["price"]) > entry
+        ]
+
+        if valid_highs:
+
+            last_swing_high = float(
+                valid_highs[-1]["price"]
+            )
+
+            sl = (
+                last_swing_high
+                + sl_buffer
+            )
+
+            sl_source = (
+                f"SWING_HIGH "
+                f"{last_swing_high:.5f}"
+            )
+
+        else:
+
+            sl = (
+                entry
+                + atr * FALLBACK_SL_ATR
+            )
+
+            sl_source = "ATR_FALLBACK"
+
+    # =========================================================
+    # SL DU BON CÔTÉ
+    # =========================================================
+
+    if direction == "BUY" and sl >= entry:
+
+        sl = (
+            entry
+            - max(
+                min_sl_distance,
+                atr * FALLBACK_SL_ATR
+            )
+        )
+
+        sl_source = "ATR_FALLBACK_INVALID_STRUCTURE"
+
+    elif direction == "SELL" and sl <= entry:
+
+        sl = (
+            entry
+            + max(
+                min_sl_distance,
+                atr * FALLBACK_SL_ATR
+            )
+        )
+
+        sl_source = "ATR_FALLBACK_INVALID_STRUCTURE"
+
+    # =========================================================
+    # SL MAXIMUM
+    # =========================================================
+
+    risk_before_rounding = abs(
+        entry - sl
+    )
+
+    if risk_before_rounding <= 0:
+        raise ValueError(
+            f"Risque nul {pair}"
+        )
+
+    if risk_before_rounding > max_sl_distance:
+
+        logger.debug(
+            f"[SL] {pair} | "
+            f"{direction} | "
+            f"SL structurel trop large | "
+            f"risk={risk_before_rounding:.5f} | "
+            f"max={max_sl_distance:.5f} | "
+            f"→ SETUP REJECTED"
+        )
+
+        raise ValueError(
+            f"SL structurel > {MAX_SL_ATR:.1f} ATR "
+            f"(risk={risk_before_rounding:.5f}, "
+            f"max={max_sl_distance:.5f})"
+        )
+
+    # =========================================================
+    # SL MINIMUM
+    # =========================================================
+
+    if risk_before_rounding < min_sl_distance:
+
+        if direction == "BUY":
+            sl = entry - min_sl_distance
+        else:
+            sl = entry + min_sl_distance
+
+    # =========================================================
+    # ARRONDI SL
+    # =========================================================
+
+    sl = float(
+        round_price(
+            pair,
+            sl
+        )
+    )
+
+    # =========================================================
+    # VÉRIFICATION FINALE SL
+    # =========================================================
+
+    if direction == "BUY" and sl >= entry:
+        sl = float(
+            round_price(
+                pair,
+                entry - min_sl_distance
+            )
+        )
+
+    elif direction == "SELL" and sl <= entry:
+        sl = float(
+            round_price(
+                pair,
+                entry + min_sl_distance
+            )
+        )
+
+    risk = abs(
+        entry - sl
+    )
+
+    if risk <= 0:
+        raise ValueError(
+            f"Risk nul après arrondi {pair}"
+        )
+
+    if risk > max_sl_distance:
+        raise ValueError(
+            f"SL après arrondi > "
+            f"{MAX_SL_ATR:.1f} ATR "
+            f"(risk={risk:.5f}, "
+            f"max={max_sl_distance:.5f})"
+        )
+
+    # =========================================================
+    # TP = 2R
+    # =========================================================
+
+    if direction == "BUY":
+        tp = entry + risk * TARGET_RR
+    else:
+        tp = entry - risk * TARGET_RR
+
+    tp = float(
+        round_price(
+            pair,
+            tp
+        )
+    )
+
+    # =========================================================
+    # RR FINAL
+    # =========================================================
+
+    final_risk = abs(
+        entry - sl
+    )
+
+    final_reward = abs(
+        tp - entry
+    )
+
+    if final_risk <= 0:
+        raise ValueError(
+            f"Risque final nul {pair}"
+        )
+
+    rr = (
+        final_reward
+        / final_risk
+    )
+
+    # =========================================================
+    # GARANTIE RR >= 2
+    # =========================================================
+
+    if rr < TARGET_RR:
+
+        if direction == "BUY":
+            tp = float(
+                round_price(
+                    pair,
+                    entry + final_risk * 2.01
+                )
+            )
+        else:
+            tp = float(
+                round_price(
+                    pair,
+                    entry - final_risk * 2.01
+                )
+            )
+
+        final_reward = abs(
+            tp - entry
+        )
+
+        rr = (
+            final_reward
+            / final_risk
+        )
+
+    if rr < TARGET_RR:
+        raise ValueError(
+            f"RR final insuffisant après arrondi "
+            f"(RR={rr:.3f})"
+        )
+
+    logger.debug(
+        f"[SLTP] {pair} | "
+        f"{direction} | "
+        f"ENTRY={entry:.5f} | "
+        f"SL={sl:.5f} | "
+        f"TP={tp:.5f} | "
+        f"RISK={final_risk:.5f} | "
+        f"ATR={atr:.5f} | "
+        f"SL_ATR={final_risk / atr:.2f} | "
+        f"RR={rr:.3f} | "
+        f"SOURCE={sl_source}"
+    )
+
     return (
+        sl,
+        tp,
+        final_risk
+    )
         sl,
         tp,
         final_risk
@@ -1863,40 +2710,36 @@ def has_enough_room_to_tp(
     """
     Vérifie que le TP à 2R dispose d'un espace structurel suffisant.
 
-    On ne bloque pas un trade simplement parce qu'un swing H1
-    historique se trouve sur le chemin.
+    Un swing H1 intermédiaire ne bloque pas le trade.
 
-    BUY :
-        on recherche uniquement les résistances H1 significatives
-        proches du TP.
-
-    SELL :
-        on recherche uniquement les supports H1 significatifs
-        proches du TP.
-
-    Le TP est considéré bloqué uniquement si un swing se trouve
-    dans les 15 derniers pourcents du trajet vers le TP.
+    Seul un swing situé dans les 15 derniers pourcents
+    du trajet vers le TP est considéré comme obstacle.
     """
 
     if df_h1 is None or len(df_h1) < 20:
         return True
 
     try:
-        highs, lows = detect_swing_points(df_h1, 5)
+        highs, lows = detect_swing_points(
+            df_h1,
+            5
+        )
     except Exception as e:
         logger.warning(
             f"[TP_SPACE] erreur swings H1: {e}"
         )
         return True
 
-    total_distance = abs(tp - entry)
+    total_distance = abs(
+        tp - entry
+    )
 
     if total_distance <= 0:
         return False
 
-    # Zone réellement critique autour du TP.
-    # On laisse le prix traverser les petits swings intermédiaires.
-    critical_zone = total_distance * 0.15
+    critical_zone = (
+        total_distance * 0.15
+    )
 
     # =========================================================
     # BUY
@@ -1906,14 +2749,19 @@ def has_enough_room_to_tp(
 
         for h in highs:
 
-            level = float(h["price"])
+            level = float(
+                h["price"]
+            )
 
-            if not (entry < level < tp):
+            if not (
+                entry < level < tp
+            ):
                 continue
 
-            distance_to_tp = tp - level
+            distance_to_tp = (
+                tp - level
+            )
 
-            # Seulement un swing très proche du TP bloque.
             if distance_to_tp <= critical_zone:
 
                 logger.debug(
@@ -1934,14 +2782,19 @@ def has_enough_room_to_tp(
 
         for l in lows:
 
-            level = float(l["price"])
+            level = float(
+                l["price"]
+            )
 
-            if not (tp < level < entry):
+            if not (
+                tp < level < entry
+            ):
                 continue
 
-            distance_to_tp = level - tp
+            distance_to_tp = (
+                level - tp
+            )
 
-            # Seulement un swing très proche du TP bloque.
             if distance_to_tp <= critical_zone:
 
                 logger.debug(
@@ -1955,6 +2808,7 @@ def has_enough_room_to_tp(
                 return False
 
     return True
+
 def evaluate_setup(
     pair: str,
     direction: str,
@@ -1963,9 +2817,28 @@ def evaluate_setup(
     df_h1: pd.DataFrame,
     current_price: float
 ) -> dict:
+    """
+    Valide un setup avant exécution.
+
+    Pipeline :
+
+        Setup
+        ↓
+        Distance ≤ 2 ATR
+        ↓
+        Confirmation
+        ↓
+        SL structurel
+        ↓
+        TP 2R
+        ↓
+        Espace H1
+        ↓
+        RR >= 2
+    """
 
     # =========================================================
-    # TYPES DE SETUPS AUTORISÉS
+    # TYPE
     # =========================================================
 
     setup_type = entry.get("type")
@@ -1984,14 +2857,18 @@ def evaluate_setup(
         }
 
     # =========================================================
-    # ENTRY LEVEL
+    # ENTRY
     # =========================================================
 
     try:
         entry_level = float(
             entry["entry_level"]
         )
-    except Exception:
+    except (
+        KeyError,
+        TypeError,
+        ValueError
+    ):
         return {
             "passed": False,
             "reason": "entry_level invalide",
@@ -2001,7 +2878,9 @@ def evaluate_setup(
     # ATR
     # =========================================================
 
-    atr_price = calculate_atr(df_m15)
+    atr_price = calculate_atr(
+        df_m15
+    )
 
     if atr_price is None or atr_price <= 0:
         return {
@@ -2009,22 +2888,30 @@ def evaluate_setup(
             "reason": "ATR invalide",
         }
 
+    atr_price = float(
+        atr_price
+    )
+
     # =========================================================
-    # DISTANCE MAXIMALE
+    # DISTANCE MAX
     # =========================================================
 
     distance_ratio = (
-        abs(current_price - entry_level)
+        abs(
+            float(current_price)
+            - entry_level
+        )
         / atr_price
     )
 
     if distance_ratio > 2.0:
+
         return {
             "passed": False,
             "reason": (
                 f"prix hors zone "
                 f"(target={entry_level:.5f}, "
-                f"price={current_price:.5f}, "
+                f"price={float(current_price):.5f}, "
                 f"dist={distance_ratio:.2f}ATR, "
                 f"max=2.0ATR)"
             ),
@@ -2032,15 +2919,12 @@ def evaluate_setup(
 
     # =========================================================
     # CONFIRMATION
-    #
-    # BOS_RETEST possède déjà sa confirmation.
-    # Pour FVG/WICK on utilise la confirmation classique.
     # =========================================================
 
     if setup_type == "BOS_RETEST":
 
-        confirmation_ok = True
-
+        # La confirmation est déjà faite
+        # dans detect_bos_retest().
         confirmation_msg = (
             f"BOS_RETEST "
             f"{entry.get('confirmation', 'OK')}"
@@ -2048,16 +2932,25 @@ def evaluate_setup(
 
     else:
 
-        confirmation_ok, confirmation_msg = (
-            get_confirmation_signal(
-                df_m15,
-                direction
+        try:
+            confirmation_ok, confirmation_msg = (
+                get_confirmation_signal(
+                    df_m15,
+                    direction
+                )
             )
-        )
+        except Exception as e:
+            return {
+                "passed": False,
+                "reason": (
+                    f"erreur confirmation: {e}"
+                ),
+            }
 
         if not confirmation_ok:
 
             last = df_m15.iloc[-1]
+            prev = df_m15.iloc[-2]
 
             total = (
                 float(last["high"])
@@ -2065,6 +2958,7 @@ def evaluate_setup(
             )
 
             if total <= 0:
+
                 rejection_ratio = 0.0
 
             elif direction == "BUY":
@@ -2087,16 +2981,19 @@ def evaluate_setup(
                     )
                 ) / total
 
-            prev = df_m15.iloc[-2]
+            if direction == "BUY":
 
-            micro_break = (
-                float(last["close"])
-                > float(prev["high"])
-                if direction == "BUY"
-                else
-                float(last["close"])
-                < float(prev["low"])
-            )
+                micro_break = (
+                    float(last["close"])
+                    > float(prev["high"])
+                )
+
+            else:
+
+                micro_break = (
+                    float(last["close"])
+                    < float(prev["low"])
+                )
 
             return {
                 "passed": False,
@@ -2109,20 +3006,36 @@ def evaluate_setup(
             }
 
     # =========================================================
-    # SL / TP STRUCTURELS
+    # SL / TP
     # =========================================================
 
-    sl, tp, risk = calculate_sl_tp_structural(
-        df_m15,
-        direction,
-        entry_level,
-        pair
-    )
+    try:
 
-    if sl is None or tp is None:
+        sl, tp, risk = (
+            calculate_sl_tp_structural(
+                df_m15,
+                direction,
+                entry_level,
+                pair
+            )
+        )
+
+    except Exception as e:
+
         return {
             "passed": False,
-            "reason": "SL/TP impossible à calculer",
+            "reason": (
+                f"SL/TP rejeté: {e}"
+            ),
+        }
+
+    if sl is None or tp is None:
+
+        return {
+            "passed": False,
+            "reason": (
+                "SL/TP impossible à calculer"
+            ),
         }
 
     sl = float(sl)
@@ -2130,30 +3043,40 @@ def evaluate_setup(
     risk = float(risk)
 
     # =========================================================
-    # DISTANCE MINIMALE SL
+    # DISTANCE MINIMUM SL
     # =========================================================
 
-    pip = (
-        0.01
-        if "JPY" in pair
-        else 0.0001
+    pip = float(
+        get_pip_value(pair)
     )
 
-    min_sl_distance = pip * 10
+    if pip <= 0:
+        return {
+            "passed": False,
+            "reason": "pip invalide",
+        }
 
-    if abs(entry_level - sl) < min_sl_distance:
+    min_sl_distance = (
+        pip * 10
+    )
+
+    sl_distance = abs(
+        entry_level - sl
+    )
+
+    if sl_distance < min_sl_distance:
 
         return {
             "passed": False,
             "reason": (
                 f"SL trop proche "
-                f"({abs(entry_level - sl):.5f} "
+                f"({sl_distance:.5f} "
                 f"< {min_sl_distance:.5f})"
             ),
         }
 
     # =========================================================
-    # RR THÉORIQUE
+    # RR
     # =========================================================
 
     risk_distance = abs(
@@ -2165,6 +3088,7 @@ def evaluate_setup(
     )
 
     if risk_distance <= 0:
+
         return {
             "passed": False,
             "reason": "risque nul",
@@ -2176,15 +3100,31 @@ def evaluate_setup(
     )
 
     # =========================================================
-    # VÉRIFICATION ESPACE H1
+    # ESPACE H1
     # =========================================================
 
-    if not has_enough_room_to_tp(
-        df_h1,
-        direction,
-        entry_level,
-        tp
-    ):
+    try:
+
+        enough_room = (
+            has_enough_room_to_tp(
+                df_h1,
+                direction,
+                entry_level,
+                tp
+            )
+        )
+
+    except Exception as e:
+
+        return {
+            "passed": False,
+            "reason": (
+                f"erreur espace H1: {e}"
+            ),
+        }
+
+    if not enough_room:
+
         return {
             "passed": False,
             "reason": (
@@ -2195,7 +3135,7 @@ def evaluate_setup(
         }
 
     # =========================================================
-    # RR MINIMUM = 2R
+    # RR MINIMUM
     # =========================================================
 
     if rr < 2.0:
@@ -2211,58 +3151,60 @@ def evaluate_setup(
         }
 
     # =========================================================
-    # SUCCÈS
+    # METRIQUES
     # =========================================================
 
     try:
-        adx = calculate_adx(df_h1)
+        adx = float(
+            calculate_adx(df_h1)
+        )
     except Exception:
         adx = 0.0
 
     try:
-        momentum = calculate_momentum(df_m15)
+        momentum = float(
+            calculate_momentum(df_m15)
+        )
     except Exception:
         momentum = 0.0
 
     try:
-        rsi = get_last_rsi(
-            df_m15["close"]
+        rsi = float(
+            get_last_rsi(
+                df_m15["close"]
+            )
         )
     except Exception:
         rsi = 0.0
 
+    try:
+        session = get_session_label()
+    except Exception:
+        session = "UNKNOWN"
+
+    # =========================================================
+    # SUCCÈS
+    # =========================================================
+
     return {
         "passed": True,
-
         "type": setup_type,
-
         "direction": direction,
-
         "entry_level": entry_level,
-
         "sl": sl,
-
         "tp": tp,
-
         "risk": risk,
-
         "rr": rr,
-
         "confirmation": confirmation_msg,
-
         "metrics": {
             "atr": price_to_pips(
                 atr_price,
                 pair
             ),
-
             "adx": adx,
-
             "momentum": momentum,
-
             "rsi": rsi,
-
-            "session": get_session_label(),
+            "session": session,
         },
     }
     
