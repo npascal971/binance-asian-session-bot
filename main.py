@@ -704,35 +704,31 @@ def get_directional_bias(
     df_h1: pd.DataFrame
 ) -> str:
     """
-    Détermine le biais directionnel H4/H1.
+    Biais souverain H4.
 
-    H4 = timeframe directeur.
-    H1 = confirmation / retracement.
+    H4 décide uniquement de la direction.
+    H1 sert à identifier la phase :
+        - EXPANSION   : H1 aligné avec H4
+        - RETRACEMENT : H1 opposé à H4
+        - NEUTRAL_H1  : H1 indéterminé
 
-    Retour :
-        BUY
-        SELL
-        NEUTRAL
+    Le H1 ne peut pas annuler un biais H4 valide.
     """
 
-    def bias_from_structure(df: pd.DataFrame):
-        """
-        Analyse uniquement la structure HH/HL/LH/LL
-        sur le timeframe fourni.
-        """
-
+    def structure_htf(df: pd.DataFrame) -> str:
         if df is None or len(df) < 20:
-            return "NEUTRAL", 0, 0
+            return "NEUTRAL"
 
-        highs, lows = detect_swing_points(df, 5)
+        try:
+            highs, lows = detect_swing_points(df, 5)
+        except Exception:
+            return "NEUTRAL"
 
         if len(highs) < 2 or len(lows) < 2:
-            return "NEUTRAL", 0, 0
+            return "NEUTRAL"
 
-        # Derniers swings confirmés
         last_high = float(highs[-1]["price"])
         prev_high = float(highs[-2]["price"])
-
         last_low = float(lows[-1]["price"])
         prev_low = float(lows[-2]["price"])
 
@@ -742,129 +738,94 @@ def get_directional_bias(
         lh = last_high < prev_high
         ll = last_low < prev_low
 
-        buy_signals = int(hh) + int(hl)
-        sell_signals = int(lh) + int(ll)
-
         # Structure clairement haussière
-        if buy_signals == 2:
-            return "BUY", buy_signals, sell_signals
+        if hh and hl:
+            return "BUY"
 
         # Structure clairement baissière
-        if sell_signals == 2:
-            return "SELL", buy_signals, sell_signals
+        if lh and ll:
+            return "SELL"
 
-        # Une seule composante haussière
-        if buy_signals == 1 and sell_signals == 0:
-            return "BUY_WEAK", buy_signals, sell_signals
+        # Structure partiellement haussière
+        if hh or hl:
+            return "BUY_WEAK"
 
-        # Une seule composante baissière
-        if sell_signals == 1 and buy_signals == 0:
-            return "SELL_WEAK", buy_signals, sell_signals
+        # Structure partiellement baissière
+        if lh or ll:
+            return "SELL_WEAK"
 
-        # HH + LL ou LH + HL = structure contradictoire
-        return "NEUTRAL", buy_signals, sell_signals
+        # Structure contradictoire
+        return "NEUTRAL"
 
     # =========================================================
     # STRUCTURE H4 / H1
     # =========================================================
 
-    b4, b4_buy, b4_sell = bias_from_structure(df_h4)
-    b1, b1_buy, b1_sell = bias_from_structure(df_h1)
+    h4_struct = structure_htf(df_h4)
+    h1_struct = structure_htf(df_h1)
 
     # =========================================================
-    # INDICATEURS H1
+    # H4 HAUSSIER = BIAIS BUY
     # =========================================================
 
-    try:
-        adx_h1 = float(calculate_adx(df_h1))
-    except Exception:
-        adx_h1 = 0.0
+    if h4_struct in ("BUY", "BUY_WEAK"):
 
-    try:
-        momentum_h1 = float(calculate_momentum(df_h1))
-    except Exception:
-        momentum_h1 = 0.0
+        if h1_struct in ("BUY", "BUY_WEAK"):
+            phase = "EXPANSION"
 
-    # =========================================================
-    # H4 NEUTRAL
-    # =========================================================
+        elif h1_struct in ("SELL", "SELL_WEAK"):
+            phase = "RETRACEMENT"
 
-    if b4 == "NEUTRAL":
-        result = "NEUTRAL"
-
-    # =========================================================
-    # H4 BUY
-    # =========================================================
-
-    elif b4 == "BUY":
-
-        # H1 haussier ou légèrement haussier
-        if b1 in ("BUY", "BUY_WEAK"):
-            result = "BUY"
-
-        # H1 neutre : on exige une confirmation momentum
-        elif b1 == "NEUTRAL":
-            if adx_h1 >= 20 and momentum_h1 > 0.15:
-                result = "BUY"
-            else:
-                result = "NEUTRAL"
-
-        # H1 légèrement baissier = retracement potentiel
-        elif b1 == "SELL_WEAK":
-            if adx_h1 >= 25 and momentum_h1 > 0.15:
-                result = "BUY"
-            else:
-                result = "NEUTRAL"
-
-        # H1 clairement baissier = contradiction
         else:
-            result = "NEUTRAL"
+            phase = "NEUTRAL_H1"
+
+        logger.info(
+            f"[BIAS_DIAG] "
+            f"H4={h4_struct} | "
+            f"H1={h1_struct} | "
+            f"Phase H1={phase} | "
+            f"BIAIS=BUY"
+        )
+
+        return "BUY"
 
     # =========================================================
-    # H4 SELL
+    # H4 BAISSIER = BIAIS SELL
     # =========================================================
 
-    elif b4 == "SELL":
+    if h4_struct in ("SELL", "SELL_WEAK"):
 
-        # H1 baissier ou légèrement baissier
-        if b1 in ("SELL", "SELL_WEAK"):
-            result = "SELL"
+        if h1_struct in ("SELL", "SELL_WEAK"):
+            phase = "EXPANSION"
 
-        # H1 neutre : confirmation momentum
-        elif b1 == "NEUTRAL":
-            if adx_h1 >= 20 and momentum_h1 < -0.15:
-                result = "SELL"
-            else:
-                result = "NEUTRAL"
+        elif h1_struct in ("BUY", "BUY_WEAK"):
+            phase = "RETRACEMENT"
 
-        # H1 légèrement haussier = retracement potentiel
-        elif b1 == "BUY_WEAK":
-            if adx_h1 >= 25 and momentum_h1 < -0.15:
-                result = "SELL"
-            else:
-                result = "NEUTRAL"
-
-        # H1 clairement haussier = contradiction
         else:
-            result = "NEUTRAL"
+            phase = "NEUTRAL_H1"
 
-    else:
-        result = "NEUTRAL"
+        logger.info(
+            f"[BIAS_DIAG] "
+            f"H4={h4_struct} | "
+            f"H1={h1_struct} | "
+            f"Phase H1={phase} | "
+            f"BIAIS=SELL"
+        )
+
+        return "SELL"
 
     # =========================================================
-    # LOG DIAGNOSTIC
+    # H4 INDETERMINE
     # =========================================================
 
     logger.info(
         f"[BIAS_DIAG] "
-        f"H4={b4} ({b4_buy}/{b4_sell}) | "
-        f"H1={b1} ({b1_buy}/{b1_sell}) | "
-        f"ADX_H1={adx_h1:.1f} | "
-        f"MOM_H1={momentum_h1:+.2f}% | "
-        f"RESULT={result}"
+        f"H4={h4_struct} | "
+        f"H1={h1_struct} | "
+        f"Structure H4 incertaine -> BIAIS=NEUTRAL"
     )
 
-    return result
+    return "NEUTRAL"
     
 def detect_bos_retest(
     df: pd.DataFrame,
