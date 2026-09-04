@@ -263,57 +263,153 @@ def get_available_margin():
 
 def get_fx_rate_to_usd(currency: str) -> float:
     """
-    Retourne le taux de change de la devise de cotation vers USD.
+    Retourne le taux de conversion d'une devise vers USD.
 
-    - Si la devise est USD → retourne 1.0.
-    - Pour les autres devises : récupération dynamique via OANDA.
-    - Cache pour éviter les appels répétés.
-
-    Important pour le sizing sur USD/JPY, GBP/JPY, etc.
+    Exemples :
+        USD -> 1
+        EUR -> EUR_USD
+        GBP -> GBP_USD
+        AUD -> AUD_USD
+        CAD -> 1 / USD_CAD
+        JPY -> 1 / USD_JPY
+        XAU -> XAU_USD
     """
+
+    currency = str(currency).upper().strip()
+
     if currency == "USD":
         return 1.0
 
-    cached = cache_get(f"fx_rate:{currency}")
+    cached = cache_get(
+        f"fx_rate:{currency}",
+        ttl=300.0
+    )
+
     if cached is not None:
-        return float(cached)
+        try:
+            return float(cached)
+        except Exception:
+            pass
+
+    # =========================================================
+    # PAIRES DIRECTES DISPONIBLES
+    # =========================================================
+
+    direct_pairs = {
+        "EUR": "EUR_USD",
+        "GBP": "GBP_USD",
+        "AUD": "AUD_USD",
+        "XAU": "XAU_USD",
+    }
+
+    # =========================================================
+    # PAIRES INVERSÉES DISPONIBLES
+    # =========================================================
+
+    inverse_pairs = {
+        "CAD": "USD_CAD",
+        "JPY": "USD_JPY",
+        "CHF": "USD_CHF",
+        "NZD": "NZD_USD",
+    }
 
     try:
         api = v88_client()
 
-        # Taux direct : currency_USD
-        pair_direct = f"{currency}_USD"
-        df = get_candles(api, pair_direct, "M1", 5)
-        if df is not None and not df.empty:
-            rate = float(df["close"].iloc[-1])
-            cache_set(f"fx_rate:{currency}", rate)
-            return rate
+        # -----------------------------------------------------
+        # DIRECT
+        # -----------------------------------------------------
 
-        # Taux inverse : USD_currency → on prend l'inverse
-        pair_inverse = f"USD_{currency}"
-        df = get_candles(api, pair_inverse, "M1", 5)
-        if df is not None and not df.empty:
-            rate = 1.0 / float(df["close"].iloc[-1])
-            cache_set(f"fx_rate:{currency}", rate)
-            return rate
+        pair = direct_pairs.get(currency)
+
+        if pair:
+
+            df = get_candles(
+                api,
+                pair,
+                "M1",
+                5
+            )
+
+            if df is not None and not df.empty:
+
+                price = float(
+                    df["close"].iloc[-1]
+                )
+
+                if price > 0:
+                    cache_set(
+                        f"fx_rate:{currency}",
+                        price
+                    )
+
+                    return price
+
+        # -----------------------------------------------------
+        # INVERSE
+        # -----------------------------------------------------
+
+        pair = inverse_pairs.get(currency)
+
+        if pair:
+
+            df = get_candles(
+                api,
+                pair,
+                "M1",
+                5
+            )
+
+            if df is not None and not df.empty:
+
+                price = float(
+                    df["close"].iloc[-1]
+                )
+
+                if price > 0:
+
+                    rate = 1.0 / price
+
+                    cache_set(
+                        f"fx_rate:{currency}",
+                        rate
+                    )
+
+                    return rate
 
     except Exception as e:
-        logger.warning(f"[FX_RATE] Impossible de récupérer le taux {currency}: {e}")
 
-    # Fallback : pour JPY on utilise une valeur approximative
-    # (⚠️ ce n'est qu'un fallback, la valeur dynamique est prioritaire)
+        logger.warning(
+            f"[FX_RATE] "
+            f"Impossible de récupérer "
+            f"{currency}: {e}"
+        )
+
+    # =========================================================
+    # FALLBACK
+    # =========================================================
+
     fallback_rates = {
-        "JPY": 0.00625,   # ~160 USD/JPY
+        "JPY": 0.00625,
         "EUR": 1.10,
         "GBP": 1.30,
         "CAD": 0.74,
         "AUD": 0.67,
         "CHF": 1.08,
+        "NZD": 0.58,
+        "XAU": 4400.0,
     }
-    rate = fallback_rates.get(currency, 1.0)
-    cache_set(f"fx_rate:{currency}", rate)
-    return rate
 
+    rate = float(
+        fallback_rates.get(currency, 1.0)
+    )
+
+    cache_set(
+        f"fx_rate:{currency}",
+        rate
+    )
+
+    return rate
 def calculate_margin(pair: str, units: int, entry_price: float) -> dict:
     margin_rate = get_oanda_margin_rate(pair)
     notional_usd = units * entry_price
@@ -433,57 +529,423 @@ def detect_swing_points(df: pd.DataFrame, lookback: int = 5) -> tuple:
             lows.append({"index": i, "time": df.index[i], "price": df["low"].iloc[i]})
     return highs, lows
 
-def detect_fvg(df: pd.DataFrame, max_lookback_hours: int = 36) -> List[Dict]:
-    fvgs = []
-    if len(df) < 3:
-        return fvgs
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
-    min_time = now - timedelta(hours=max_lookback_hours)
-    idx_times = pd.to_datetime(df.index)
-    if idx_times.tz is None:
-        idx_times = idx_times.tz_localize('UTC')
-    pair = df.attrs.get("instrument", "")
-    min_gap = 0.00015 if "JPY" in pair else 0.0002
-    for i in range(1, len(df) - 1):
-        if idx_times[i] < min_time:
-            continue
-        prev = df.iloc[i-1]
-        nxt = df.iloc[i+1]
-        if prev["high"] < nxt["low"] and nxt["low"] - prev["high"] >= min_gap:
-            fvgs.append({
-                "direction": "BUY",
-                "high_level": nxt["low"],
-                "low_level": prev["high"],
-                "midpoint": (prev["high"] + nxt["low"]) / 2,
-                "time": idx_times[i]
-            })
-        if prev["low"] > nxt["high"] and prev["low"] - nxt["high"] >= min_gap:
-            fvgs.append({
-                "direction": "SELL",
-                "high_level": prev["low"],
-                "low_level": nxt["high"],
-                "midpoint": (nxt["high"] + prev["low"]) / 2,
-                "time": idx_times[i]
-            })
-    return fvgs
+def detect_fvg(
+    df: pd.DataFrame,
+    max_lookback_hours: int = 36
+) -> List[Dict]:
+    """
+    Détecte uniquement les FVG encore valides et réellement retestés
+    par la dernière bougie M15 clôturée.
 
-def detect_wick_rejection(df: pd.DataFrame, bias: str) -> list:
+    BUY :
+        ancienne impulsion haussière
+        -> zone FVG
+        -> retour du prix dans la zone
+        -> dernière bougie confirme le rejet
+
+    SELL :
+        ancienne impulsion baissière
+        -> zone FVG
+        -> retour du prix dans la zone
+        -> dernière bougie confirme le rejet
+
+    Le FVG est rejeté s'il a été invalidé avant le retest.
+    """
+
+    fvgs = []
+
+    if df is None or len(df) < 10:
+        return fvgs
+
+    try:
+        data = df.copy()
+        pair = str(data.attrs.get("instrument", "")).upper()
+
+        pip = float(get_pip_value(pair))
+        atr = float(calculate_atr(data) or 0.0)
+
+        if atr <= 0:
+            return fvgs
+
+        # ---------------------------------------------------------
+        # PARAMÈTRES
+        # ---------------------------------------------------------
+
+        MAX_AGE_BARS = max(3, int(max_lookback_hours * 4))
+        MIN_GAP_ATR = 0.08
+        MIN_GAP_PIPS = 1.0
+
+        min_gap = max(
+            atr * MIN_GAP_ATR,
+            pip * MIN_GAP_PIPS
+        )
+
+        last_index = len(data) - 1
+
+        # ---------------------------------------------------------
+        # DERNIÈRE BOUGIE = BOUGIE DE RETEST / CONFIRMATION
+        # ---------------------------------------------------------
+
+        retest_candle = data.iloc[last_index]
+
+        current_high = float(retest_candle["high"])
+        current_low = float(retest_candle["low"])
+        current_close = float(retest_candle["close"])
+
+        # ---------------------------------------------------------
+        # RECHERCHE DES FVG RÉCENTS
+        # ---------------------------------------------------------
+
+        start_i = max(1, last_index - MAX_AGE_BARS)
+
+        for i in range(start_i, last_index - 1):
+
+            prev = data.iloc[i - 1]
+            nxt = data.iloc[i + 1]
+
+            prev_high = float(prev["high"])
+            prev_low = float(prev["low"])
+            next_high = float(nxt["high"])
+            next_low = float(nxt["low"])
+
+            # =====================================================
+            # FVG HAUSSIER
+            # =====================================================
+
+            if prev_high < next_low:
+
+                gap = next_low - prev_high
+
+                if gap < min_gap:
+                    continue
+
+                low_level = prev_high
+                high_level = next_low
+
+                # -------------------------------------------------
+                # INVALIDATION AVANT LE RETEST
+                # Un close sous le bas du FVG invalide la zone.
+                # -------------------------------------------------
+
+                invalidated = False
+
+                for j in range(i + 2, last_index):
+                    close_j = float(data.iloc[j]["close"])
+
+                    if close_j < low_level:
+                        invalidated = True
+                        break
+
+                if invalidated:
+                    continue
+
+                # -------------------------------------------------
+                # LE DERNIER CANDLE DOIT RÉELLEMENT TOUCHER LE FVG
+                # -------------------------------------------------
+
+                touched = (
+                    current_low <= high_level
+                    and current_high >= low_level
+                )
+
+                if not touched:
+                    continue
+
+                # -------------------------------------------------
+                # CONFIRMATION DU REJET HAUSSIER
+                # -------------------------------------------------
+
+                candle_range = current_high - current_low
+
+                if candle_range <= 0:
+                    continue
+
+                lower_wick = (
+                    min(
+                        float(retest_candle["open"]),
+                        current_close
+                    ) - current_low
+                )
+
+                rejection_ratio = lower_wick / candle_range
+
+                # Le close doit rester dans / au-dessus de la zone.
+                held = current_close >= low_level
+
+                if not held:
+                    continue
+
+                micro_break = False
+
+                if last_index >= 1:
+                    previous_high = float(
+                        data.iloc[last_index - 1]["high"]
+                    )
+                    micro_break = current_close > previous_high
+
+                confirmed = (
+                    rejection_ratio >= 0.30
+                    or micro_break
+                )
+
+                if not confirmed:
+                    continue
+
+                fvgs.append({
+                    "direction": "BUY",
+                    "high_level": high_level,
+                    "low_level": low_level,
+                    "midpoint": (low_level + high_level) / 2.0,
+                    "time": data.index[i],
+                    "retest_index": last_index,
+                    "retest_time": data.index[last_index],
+                    "gap": gap,
+                    "gap_atr": gap / atr,
+                    "strength": max(
+                        rejection_ratio,
+                        1.0 if micro_break else 0.0
+                    ),
+                    "confirmed": True
+                })
+
+            # =====================================================
+            # FVG BAISSIER
+            # =====================================================
+
+            if prev_low > next_high:
+
+                gap = prev_low - next_high
+
+                if gap < min_gap:
+                    continue
+
+                low_level = next_high
+                high_level = prev_low
+
+                # -------------------------------------------------
+                # INVALIDATION
+                # -------------------------------------------------
+
+                invalidated = False
+
+                for j in range(i + 2, last_index):
+                    close_j = float(data.iloc[j]["close"])
+
+                    if close_j > high_level:
+                        invalidated = True
+                        break
+
+                if invalidated:
+                    continue
+
+                # -------------------------------------------------
+                # RETEST RÉEL
+                # -------------------------------------------------
+
+                touched = (
+                    current_high >= low_level
+                    and current_low <= high_level
+                )
+
+                if not touched:
+                    continue
+
+                # -------------------------------------------------
+                # CONFIRMATION DU REJET BAISSIER
+                # -------------------------------------------------
+
+                candle_range = current_high - current_low
+
+                if candle_range <= 0:
+                    continue
+
+                upper_wick = (
+                    current_high
+                    - max(
+                        float(retest_candle["open"]),
+                        current_close
+                    )
+                )
+
+                rejection_ratio = upper_wick / candle_range
+
+                held = current_close <= high_level
+
+                if not held:
+                    continue
+
+                micro_break = False
+
+                if last_index >= 1:
+                    previous_low = float(
+                        data.iloc[last_index - 1]["low"]
+                    )
+                    micro_break = current_close < previous_low
+
+                confirmed = (
+                    rejection_ratio >= 0.30
+                    or micro_break
+                )
+
+                if not confirmed:
+                    continue
+
+                fvgs.append({
+                    "direction": "SELL",
+                    "high_level": high_level,
+                    "low_level": low_level,
+                    "midpoint": (low_level + high_level) / 2.0,
+                    "time": data.index[i],
+                    "retest_index": last_index,
+                    "retest_time": data.index[last_index],
+                    "gap": gap,
+                    "gap_atr": gap / atr,
+                    "strength": max(
+                        rejection_ratio,
+                        1.0 if micro_break else 0.0
+                    ),
+                    "confirmed": True
+                })
+
+        # ---------------------------------------------------------
+        # PLUS RÉCENT / PLUS FORT EN PREMIER
+        # ---------------------------------------------------------
+
+        fvgs.sort(
+            key=lambda x: (
+                x.get("retest_index", -1),
+                x.get("strength", 0.0),
+                x.get("gap_atr", 0.0)
+            ),
+            reverse=True
+        )
+
+        # On évite de renvoyer des dizaines de zones empilées.
+        return fvgs[:5]
+
+    except Exception as e:
+        logger.warning(f"[FVG] Erreur détection: {e}")
+        return []
+        
+def detect_wick_rejection(
+    df: pd.DataFrame,
+    bias: str
+) -> list:
+    """
+    Détecte uniquement une vraie rejection M15 récente.
+
+    La dernière bougie clôturée doit :
+    - présenter une mèche dominante ;
+    - être dans le sens du biais ;
+    - clôturer de façon cohérente avec le rejet.
+
+    Le niveau retourné correspond à l'extrême rejeté.
+    """
+
     poi = []
-    if len(df) < 3:
+
+    if df is None or len(df) < 3:
         return poi
-    for i in range(1, len(df) - 1):
-        c = df.iloc[i]
-        body = abs(c["close"] - c["open"])
-        total = c["high"] - c["low"]
-        if total == 0:
-            continue
-        upper = c["high"] - max(c["open"], c["close"])
-        lower = min(c["open"], c["close"]) - c["low"]
-        if bias in ["BUY", "NEUTRAL"] and lower >= body * 0.7 and lower >= upper * 1.5:
-            poi.append({"direction": "BUY", "price_level": c["low"]})
-        elif bias in ["SELL", "NEUTRAL"] and upper >= body * 0.7 and upper >= lower * 1.5:
-            poi.append({"direction": "SELL", "price_level": c["high"]})
-    return poi
+
+    bias = str(bias).upper()
+
+    try:
+        # Bougies clôturées uniquement.
+        data = df.copy()
+
+        last = data.iloc[-1]
+
+        open_price = float(last["open"])
+        close_price = float(last["close"])
+        high = float(last["high"])
+        low = float(last["low"])
+
+        candle_range = high - low
+
+        if candle_range <= 0:
+            return poi
+
+        body = abs(close_price - open_price)
+
+        upper_wick = high - max(open_price, close_price)
+        lower_wick = min(open_price, close_price) - low
+
+        upper_ratio = upper_wick / candle_range
+        lower_ratio = lower_wick / candle_range
+
+        # =========================================================
+        # BUY : REJET DU BAS
+        # =========================================================
+
+        if bias == "BUY":
+
+            bullish_close = close_price >= open_price
+            close_in_upper_half = (
+                close_price >= low + candle_range * 0.50
+            )
+
+            valid_buy = (
+                lower_ratio >= 0.30
+                and lower_wick >= upper_wick * 1.5
+                and (
+                    body == 0
+                    or lower_wick >= body * 0.70
+                )
+                and close_in_upper_half
+                and bullish_close
+            )
+
+            if valid_buy:
+
+                poi.append({
+                    "direction": "BUY",
+                    "price_level": low,
+                    "retest_index": len(data) - 1,
+                    "retest_time": data.index[-1],
+                    "strength": lower_ratio,
+                    "rejection_ratio": lower_ratio,
+                    "confirmed": True
+                })
+
+        # =========================================================
+        # SELL : REJET DU HAUT
+        # =========================================================
+
+        elif bias == "SELL":
+
+            bearish_close = close_price <= open_price
+            close_in_lower_half = (
+                close_price <= low + candle_range * 0.50
+            )
+
+            valid_sell = (
+                upper_ratio >= 0.30
+                and upper_wick >= lower_wick * 1.5
+                and (
+                    body == 0
+                    or upper_wick >= body * 0.70
+                )
+                and close_in_lower_half
+                and bearish_close
+            )
+
+            if valid_sell:
+
+                poi.append({
+                    "direction": "SELL",
+                    "price_level": high,
+                    "retest_index": len(data) - 1,
+                    "retest_time": data.index[-1],
+                    "strength": upper_ratio,
+                    "rejection_ratio": upper_ratio,
+                    "confirmed": True
+                })
+
+        return poi
+
+    except Exception as e:
+        logger.warning(f"[WICK] Erreur détection: {e}")
+        return []
 
 def detect_bos(df: pd.DataFrame) -> dict:
     highs, lows = detect_swing_points(df, 5)
@@ -503,19 +965,17 @@ def detect_setups(
     bias: str
 ) -> List[Dict]:
     """
-    Détecte les setups dans le sens du biais.
+    Détecte uniquement les setups M15 réellement actifs.
 
-    Setups autorisés :
-        - FVG_RETEST
-        - WICK_REJECTION
-        - BOS_RETEST
+    Hiérarchie :
+        BOS_RETEST
+        FVG_RETEST
+        WICK_REJECTION
+
+    FVG/WICK doivent être confirmés sur la dernière bougie clôturée.
     """
 
     setups = []
-
-    # =========================================================
-    # SÉCURITÉ
-    # =========================================================
 
     if df_m15 is None or len(df_m15) < 20:
         return setups
@@ -523,43 +983,60 @@ def detect_setups(
     if bias not in ("BUY", "SELL"):
         return setups
 
+    try:
+        current_close = float(df_m15["close"].iloc[-1])
+    except Exception:
+        return setups
+
     # =========================================================
-    # 1. FVG_RETEST
+    # FVG
     # =========================================================
 
     try:
         fvgs = detect_fvg(df_m15)
+
+        for fvg in fvgs:
+
+            if fvg.get("direction") != bias:
+                continue
+
+            if not fvg.get("confirmed", False):
+                continue
+
+            setups.append({
+                "type": "FVG_RETEST",
+                "direction": bias,
+
+                # Entrée marché basée sur la confirmation réelle
+                "entry_level": current_close,
+
+                "fvg": fvg,
+
+                "strength": float(
+                    fvg.get("strength", 0.5)
+                ),
+
+                "zone_low": float(
+                    fvg["low_level"]
+                ),
+
+                "zone_high": float(
+                    fvg["high_level"]
+                ),
+
+                "retest_index": fvg.get(
+                    "retest_index",
+                    len(df_m15) - 1
+                )
+            })
+
     except Exception as e:
         logger.warning(
-            f"{pair} | FVG detection error: {e}"
+            f"{pair} | FVG error: {e}"
         )
-        fvgs = []
-
-    for f in fvgs:
-
-        if f.get("direction") != bias:
-            continue
-
-        try:
-            entry_level = float(
-                f["midpoint"]
-            )
-        except (
-            KeyError,
-            TypeError,
-            ValueError
-        ):
-            continue
-
-        setups.append({
-            "type": "FVG_RETEST",
-            "direction": bias,
-            "entry_level": entry_level,
-            "fvg": f,
-        })
 
     # =========================================================
-    # 2. WICK_REJECTION
+    # WICK REJECTION
     # =========================================================
 
     try:
@@ -567,36 +1044,47 @@ def detect_setups(
             df_m15,
             bias
         )
+
+        for wick in wicks:
+
+            if wick.get("direction") != bias:
+                continue
+
+            if not wick.get("confirmed", False):
+                continue
+
+            setups.append({
+                "type": "WICK_REJECTION",
+                "direction": bias,
+
+                # Entrée au prix de confirmation actuel
+                "entry_level": current_close,
+
+                "price_level": float(
+                    wick["price_level"]
+                ),
+
+                "strength": float(
+                    wick.get("strength", 0.5)
+                ),
+
+                "rejection_ratio": float(
+                    wick.get("rejection_ratio", 0.0)
+                ),
+
+                "retest_index": wick.get(
+                    "retest_index",
+                    len(df_m15) - 1
+                )
+            })
+
     except Exception as e:
         logger.warning(
-            f"{pair} | WICK detection error: {e}"
+            f"{pair} | WICK error: {e}"
         )
-        wicks = []
-
-    for w in wicks:
-
-        if w.get("direction") != bias:
-            continue
-
-        try:
-            entry_level = float(
-                w["price_level"]
-            )
-        except (
-            KeyError,
-            TypeError,
-            ValueError
-        ):
-            continue
-
-        setups.append({
-            "type": "WICK_REJECTION",
-            "direction": bias,
-            "entry_level": entry_level,
-        })
 
     # =========================================================
-    # 3. BOS_RETEST
+    # BOS RETEST
     # =========================================================
 
     try:
@@ -604,57 +1092,25 @@ def detect_setups(
             df_m15,
             bias
         )
+
+        if bos_setup:
+
+            setups.append({
+                **bos_setup,
+                "type": "BOS_RETEST",
+                "direction": bias,
+                "entry_level": float(
+                    bos_setup["entry_level"]
+                )
+            })
+
     except Exception as e:
         logger.warning(
-            f"{pair} | BOS_RETEST detection error: {e}"
+            f"{pair} | BOS error: {e}"
         )
-        bos_setup = None
-
-    if bos_setup is not None:
-
-        try:
-            bos_entry = float(
-                bos_setup["entry_level"]
-            )
-        except (
-            KeyError,
-            TypeError,
-            ValueError
-        ):
-            bos_entry = None
-
-        if bos_entry is not None:
-
-            duplicate = any(
-                s.get("type") == "BOS_RETEST"
-                and
-                abs(
-                    float(s.get("entry_level", 0))
-                    - bos_entry
-                ) < 1e-8
-                for s in setups
-            )
-
-            if not duplicate:
-
-                setups.append({
-                    **bos_setup,
-                    "type": "BOS_RETEST",
-                    "direction": bias,
-                    "entry_level": bos_entry,
-                })
-
-                logger.info(
-                    f"[SETUP] {pair} | "
-                    f"BOS_RETEST | "
-                    f"{bias} | "
-                    f"entry={bos_entry:.5f} | "
-                    f"confirmation="
-                    f"{bos_setup.get('confirmation', 'OK')}"
-                )
 
     # =========================================================
-    # 4. DÉDOUBLONNAGE
+    # DÉDUPLICATION
     # =========================================================
 
     unique_setups = []
@@ -663,14 +1119,24 @@ def detect_setups(
     for setup in setups:
 
         try:
-            key = (
-                setup["type"],
-                setup["direction"],
-                round(
-                    float(setup["entry_level"]),
-                    8
-                )
+            setup_type = setup["type"]
+            direction = setup["direction"]
+            entry_level = float(
+                setup["entry_level"]
             )
+
+            key = (
+                setup_type,
+                direction,
+                round(entry_level, 6)
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            unique_setups.append(setup)
+
         except (
             KeyError,
             TypeError,
@@ -678,24 +1144,43 @@ def detect_setups(
         ):
             continue
 
-        if key in seen:
-            continue
-
-        seen.add(key)
-        unique_setups.append(setup)
-
     # =========================================================
-    # 5. LOG
+    # TRI
     # =========================================================
+
+    unique_setups.sort(
+        key=lambda x: (
+            SETUP_PRIORITY.get(
+                x.get("type"),
+                0
+            ),
+            float(
+                x.get("strength", 0.0)
+            ),
+            -abs(
+                float(x.get("entry_level", current_close))
+                - current_close
+            )
+        ),
+        reverse=True
+    )
 
     logger.info(
         f"[SETUPS] {pair} | "
         f"BIAS={bias} | "
-        f"FVG/WICK/BOS="
-        f"{len(unique_setups)}"
+        f"ValidSetups={len(unique_setups)}"
     )
 
-    return unique_setups
+    if unique_setups:
+        logger.info(
+            f"[SETUPS_DETAIL] {pair} | "
+            + ", ".join(
+                f"{s['type']}@{float(s['entry_level']):.5f}"
+                for s in unique_setups[:10]
+            )
+        )
+
+    return unique_setups[:8]
 # ============================================================
 # STRATÉGIE SIMPLIFIÉE
 # ============================================================
