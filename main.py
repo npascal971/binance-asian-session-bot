@@ -738,51 +738,61 @@ def get_directional_bias(
         NEUTRAL
     """
 
-    def bias_from_structure(
-        df: pd.DataFrame,
-        label: str = ""
-    ):
+    def bias_from_structure(df: pd.DataFrame):
+        """
+        Analyse uniquement la structure HH/HL/LH/LL
+        sur le timeframe fourni.
+        """
+
+        if df is None or len(df) < 20:
+            return "NEUTRAL", 0, 0
+
         highs, lows = detect_swing_points(df, 5)
 
         if len(highs) < 2 or len(lows) < 2:
             return "NEUTRAL", 0, 0
 
-        hh = highs[-1]["price"] > highs[-2]["price"]
-        hl = lows[-1]["price"] > lows[-2]["price"]
+        # Derniers swings confirmés
+        last_high = float(highs[-1]["price"])
+        prev_high = float(highs[-2]["price"])
 
-        lh = highs[-1]["price"] < highs[-2]["price"]
-        ll = lows[-1]["price"] < lows[-2]["price"]
+        last_low = float(lows[-1]["price"])
+        prev_low = float(lows[-2]["price"])
+
+        hh = last_high > prev_high
+        hl = last_low > prev_low
+
+        lh = last_high < prev_high
+        ll = last_low < prev_low
 
         buy_signals = int(hh) + int(hl)
         sell_signals = int(lh) + int(ll)
 
+        # Structure clairement haussière
         if buy_signals == 2:
             return "BUY", buy_signals, sell_signals
 
+        # Structure clairement baissière
         if sell_signals == 2:
             return "SELL", buy_signals, sell_signals
 
+        # Une seule composante haussière
         if buy_signals == 1 and sell_signals == 0:
             return "BUY_WEAK", buy_signals, sell_signals
 
+        # Une seule composante baissière
         if sell_signals == 1 and buy_signals == 0:
             return "SELL_WEAK", buy_signals, sell_signals
 
+        # HH + LL ou LH + HL = structure contradictoire
         return "NEUTRAL", buy_signals, sell_signals
 
     # =========================================================
     # STRUCTURE H4 / H1
     # =========================================================
 
-    b4, b4_buy, b4_sell = bias_from_structure(
-        df_h4,
-        "H4"
-    )
-
-    b1, b1_buy, b1_sell = bias_from_structure(
-        df_h1,
-        "H1"
-    )
+    b4, b4_buy, b4_sell = bias_from_structure(df_h4)
+    b1, b1_buy, b1_sell = bias_from_structure(df_h1)
 
     # =========================================================
     # INDICATEURS H1
@@ -799,7 +809,7 @@ def get_directional_bias(
         momentum_h1 = 0.0
 
     # =========================================================
-    # H4 NEUTRAL = PAS DE TRADE
+    # H4 NEUTRAL
     # =========================================================
 
     if b4 == "NEUTRAL":
@@ -811,27 +821,25 @@ def get_directional_bias(
 
     elif b4 == "BUY":
 
-        # H1 confirme la tendance
+        # H1 haussier ou légèrement haussier
         if b1 in ("BUY", "BUY_WEAK"):
             result = "BUY"
 
-        # H1 neutre mais momentum haussier
+        # H1 neutre : on exige une confirmation momentum
         elif b1 == "NEUTRAL":
-
             if adx_h1 >= 20 and momentum_h1 > 0.15:
                 result = "BUY"
             else:
                 result = "NEUTRAL"
 
-        # H1 en retracement baissier faible
+        # H1 légèrement baissier = retracement potentiel
         elif b1 == "SELL_WEAK":
-
             if adx_h1 >= 25 and momentum_h1 > 0.15:
                 result = "BUY"
             else:
                 result = "NEUTRAL"
 
-        # H1 SELL confirmé = contradiction
+        # H1 clairement baissier = contradiction
         else:
             result = "NEUTRAL"
 
@@ -841,27 +849,25 @@ def get_directional_bias(
 
     elif b4 == "SELL":
 
-        # H1 confirme la tendance
+        # H1 baissier ou légèrement baissier
         if b1 in ("SELL", "SELL_WEAK"):
             result = "SELL"
 
-        # H1 neutre mais momentum baissier
+        # H1 neutre : confirmation momentum
         elif b1 == "NEUTRAL":
-
             if adx_h1 >= 20 and momentum_h1 < -0.15:
                 result = "SELL"
             else:
                 result = "NEUTRAL"
 
-        # H1 en retracement haussier faible
+        # H1 légèrement haussier = retracement potentiel
         elif b1 == "BUY_WEAK":
-
             if adx_h1 >= 25 and momentum_h1 < -0.15:
                 result = "SELL"
             else:
                 result = "NEUTRAL"
 
-        # H1 BUY confirmé = contradiction
+        # H1 clairement haussier = contradiction
         else:
             result = "NEUTRAL"
 
