@@ -2269,25 +2269,35 @@ def get_confirmation_signal(
     direction: str
 ) -> Tuple[bool, str]:
     """
-    Confirmation M15 plus souple mais toujours structurée.
+    Confirmation M15 adaptative mais structurée.
 
     BUY :
-        - rejet de mèche basse + clôture favorable
+        - rejet haussier + clôture acceptable
           OU
-        - micro-break haussier + clôture favorable
+        - micro-break haussier
+          OU
+        - très fort rejet même sans bougie verte
 
     SELL :
-        - rejet de mèche haute + clôture favorable
+        - rejet baissier + clôture acceptable
           OU
-        - micro-break baissier + clôture favorable
+        - micro-break baissier
+          OU
+        - très fort rejet même sans bougie rouge
 
-    La confirmation doit rester cohérente avec le sens du trade.
+    La confirmation reste cohérente avec le biais
+    et évite de valider une simple mèche isolée.
     """
 
     if df_m15 is None or len(df_m15) < 4:
         return False, "données insuffisantes"
 
     try:
+        direction = str(direction).upper().strip()
+
+        if direction not in ("BUY", "SELL"):
+            return False, f"direction invalide: {direction}"
+
         last = df_m15.iloc[-1]
         prev = df_m15.iloc[-2]
 
@@ -2304,145 +2314,207 @@ def get_confirmation_signal(
         if total <= 0:
             return False, "range nul"
 
-        body = abs(close_price - open_price)
+        body = abs(
+            close_price - open_price
+        )
 
-        upper_wick = high_price - max(open_price, close_price)
-        lower_wick = min(open_price, close_price) - low_price
+        upper_wick = (
+            high_price
+            - max(open_price, close_price)
+        )
 
-        # Position de clôture dans la bougie :
-        # 0 = plus bas, 1 = plus haut
-        close_position = (close_price - low_price) / total
+        lower_wick = (
+            min(open_price, close_price)
+            - low_price
+        )
 
-        # ---------------------------------------------------------
-        # Intensité de la mèche
-        # ---------------------------------------------------------
+        close_position = (
+            close_price - low_price
+        ) / total
+
         lower_ratio = lower_wick / total
         upper_ratio = upper_wick / total
 
-        # Un corps minuscule ne doit pas transformer le moindre
-        # mouvement en "rejet".
-        effective_body = max(body, total * 0.05)
+        # Évite qu'une bougie quasi sans corps
+        # soit interprétée comme une énorme confirmation.
+        effective_body = max(
+            body,
+            total * 0.05
+        )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # BUY
-        # ---------------------------------------------------------
+        # =========================================================
+
         if direction == "BUY":
 
-            # Rejet haussier :
-            # grosse mèche basse + clôture dans la moitié haute
+            # Rejet haussier classique
             bullish_rejection = (
-                lower_ratio >= 0.35
+                lower_ratio >= 0.30
                 and lower_wick >= effective_body * 0.90
-                and lower_wick > upper_wick * 1.15
-                and close_position >= 0.55
+                and lower_wick > upper_wick * 1.10
+                and close_position >= 0.50
             )
 
-            # Micro-break :
-            # clôture au-dessus du sommet de la bougie précédente
-            bullish_micro_break = close_price > prev_high
+            # Micro-break immédiat
+            bullish_micro_break = (
+                close_price > prev_high
+            )
 
-            # Clôture favorable :
-            # la bougie termine au-dessus de son ouverture
-            # OU montre une vraie récupération de la partie basse.
+            # -----------------------------------------------------
+            # Clôture favorable
+            # -----------------------------------------------------
+            #
+            # On ne demande plus obligatoirement une bougie verte.
+            # Une récupération nette de la partie basse suffit.
+            #
             bullish_close = (
                 close_price >= open_price
-                or close_position >= 0.65
+                or close_position >= 0.60
             )
 
-            # ---------------------------------------------
-            # Confirmation principale
-            # ---------------------------------------------
-            if bullish_rejection and bullish_close:
-                return True, "rejet haussier + clôture favorable OK"
+            # -----------------------------------------------------
+            # Confirmation forte
+            # -----------------------------------------------------
 
-            if bullish_micro_break and bullish_close:
-                return True, "micro-break haussier + clôture favorable OK"
+            if (
+                bullish_rejection
+                and bullish_close
+            ):
+                return True, (
+                    f"rejet haussier + clôture OK "
+                    f"(rejet={lower_ratio:.2f}, "
+                    f"close={close_position:.2f})"
+                )
 
-            # ---------------------------------------------
-            # Cas très fort :
-            # rejet très marqué même sans clôture verte
-            # ---------------------------------------------
+            # Le micro-break devient une confirmation autonome.
+            # Il matérialise directement la reprise de structure.
+            if bullish_micro_break:
+                return True, (
+                    f"micro-break haussier OK "
+                    f"(rejet={lower_ratio:.2f})"
+                )
+
+            # Très gros rejet :
+            # on autorise une clôture moins parfaite si la
+            # pression acheteuse est clairement visible.
             if (
                 lower_ratio >= 0.45
-                and lower_wick > upper_wick * 1.5
-                and close_position >= 0.60
+                and lower_wick > upper_wick * 1.40
+                and close_position >= 0.55
             ):
-                return True, "fort rejet haussier OK"
+                return True, (
+                    f"fort rejet haussier OK "
+                    f"(rejet={lower_ratio:.2f}, "
+                    f"close={close_position:.2f})"
+                )
 
             reasons = []
 
             if not bullish_rejection:
-                reasons.append(f"rejet insuffisant ({lower_ratio:.2f})")
+                reasons.append(
+                    f"rejet insuffisant ({lower_ratio:.2f})"
+                )
 
             if not bullish_micro_break:
-                reasons.append("pas de micro-break")
+                reasons.append(
+                    "pas de micro-break"
+                )
 
             if not bullish_close:
-                reasons.append("clôture non favorable")
+                reasons.append(
+                    "clôture non favorable"
+                )
 
             return False, ", ".join(reasons)
 
-        # ---------------------------------------------------------
+        # =========================================================
         # SELL
-        # ---------------------------------------------------------
-        elif direction == "SELL":
+        # =========================================================
 
-            # Rejet baissier :
-            # grosse mèche haute + clôture dans la moitié basse
+        if direction == "SELL":
+
+            # Rejet baissier classique
             bearish_rejection = (
-                upper_ratio >= 0.35
+                upper_ratio >= 0.30
                 and upper_wick >= effective_body * 0.90
-                and upper_wick > lower_wick * 1.15
-                and close_position <= 0.45
+                and upper_wick > lower_wick * 1.10
+                and close_position <= 0.50
             )
 
-            # Micro-break :
-            # clôture sous le plus bas de la bougie précédente
-            bearish_micro_break = close_price < prev_low
+            # Micro-break immédiat
+            bearish_micro_break = (
+                close_price < prev_low
+            )
 
-            # Clôture favorable :
+            # Clôture favorable
             bearish_close = (
                 close_price <= open_price
-                or close_position <= 0.35
+                or close_position <= 0.40
             )
 
-            # ---------------------------------------------
-            # Confirmation principale
-            # ---------------------------------------------
-            if bearish_rejection and bearish_close:
-                return True, "rejet baissier + clôture favorable OK"
+            # -----------------------------------------------------
+            # Confirmation forte
+            # -----------------------------------------------------
 
-            if bearish_micro_break and bearish_close:
-                return True, "micro-break baissier + clôture favorable OK"
+            if (
+                bearish_rejection
+                and bearish_close
+            ):
+                return True, (
+                    f"rejet baissier + clôture OK "
+                    f"(rejet={upper_ratio:.2f}, "
+                    f"close={close_position:.2f})"
+                )
 
-            # ---------------------------------------------
-            # Cas très fort
-            # ---------------------------------------------
+            # Micro-break autonome
+            if bearish_micro_break:
+                return True, (
+                    f"micro-break baissier OK "
+                    f"(rejet={upper_ratio:.2f})"
+                )
+
+            # Très gros rejet
             if (
                 upper_ratio >= 0.45
-                and upper_wick > lower_wick * 1.5
-                and close_position <= 0.40
+                and upper_wick > lower_wick * 1.40
+                and close_position <= 0.45
             ):
-                return True, "fort rejet baissier OK"
+                return True, (
+                    f"fort rejet baissier OK "
+                    f"(rejet={upper_ratio:.2f}, "
+                    f"close={close_position:.2f})"
+                )
 
             reasons = []
 
             if not bearish_rejection:
-                reasons.append(f"rejet insuffisant ({upper_ratio:.2f})")
+                reasons.append(
+                    f"rejet insuffisant ({upper_ratio:.2f})"
+                )
 
             if not bearish_micro_break:
-                reasons.append("pas de micro-break")
+                reasons.append(
+                    "pas de micro-break"
+                )
 
             if not bearish_close:
-                reasons.append("clôture non favorable")
+                reasons.append(
+                    "clôture non favorable"
+                )
 
             return False, ", ".join(reasons)
 
         return False, f"direction invalide: {direction}"
 
     except Exception as e:
-        logger.warning(f"[CONFIRMATION] Erreur : {e}")
-        return False, f"erreur confirmation: {e}"
+        logger.warning(
+            f"[CONFIRMATION] Erreur : {e}"
+        )
+
+        return False, (
+            f"erreur confirmation: {e}"
+        )
 
 def calculate_sl_tp_structural(
     df_m15: pd.DataFrame,
