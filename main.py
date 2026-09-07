@@ -1,5 +1,5 @@
 # ============================================================
-# main.py - Version PROD "2R Strict" (v133)
+# main.py - Version PROD "2R Strict" (v140)
 # Stratégie : Biais H4/H1 → Retracement → Confirmation → 2R
 # ============================================================
 
@@ -390,404 +390,10 @@ def get_fx_rate_to_usd(currency: str) -> float:
         return 0.0
 
 
-def calculate_margin(
-    pair: str,
-    units: int,
-    entry_price: float
-) -> dict:
-    """
-    Calcule la marge estimée en USD.
 
-    Le compte est supposé libellé en USD.
 
-    Pour le notionnel :
-        - base = USD  -> units
-        - quote = USD -> units * prix
-        - sinon        -> units * conversion base -> USD
-    """
-    try:
-        pair = str(pair).upper().strip()
 
-        units_abs = abs(int(units))
-        entry_price = float(entry_price)
 
-        if units_abs <= 0 or entry_price <= 0:
-            return {
-                "margin_required": 0.0,
-                "margin_available": 0.0,
-                "sufficient": False
-            }
-
-        parts = pair.split("_")
-
-        if len(parts) != 2:
-            logger.error(
-                f"[MARGIN] Instrument invalide: {pair}"
-            )
-
-            return {
-                "margin_required": 0.0,
-                "margin_available": 0.0,
-                "sufficient": False
-            }
-
-        base_currency = parts[0]
-        quote_currency = parts[1]
-
-        # --------------------------------------------------------
-        # Taux de marge OANDA
-        # --------------------------------------------------------
-        margin_rate = float(get_oanda_margin_rate(pair))
-
-        if margin_rate <= 0:
-            margin_rate = 0.0333
-
-        # --------------------------------------------------------
-        # Notionnel en USD
-        # --------------------------------------------------------
-        if base_currency == "USD":
-            # Ex: USD_JPY
-            notional_usd = float(units_abs)
-
-        elif quote_currency == "USD":
-            # Ex: EUR_USD / GBP_USD / XAU_USD
-            notional_usd = float(units_abs) * entry_price
-
-        else:
-            # Ex: AUD_JPY
-            # units = quantité de base AUD
-            # conversion AUD -> USD
-            base_to_usd = get_fx_rate_to_usd(base_currency)
-
-            if base_to_usd <= 0:
-                logger.error(
-                    f"[MARGIN] Conversion "
-                    f"{base_currency}->USD invalide"
-                )
-
-                return {
-                    "margin_required": 0.0,
-                    "margin_available": 0.0,
-                    "sufficient": False
-                }
-
-            notional_usd = (
-                float(units_abs) * base_to_usd
-            )
-
-        margin_required = (
-            notional_usd * margin_rate
-        )
-
-        margin_available = get_available_margin()
-
-        sufficient = (
-            margin_available >= margin_required
-        )
-
-        logger.debug(
-            f"[MARGIN] {pair} | "
-            f"units={units_abs} | "
-            f"notionalUSD={notional_usd:.2f} | "
-            f"rate={margin_rate:.5f} | "
-            f"required={margin_required:.2f} | "
-            f"available={margin_available:.2f}"
-        )
-
-        return {
-            "margin_required": margin_required,
-            "margin_available": margin_available,
-            "sufficient": sufficient
-        }
-
-    except Exception as e:
-        logger.error(
-            f"[MARGIN] Erreur calcul marge {pair}: {e}"
-        )
-
-        return {
-            "margin_required": 0.0,
-            "margin_available": 0.0,
-            "sufficient": False
-        }
-
-
-def cap_units_by_margin(
-    pair: str,
-    units: int,
-    entry_price: float,
-    balance: float
-) -> int:
-    """
-    Réduit les unités si nécessaire pour respecter :
-        1. la marge disponible OANDA
-        2. MAX_MARGIN_USAGE_PER_TRADE_PERCENT
-
-    Ne remonte jamais artificiellement les unités.
-    """
-    try:
-        units = int(units)
-
-        if units <= 0:
-            return 0
-
-        step = UNIT_STEP_BY_PAIR.get(
-            pair,
-            UNIT_STEP_BY_PAIR["DEFAULT"]
-        )
-
-        if step <= 0:
-            step = 1
-
-        margin_info = calculate_margin(
-            pair,
-            units,
-            entry_price
-        )
-
-        margin_required = float(
-            margin_info.get("margin_required", 0.0)
-        )
-
-        margin_available = float(
-            margin_info.get("margin_available", 0.0)
-        )
-
-        if margin_required <= 0:
-            return 0
-
-        # --------------------------------------------------------
-        # Marge maximale autorisée par trade
-        # --------------------------------------------------------
-        max_margin_by_balance = (
-            float(balance)
-            * (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0)
-        )
-
-        # --------------------------------------------------------
-        # Marge effectivement disponible
-        # --------------------------------------------------------
-        allowed_margin = min(
-            margin_available,
-            max_margin_by_balance
-        )
-
-        if allowed_margin <= 0:
-            logger.warning(
-                f"[MARGIN CAP] {pair} | "
-                f"Marge autorisée <= 0"
-            )
-            return 0
-
-        # --------------------------------------------------------
-        # Pas besoin de réduire
-        # --------------------------------------------------------
-        if margin_required <= allowed_margin:
-            return int(
-                units // step * step
-            )
-
-        # --------------------------------------------------------
-        # Réduction proportionnelle
-        # --------------------------------------------------------
-        ratio = (
-            allowed_margin / margin_required
-        )
-
-        capped_units = int(units * ratio)
-
-        capped_units = int(
-            capped_units // step * step
-        )
-
-        logger.info(
-            f"[MARGIN CAP] {pair} | "
-            f"{units} -> {capped_units} unités | "
-            f"marge={margin_required:.2f} | "
-            f"max={allowed_margin:.2f}"
-        )
-
-        return max(0, capped_units)
-
-    except Exception as e:
-        logger.error(
-            f"[MARGIN CAP] Erreur {pair}: {e}"
-        )
-        return 0
-
-
-def calculate_units(
-    pair: str,
-    entry: float,
-    stop_loss: float,
-    balance: float,
-    risk_pct: float = None
-) -> int:
-    """
-    Calcule les unités à partir du risque USD réel.
-
-    Le risque est calculé dans la devise de cotation,
-    puis converti en USD.
-
-    Exemple USD_JPY :
-        perte par unité = distance * JPY->USD
-
-    Exemple EUR_USD :
-        perte par unité = distance
-        car USD est déjà la devise de cotation.
-    """
-    try:
-        pair = str(pair).upper().strip()
-
-        entry = float(entry)
-        stop_loss = float(stop_loss)
-        balance = float(balance)
-
-        if risk_pct is None:
-            risk_pct = RISK_PERCENTAGE
-
-        risk_pct = float(risk_pct)
-
-        if balance <= 0:
-            logger.warning(
-                f"[UNITS] {pair} | Balance invalide: {balance}"
-            )
-            return 0
-
-        if entry <= 0 or stop_loss <= 0:
-            logger.warning(
-                f"[UNITS] {pair} | Prix invalides"
-            )
-            return 0
-
-        # --------------------------------------------------------
-        # Risque USD autorisé
-        # --------------------------------------------------------
-        risk_usd = min(
-            balance * (risk_pct / 100.0),
-            MAX_RISK_USD
-        )
-
-        if risk_usd <= 0:
-            return 0
-
-        # --------------------------------------------------------
-        # Distance au stop
-        # --------------------------------------------------------
-        distance = abs(entry - stop_loss)
-
-        if distance <= 0:
-            logger.warning(
-                f"[UNITS] {pair} | Distance SL nulle"
-            )
-            return 0
-
-        parts = pair.split("_")
-
-        if len(parts) != 2:
-            logger.error(
-                f"[UNITS] Instrument invalide: {pair}"
-            )
-            return 0
-
-        base_currency = parts[0]
-        quote_currency = parts[1]
-
-        # --------------------------------------------------------
-        # Valeur USD d'une variation d'une unité
-        # --------------------------------------------------------
-        if quote_currency == "USD":
-            # EUR_USD, GBP_USD, AUD_USD, XAU_USD...
-            quote_to_usd = 1.0
-
-        else:
-            quote_to_usd = get_fx_rate_to_usd(
-                quote_currency
-            )
-
-        if quote_to_usd <= 0:
-            logger.error(
-                f"[UNITS] {pair} | "
-                f"Conversion {quote_currency}->USD invalide: "
-                f"{quote_to_usd}"
-            )
-            return 0
-
-        risk_per_unit = (
-            distance * quote_to_usd
-        )
-
-        if risk_per_unit <= 0:
-            logger.warning(
-                f"[UNITS] {pair} | "
-                f"Risk/unit invalide: {risk_per_unit}"
-            )
-            return 0
-
-        # --------------------------------------------------------
-        # Taille brute
-        # --------------------------------------------------------
-        raw_units = (
-            risk_usd / risk_per_unit
-        )
-
-        step = UNIT_STEP_BY_PAIR.get(
-            pair,
-            UNIT_STEP_BY_PAIR["DEFAULT"]
-        )
-
-        if step <= 0:
-            step = 1
-
-        units = int(
-            raw_units // step * step
-        )
-
-        if units <= 0:
-            logger.info(
-                f"[UNITS] {pair} | "
-                f"0 unité | "
-                f"riskUSD={risk_usd:.2f} | "
-                f"risk/unit={risk_per_unit:.8f}"
-            )
-            return 0
-
-        # --------------------------------------------------------
-        # Cap marge
-        # --------------------------------------------------------
-        units_before_margin = units
-
-        units = cap_units_by_margin(
-            pair=pair,
-            units=units,
-            entry_price=entry,
-            balance=balance
-        )
-
-        logger.info(
-            f"[UNITS] {pair} | "
-            f"riskUSD={risk_usd:.2f} | "
-            f"distance={distance:.6f} | "
-            f"quoteUSD={quote_to_usd:.8f} | "
-            f"risk/unit={risk_per_unit:.8f} | "
-            f"raw={raw_units:.2f} | "
-            f"final={units}"
-        )
-
-        if units < units_before_margin:
-            logger.info(
-                f"[UNITS] {pair} | "
-                f"Réduction marge: "
-                f"{units_before_margin} -> {units}"
-            )
-
-        return max(0, int(units))
-
-    except Exception as e:
-        logger.error(
-            f"[UNITS] Erreur calcul unités {pair}: {e}"
-        )
-        return 0
 
 
 def calculate_margin(pair: str, units: int, entry_price: float) -> dict:
@@ -1040,197 +646,91 @@ def calculate_units(
     balance: float,
     risk_pct: float = None
 ) -> int:
-    """
-    Calcule la taille de position à partir du risque réel en USD.
-
-    Le calcul du risque utilise la distance SL et convertit
-    correctement la devise de cotation vers USD.
-    """
+    """Calcule la taille de position à partir du risque USD réel."""
     try:
         pair = str(pair).upper().strip()
-
-        if risk_pct is None:
-            risk_pct = RISK_PERCENTAGE
-
         entry = float(entry)
         stop_loss = float(stop_loss)
         balance = float(balance)
-        risk_pct = float(risk_pct)
+        risk_pct = RISK_PERCENTAGE if risk_pct is None else float(risk_pct)
 
-        # ---------------------------------------------------------
-        # VALIDATION
-        # ---------------------------------------------------------
-
-        if balance <= 0:
-            logger.error(
-                f"[UNITS] {pair} | "
-                f"Balance invalide: {balance}"
-            )
+        if balance <= 0 or entry <= 0 or stop_loss <= 0:
             return 0
 
-        if entry <= 0 or stop_loss <= 0:
-            logger.error(
-                f"[UNITS] {pair} | "
-                f"Prix invalides | "
-                f"entry={entry} | SL={stop_loss}"
-            )
-            return 0
-
-        # ---------------------------------------------------------
-        # RISQUE MAXIMUM EN USD
-        # ---------------------------------------------------------
-
-        risk_usd = (
-            balance * (risk_pct / 100.0)
-        )
-
+        risk_usd = balance * (risk_pct / 100.0)
         if MAX_RISK_USD is not None:
-            risk_usd = min(
-                risk_usd,
-                float(MAX_RISK_USD)
-            )
-
+            risk_usd = min(risk_usd, float(MAX_RISK_USD))
         if risk_usd <= 0:
-            logger.error(
-                f"[UNITS] {pair} | "
-                f"Risque USD invalide: {risk_usd}"
-            )
             return 0
 
-        # ---------------------------------------------------------
-        # DISTANCE SL
-        # ---------------------------------------------------------
-
-        distance = abs(
-            entry - stop_loss
-        )
-
+        distance = abs(entry - stop_loss)
         if distance <= 0:
-            logger.warning(
-                f"[UNITS] {pair} | "
-                f"Distance SL nulle"
-            )
             return 0
-
-        # ---------------------------------------------------------
-        # DEVISE DE COTATION
-        # ---------------------------------------------------------
 
         parts = pair.split("_")
-
         if len(parts) != 2:
-            logger.error(
-                f"[UNITS] Paire invalide: {pair}"
-            )
             return 0
-
         quote = parts[1]
 
-        quote_to_usd = float(
-            get_fx_rate_to_usd(quote)
-        )
-
+        quote_to_usd = float(get_fx_rate_to_usd(quote))
         if quote_to_usd <= 0:
-            logger.error(
-                f"[UNITS] {pair} | "
-                f"Conversion {quote}->USD invalide: "
-                f"{quote_to_usd}"
-            )
+            logger.error(f"[UNITS] {pair} | Conversion {quote}->USD invalide: {quote_to_usd}")
             return 0
 
-        # ---------------------------------------------------------
-        # RISQUE PAR UNITÉ
-        # ---------------------------------------------------------
-
-        risk_per_unit = (
-            distance * quote_to_usd
-        )
-
+        risk_per_unit = distance * quote_to_usd
         if risk_per_unit <= 0:
-            logger.error(
-                f"[UNITS] {pair} | "
-                f"Risk/unit invalide: "
-                f"{risk_per_unit}"
-            )
             return 0
 
-        # ---------------------------------------------------------
-        # TAILLE BRUTE
-        # ---------------------------------------------------------
-
-        raw_units = (
-            risk_usd / risk_per_unit
-        )
-
-        if raw_units <= 0:
-            return 0
-
-        # ---------------------------------------------------------
-        # ARRONDI SELON LE STEP OANDA
-        # ---------------------------------------------------------
-
-        step = int(
-            UNIT_STEP_BY_PAIR.get(
-                pair,
-                UNIT_STEP_BY_PAIR["DEFAULT"]
-            )
-        )
-
+        raw_units = risk_usd / risk_per_unit
+        step = int(UNIT_STEP_BY_PAIR.get(pair, UNIT_STEP_BY_PAIR["DEFAULT"]))
         if step <= 0:
             step = 1
 
-        units = (
-            int(raw_units // step) * step
-        )
+        units = int(raw_units // step) * step
 
-        logger.info(
-            f"[UNITS] {pair} | "
-            f"risk_usd={risk_usd:.2f} | "
-            f"distance={distance:.6f} | "
-            f"quote_to_usd={quote_to_usd:.10f} | "
-            f"risk/unit={risk_per_unit:.10f} | "
-            f"raw_units={raw_units:.2f} | "
-            f"step={step} | "
-            f"units_avant_marge={units}"
-        )
+        # Ces bornes étaient déclarées mais jamais appliquées.
+        min_units = int(MIN_UNITS_BY_PAIR.get(pair, MIN_UNITS_BY_PAIR["DEFAULT"]))
+        max_units = int(MAX_UNITS_BY_PAIR.get(pair, MAX_UNITS_BY_PAIR["DEFAULT"]))
 
-        if units <= 0:
-            logger.warning(
-                f"[UNITS] {pair} | "
-                f"Taille nulle après arrondi "
-                f"(raw={raw_units:.2f}, step={step})"
+        if max_units > 0 and units > max_units:
+            units = (max_units // step) * step
+
+        if units <= 0 or (min_units > 0 and units < min_units):
+            logger.info(
+                f"[UNITS] {pair} | taille insuffisante | raw={raw_units:.2f} | "
+                f"min={min_units} | max={max_units}"
             )
             return 0
 
-        # ---------------------------------------------------------
-        # PLAFOND DE MARGE
-        # ---------------------------------------------------------
+        logger.info(
+            f"[UNITS] {pair} | risk_usd={risk_usd:.2f} | distance={distance:.6f} | "
+            f"quote_to_usd={quote_to_usd:.10f} | risk/unit={risk_per_unit:.10f} | "
+            f"raw_units={raw_units:.2f} | step={step} | units_avant_marge={units}"
+        )
 
         units_before_margin = units
-
         units = cap_units_by_margin(
             pair=pair,
             units=units,
             entry_price=entry,
-            balance=balance
+            balance=balance,
         )
+
+        if 0 < units < min_units:
+            logger.info(
+                f"[UNITS] {pair} | marge trop restrictive | final={units} < min={min_units}"
+            )
+            return 0
 
         logger.info(
-            f"[UNITS] {pair} | "
-            f"avant_marge={units_before_margin} | "
-            f"apres_marge={units}"
+            f"[UNITS] {pair} | avant_marge={units_before_margin} | apres_marge={units}"
         )
-
-        return max(
-            0,
-            int(units)
-        )
+        return max(0, int(units))
 
     except Exception as e:
-        logger.error(
-            f"[UNITS] Erreur calcul {pair}: {e}"
-        )
+        logger.error(f"[UNITS] Erreur calcul {pair}: {e}")
         return 0
+
 def round_price(pair: str, price: float) -> str:
     decimals = PRICE_DECIMALS_V88.get(pair, 5)
     return f"{float(price):.{decimals}f}"
@@ -1653,173 +1153,99 @@ def detect_setups(
     df_h1: pd.DataFrame,
     bias: str
 ) -> List[Dict]:
-    """
-    Génère uniquement des setups récents et proches du prix.
-
-    Architecture :
-        Biais
-          ↓
-        FVG récent / Wick récent
-          ↓
-        prix proche de la zone
-          ↓
-        confirmation locale
-          ↓
-        evaluate_setup() valide ensuite le SL/TP et le RR
-    """
-
+    """Génère les setups récents : BOS_RETEST, FVG_RETEST, WICK_REJECTION."""
     setups = []
 
-    if df_m15 is None or df_m15.empty:
-        return setups
-
-    if bias not in ("BUY", "SELL"):
+    if df_m15 is None or df_m15.empty or bias not in ("BUY", "SELL"):
         return setups
 
     try:
         current_price = float(df_m15["close"].iloc[-1])
         atr = calculate_atr(df_m15)
-
         if atr is None or atr <= 0:
             return setups
+        atr = float(atr)
 
-        # =========================================================
+        # BOS_RETEST était codé mais jamais appelé par detect_setups().
+        bos = detect_bos_retest(df_m15, bias)
+        if bos and bos.get("direction") == bias:
+            level = float(bos["entry_level"])
+            distance_atr = abs(current_price - level) / atr
+            if distance_atr <= 1.50:
+                setups.append({**bos, "distance_atr": distance_atr})
+
         # FVG
-        # =========================================================
-        fvgs = detect_fvg(df_m15, max_lookback_bars=24)
-
-        for f in fvgs:
-
+        for f in detect_fvg(df_m15, max_lookback_bars=24):
             if f.get("direction") != bias:
                 continue
+            level = float(f["midpoint"])
+            distance_atr = abs(current_price - level) / atr
+            if distance_atr <= 1.50:
+                setups.append({
+                    "type": "FVG_RETEST",
+                    "direction": bias,
+                    "entry_level": level,
+                    "fvg": f,
+                    "distance_atr": distance_atr,
+                    "rejection_strength": 0.0,
+                    "time": f.get("time"),
+                })
 
-            entry_level = float(f["midpoint"])
-
-            distance_atr = abs(current_price - entry_level) / atr
-
-            # Sécurité supplémentaire.
-            # On ne transmet même pas les setups trop éloignés
-            # à evaluate_setup().
-            if distance_atr > 1.50:
-                continue
-
-            setups.append({
-                "type": "FVG_RETEST",
-                "direction": bias,
-                "entry_level": entry_level,
-                "fvg": f,
-                "distance_atr": distance_atr,
-                "rejection_strength": 0.0,
-                "time": f.get("time"),
-            })
-
-        # =========================================================
-        # WICK REJECTION
-        # =========================================================
-        wicks = detect_wick_rejection(df_m15, bias)
-
-        for w in wicks:
-
+        # WICK
+        for w in detect_wick_rejection(df_m15, bias):
             if w.get("direction") != bias:
                 continue
+            level = float(w["price_level"])
+            distance_atr = abs(current_price - level) / atr
+            if distance_atr <= 1.50:
+                setups.append({
+                    "type": "WICK_REJECTION",
+                    "direction": bias,
+                    "entry_level": level,
+                    "distance_atr": distance_atr,
+                    "rejection_strength": float(w.get("rejection_strength", 0.0)),
+                    "time": w.get("time"),
+                })
 
-            entry_level = float(w["price_level"])
-
-            distance_atr = abs(current_price - entry_level) / atr
-
-            if distance_atr > 1.50:
-                continue
-
-            setups.append({
-                "type": "WICK_REJECTION",
-                "direction": bias,
-                "entry_level": entry_level,
-                "distance_atr": distance_atr,
-                "rejection_strength": float(
-                    w.get("rejection_strength", 0.0)
-                ),
-                "time": w.get("time"),
-            })
-
-        # =========================================================
-        # DÉDUPLICATION
-        # =========================================================
-        deduped = []
-
-        # Deux niveaux à moins de 0.20 ATR sont considérés comme
-        # pratiquement identiques.
+        # Dédoublonnage : BOS > FVG > WICK au même niveau.
+        priority = {"BOS_RETEST": 1, "FVG_RETEST": 2, "WICK_REJECTION": 3}
         merge_distance = atr * 0.20
+        setups.sort(key=lambda x: (
+            float(x.get("distance_atr", 999999)),
+            priority.get(x.get("type"), 99),
+        ))
 
-        # Plus proche du prix en premier
-        setups.sort(
-            key=lambda x: (
-                float(x.get("distance_atr", 999999)),
-                0 if x["type"] == "FVG_RETEST" else 1
-            )
-        )
-
+        deduped = []
         for setup in setups:
-
             duplicate = False
-
             for existing in deduped:
-
-                if setup["direction"] != existing["direction"]:
+                if setup.get("direction") != existing.get("direction"):
                     continue
-
-                if abs(
-                    float(setup["entry_level"]) -
-                    float(existing["entry_level"])
-                ) <= merge_distance:
-
-                    # Si deux setups sont quasiment au même niveau,
-                    # garder le FVG, généralement plus structuré.
-                    if (
-                        setup["type"] == "FVG_RETEST"
-                        and existing["type"] == "WICK_REJECTION"
-                    ):
+                if abs(float(setup["entry_level"]) - float(existing["entry_level"])) <= merge_distance:
+                    if priority.get(setup.get("type"), 99) < priority.get(existing.get("type"), 99):
+                        existing.clear()
                         existing.update(setup)
-
                     duplicate = True
                     break
-
             if not duplicate:
                 deduped.append(setup)
 
-        # =========================================================
-        # PRIORITÉ
-        # =========================================================
-        priority = {
-            "FVG_RETEST": 1,
-            "WICK_REJECTION": 2,
-        }
-
-        deduped.sort(
-            key=lambda x: (
-                priority.get(x["type"], 99),
-                float(x.get("distance_atr", 999999))
-            )
-        )
-
-        # Maximum 8 setups réellement proches
+        deduped.sort(key=lambda x: (
+            priority.get(x.get("type"), 99),
+            float(x.get("distance_atr", 999999)),
+        ))
         setups = deduped[:8]
 
         logger.info(
-            f"[SETUPS_FILTER] {pair} | BIAS={bias} | "
-            f"retenus={len(setups)} | "
+            f"[SETUPS_FILTER] {pair} | BIAS={bias} | retenus={len(setups)} | "
             f"prix={current_price:.5f} | ATR={atr:.5f}"
         )
-
         return setups
 
     except Exception as e:
-        logger.warning(
-            f"[SETUPS] {pair} erreur génération setups : {e}"
-        )
+        logger.warning(f"[SETUPS] {pair} erreur génération setups : {e}")
         return []
-# ============================================================
-# STRATÉGIE SIMPLIFIÉE
-# ============================================================
+
 def get_directional_bias(
     df_h4: pd.DataFrame,
     df_h1: pd.DataFrame
@@ -2961,58 +2387,29 @@ def calculate_sl_tp_structural(
     entry: float,
     pair: str
 ) -> Tuple[float, float, float]:
-    """
-    Calcule un SL structurel et un TP à 2R.
-
-    Règles :
-    - BUY  : SL sous le dernier swing low M15.
-    - SELL : SL au-dessus du dernier swing high M15.
-    - Buffer de sécurité de 5 pips.
-    - Fallback ATR 1.5x si aucun swing exploitable.
-    - SL structurel maximum = 2 ATR.
-    - Si le SL structurel dépasse 2 ATR : setup rejeté.
-    - Distance SL minimum = 10 pips.
-    - TP = exactement 2R après arrondi.
-    - Garantie finale RR >= 2.0.
-    """
-
+    """Calcule un SL structurel exploitable et un TP à 2R."""
     pair = pair.upper()
     direction = direction.upper()
     entry = float(entry)
 
     if direction not in ("BUY", "SELL"):
-        raise ValueError(
-            f"Direction inconnue: {direction}"
-        )
-
+        raise ValueError(f"Direction inconnue: {direction}")
     if df_m15 is None or len(df_m15) < 20:
-        raise ValueError(
-            f"Données M15 insuffisantes pour {pair}"
-        )
+        raise ValueError(f"Données M15 insuffisantes pour {pair}")
 
-    highs, lows = detect_swing_points(
-        df_m15,
-        5
-    )
-
-    pip = float(
-        get_pip_value(pair)
-    )
-
+    highs, lows = detect_swing_points(df_m15, 5)
+    pip = float(get_pip_value(pair))
     atr = calculate_atr(df_m15)
-
     if atr is None or atr <= 0:
         atr = pip * 10
-
     atr = float(atr)
 
-    if pip <= 0:
-        raise ValueError(
-            f"Valeur pip invalide pour {pair}"
-        )
+    if pip <= 0 or atr <= 0:
+        raise ValueError(f"Paramètres SL invalides pour {pair}")
 
-    SL_BUFFER_PIPS = 5
-    MIN_SL_PIPS = 10
+    SL_BUFFER_PIPS = 5.0
+    MIN_SL_PIPS = 10.0
+    STRUCTURAL_SWING_LOOKBACK_BARS = 64
     MAX_SL_ATR = 2.0
     FALLBACK_SL_ATR = 1.5
     TARGET_RR = 2.0
@@ -3020,285 +2417,123 @@ def calculate_sl_tp_structural(
     sl_buffer = SL_BUFFER_PIPS * pip
     min_sl_distance = MIN_SL_PIPS * pip
     max_sl_distance = atr * MAX_SL_ATR
+    recent_cutoff = max(0, len(df_m15) - STRUCTURAL_SWING_LOOKBACK_BARS)
 
-    # =========================================================
-    # SL STRUCTUREL
-    # =========================================================
+    sl = None
+    sl_source = None
 
+    # Le problème de la v139 : valid_lows[-1]/valid_highs[-1]
+    # choisissait le dernier swing dans le temps, même s'il était
+    # trop éloigné. On cherche maintenant le swing STRUCTUREL
+    # le plus proche de l'entrée qui respecte déjà la limite 2 ATR.
     if direction == "BUY":
+        candidates = []
+        for low in lows:
+            if int(low.get("index", -1)) < recent_cutoff:
+                continue
+            level = float(low["price"])
+            if level >= entry:
+                continue
+            candidate_sl = level - sl_buffer
+            candidate_risk = entry - candidate_sl
+            if 0 < candidate_risk <= max_sl_distance:
+                candidates.append((candidate_risk, level, candidate_sl))
 
-        valid_lows = [
-            low for low in lows
-            if float(low["price"]) < entry
-        ]
-
-        if valid_lows:
-
-            last_swing_low = float(
-                valid_lows[-1]["price"]
-            )
-
-            sl = (
-                last_swing_low
-                - sl_buffer
-            )
-
-            sl_source = (
-                f"SWING_LOW "
-                f"{last_swing_low:.5f}"
-            )
-
+        if candidates:
+            candidates.sort(key=lambda x: (x[0], -x[1]))
+            _, level, sl = candidates[0]
+            sl_source = f"SWING_LOW_NEAREST {level:.5f}"
         else:
-
-            sl = (
-                entry
-                - atr * FALLBACK_SL_ATR
-            )
-
-            sl_source = "ATR_FALLBACK"
-
+            sl = entry - atr * FALLBACK_SL_ATR
+            sl_source = "ATR_FALLBACK_NO_VALID_SWING"
     else:
+        candidates = []
+        for high in highs:
+            if int(high.get("index", -1)) < recent_cutoff:
+                continue
+            level = float(high["price"])
+            if level <= entry:
+                continue
+            candidate_sl = level + sl_buffer
+            candidate_risk = candidate_sl - entry
+            if 0 < candidate_risk <= max_sl_distance:
+                candidates.append((candidate_risk, level, candidate_sl))
 
-        valid_highs = [
-            high for high in highs
-            if float(high["price"]) > entry
-        ]
-
-        if valid_highs:
-
-            last_swing_high = float(
-                valid_highs[-1]["price"]
-            )
-
-            sl = (
-                last_swing_high
-                + sl_buffer
-            )
-
-            sl_source = (
-                f"SWING_HIGH "
-                f"{last_swing_high:.5f}"
-            )
-
+        if candidates:
+            candidates.sort(key=lambda x: (x[0], x[1]))
+            _, level, sl = candidates[0]
+            sl_source = f"SWING_HIGH_NEAREST {level:.5f}"
         else:
+            sl = entry + atr * FALLBACK_SL_ATR
+            sl_source = "ATR_FALLBACK_NO_VALID_SWING"
 
-            sl = (
-                entry
-                + atr * FALLBACK_SL_ATR
-            )
-
-            sl_source = "ATR_FALLBACK"
-
-    # =========================================================
-    # SL DU BON CÔTÉ
-    # =========================================================
-
+    # Sécurité directionnelle.
     if direction == "BUY" and sl >= entry:
-
-        sl = (
-            entry
-            - max(
-                min_sl_distance,
-                atr * FALLBACK_SL_ATR
-            )
-        )
-
+        sl = entry - max(min_sl_distance, atr * FALLBACK_SL_ATR)
         sl_source = "ATR_FALLBACK_INVALID_STRUCTURE"
-
     elif direction == "SELL" and sl <= entry:
-
-        sl = (
-            entry
-            + max(
-                min_sl_distance,
-                atr * FALLBACK_SL_ATR
-            )
-        )
-
+        sl = entry + max(min_sl_distance, atr * FALLBACK_SL_ATR)
         sl_source = "ATR_FALLBACK_INVALID_STRUCTURE"
 
-    # =========================================================
-    # SL MAXIMUM
-    # =========================================================
-
-    risk_before_rounding = abs(
-        entry - sl
-    )
-
+    risk_before_rounding = abs(entry - sl)
     if risk_before_rounding <= 0:
-        raise ValueError(
-            f"Risque nul {pair}"
-        )
+        raise ValueError(f"Risque nul {pair}")
 
     if risk_before_rounding > max_sl_distance:
-
-        logger.debug(
-            f"[SL] {pair} | "
-            f"{direction} | "
-            f"SL structurel trop large | "
-            f"risk={risk_before_rounding:.5f} | "
-            f"max={max_sl_distance:.5f} | "
-            f"→ SETUP REJECTED"
-        )
-
         raise ValueError(
             f"SL structurel > {MAX_SL_ATR:.1f} ATR "
-            f"(risk={risk_before_rounding:.5f}, "
-            f"max={max_sl_distance:.5f})"
+            f"(risk={risk_before_rounding:.5f}, max={max_sl_distance:.5f})"
         )
-
-    # =========================================================
-    # SL MINIMUM
-    # =========================================================
 
     if risk_before_rounding < min_sl_distance:
+        sl = entry - min_sl_distance if direction == "BUY" else entry + min_sl_distance
 
-        if direction == "BUY":
-            sl = entry - min_sl_distance
-        else:
-            sl = entry + min_sl_distance
-
-    # =========================================================
-    # ARRONDI SL
-    # =========================================================
-
-    sl = float(
-        round_price(
-            pair,
-            sl
-        )
-    )
-
-    # =========================================================
-    # VÉRIFICATION FINALE SL
-    # =========================================================
+    sl = float(round_price(pair, sl))
 
     if direction == "BUY" and sl >= entry:
-        sl = float(
-            round_price(
-                pair,
-                entry - min_sl_distance
-            )
-        )
-
+        sl = float(round_price(pair, entry - min_sl_distance))
     elif direction == "SELL" and sl <= entry:
-        sl = float(
-            round_price(
-                pair,
-                entry + min_sl_distance
-            )
-        )
+        sl = float(round_price(pair, entry + min_sl_distance))
 
-    risk = abs(
-        entry - sl
-    )
-
+    risk = abs(entry - sl)
     if risk <= 0:
-        raise ValueError(
-            f"Risk nul après arrondi {pair}"
-        )
-
+        raise ValueError(f"Risk nul après arrondi {pair}")
     if risk > max_sl_distance:
         raise ValueError(
-            f"SL après arrondi > "
-            f"{MAX_SL_ATR:.1f} ATR "
-            f"(risk={risk:.5f}, "
-            f"max={max_sl_distance:.5f})"
+            f"SL après arrondi > {MAX_SL_ATR:.1f} ATR "
+            f"(risk={risk:.5f}, max={max_sl_distance:.5f})"
         )
 
-    # =========================================================
-    # TP = 2R
-    # =========================================================
+    # TP strictement à 2R.
+    tp = entry + risk * TARGET_RR if direction == "BUY" else entry - risk * TARGET_RR
+    tp = float(round_price(pair, tp))
 
-    if direction == "BUY":
-        tp = entry + risk * TARGET_RR
-    else:
-        tp = entry - risk * TARGET_RR
+    final_risk = abs(entry - sl)
+    final_reward = abs(tp - entry)
+    rr = final_reward / final_risk if final_risk > 0 else 0.0
 
-    tp = float(
-        round_price(
+    if rr < TARGET_RR:
+        tp = float(round_price(
             pair,
-            tp
-        )
-    )
-
-    # =========================================================
-    # RR FINAL
-    # =========================================================
-
-    final_risk = abs(
-        entry - sl
-    )
-
-    final_reward = abs(
-        tp - entry
-    )
-
-    if final_risk <= 0:
-        raise ValueError(
-            f"Risque final nul {pair}"
-        )
-
-    rr = (
-        final_reward
-        / final_risk
-    )
-
-    # =========================================================
-    # GARANTIE RR >= 2
-    # =========================================================
+            entry + final_risk * 2.01
+            if direction == "BUY"
+            else entry - final_risk * 2.01
+        ))
+        final_reward = abs(tp - entry)
+        rr = final_reward / final_risk if final_risk > 0 else 0.0
 
     if rr < TARGET_RR:
-
-        if direction == "BUY":
-            tp = float(
-                round_price(
-                    pair,
-                    entry + final_risk * 2.01
-                )
-            )
-        else:
-            tp = float(
-                round_price(
-                    pair,
-                    entry - final_risk * 2.01
-                )
-            )
-
-        final_reward = abs(
-            tp - entry
-        )
-
-        rr = (
-            final_reward
-            / final_risk
-        )
-
-    if rr < TARGET_RR:
-        raise ValueError(
-            f"RR final insuffisant après arrondi "
-            f"(RR={rr:.3f})"
-        )
+        raise ValueError(f"RR final insuffisant après arrondi (RR={rr:.3f})")
 
     logger.debug(
-        f"[SLTP] {pair} | "
-        f"{direction} | "
-        f"ENTRY={entry:.5f} | "
-        f"SL={sl:.5f} | "
-        f"TP={tp:.5f} | "
-        f"RISK={final_risk:.5f} | "
-        f"ATR={atr:.5f} | "
-        f"SL_ATR={final_risk / atr:.2f} | "
-        f"RR={rr:.3f} | "
-        f"SOURCE={sl_source}"
+        f"[SLTP] {pair} | {direction} | ENTRY={entry:.5f} | "
+        f"SL={sl:.5f} | TP={tp:.5f} | RISK={final_risk:.5f} | "
+        f"ATR={atr:.5f} | SL_ATR={final_risk / atr:.2f} | "
+        f"RR={rr:.3f} | SOURCE={sl_source}"
     )
 
-    return (
-        sl,
-        tp,
-        final_risk
-    )
-    
+    return sl, tp, final_risk
+
 def has_enough_room_to_tp(
     df_h1: pd.DataFrame,
     direction: str,
@@ -4731,19 +3966,19 @@ def send_telegram(pair, direction, entry, sl, tp, rr, setup_type):
 # BOUCLE PRINCIPALE
 # ============================================================
 if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot 2R Strict - Version Optimisée")
+    logger.info("🚀 Démarrage du Bot 2R Strict - Version Optimisée v140")
     logger.info("✅ SL structurel | TP = 2R (immuable) | RR ≥ 2.0 avant ordre")
     logger.info("✅ Structure H1 assouplie (2/3) + tolérance retracement H4 fort")
     logger.info("✅ Distance max 2.0 ATR | Confirmation rejet OU micro-break")
-    logger.info("✅ SL limité à 2×ATR | has_enough_room_to_tp() assoupli")
+    logger.info("✅ SL structurel exploitable ≤ 2×ATR | fallback ATR 1.5× | TP 2R")
     logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
     if DEBUG_MODE:
         logger.info("🔍 MODE DEBUG ACTIVÉ")
 
-    last_signal_scan = time.time()
     SIGNAL_SCAN_INTERVAL = 900  # 15 min
+    last_signal_scan = time.time() - SIGNAL_SCAN_INTERVAL
     FAST_LOOP_INTERVAL = 30
 
     while True:
