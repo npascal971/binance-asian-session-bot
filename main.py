@@ -263,185 +263,124 @@ def get_available_margin():
 
 def get_fx_rate_to_usd(currency: str) -> float:
     """
-    Retourne le taux de conversion d'une devise vers USD.
+    Retourne le taux de conversion de 1 unité de `currency` vers USD.
 
     Exemples :
-        USD -> 1
-        EUR -> EUR_USD
-        GBP -> GBP_USD
-        AUD -> AUD_USD
-        CAD -> 1 / USD_CAD
-        JPY -> 1 / USD_JPY
-        XAU -> XAU_USD
+        JPY -> USD : 1 / USD_JPY
+        CAD -> USD : 1 / USD_CAD
+        AUD -> USD : 1 / AUD_USD
+        USD -> USD : 1.0
     """
-
-    currency = str(currency).upper().strip()
-
-    if currency == "USD":
-        return 1.0
-
-    cached = cache_get(
-        f"fx_rate:{currency}",
-        ttl=300.0
-    )
-
-    if cached is not None:
-        try:
-            return float(cached)
-        except Exception:
-            pass
-
-    # =========================================================
-    # PAIRES DIRECTES DISPONIBLES
-    # =========================================================
-
-    direct_pairs = {
-        "EUR": "EUR_USD",
-        "GBP": "GBP_USD",
-        "AUD": "AUD_USD",
-        "XAU": "XAU_USD",
-    }
-
-    # =========================================================
-    # PAIRES INVERSÉES DISPONIBLES
-    # =========================================================
-
-    inverse_pairs = {
-        "CAD": "USD_CAD",
-        "JPY": "USD_JPY",
-        "CHF": "USD_CHF",
-        "NZD": "NZD_USD",
-    }
-
     try:
-        api = v88_client()
+        currency = str(currency).upper().strip()
 
-        # -----------------------------------------------------
-        # DIRECT
-        # -----------------------------------------------------
+        if currency == "USD":
+            return 1.0
 
-        pair = direct_pairs.get(currency)
+        # Cas directs : XXX_USD
+        direct_instruments = {
+            "EUR": "EUR_USD",
+            "GBP": "GBP_USD",
+            "AUD": "AUD_USD",
+            "NZD": "NZD_USD",
+            "CAD": "USD_CAD",   # inversion nécessaire
+            "CHF": "USD_CHF",   # inversion nécessaire
+            "JPY": "USD_JPY",   # inversion nécessaire
+        }
 
-        if pair:
+        instrument = direct_instruments.get(currency)
 
-            df = get_candles(
-                api,
-                pair,
-                "M1",
-                5
+        if not instrument:
+            logger.error(
+                f"[FX] Devise non supportée pour conversion USD: {currency}"
             )
+            return 0.0
 
-            if df is not None and not df.empty:
-
-                price = float(
-                    df["close"].iloc[-1]
-                )
-
-                if price > 0:
-                    cache_set(
-                        f"fx_rate:{currency}",
-                        price
-                    )
-
-                    return price
-
-        # -----------------------------------------------------
-        # INVERSE
-        # -----------------------------------------------------
-
-        pair = inverse_pairs.get(currency)
-
-        if pair:
-
-            df = get_candles(
-                api,
-                pair,
-                "M1",
-                5
-            )
-
-            if df is not None and not df.empty:
-
-                price = float(
-                    df["close"].iloc[-1]
-                )
-
-                if price > 0:
-
-                    rate = 1.0 / price
-
-                    cache_set(
-                        f"fx_rate:{currency}",
-                        rate
-                    )
-
-                    return rate
-
-    except Exception as e:
-
-        logger.warning(
-            f"[FX_RATE] "
-            f"Impossible de récupérer "
-            f"{currency}: {e}"
+        # Récupération du prix courant OANDA
+        pricing = api.pricing.get(
+            accountID=OANDA_ACCOUNT_ID,
+            instruments=instrument
         )
 
-    # =========================================================
-    # FALLBACK
-    # =========================================================
+        prices = pricing.get("prices", [])
+        if not prices:
+            logger.error(
+                f"[FX] Aucun prix OANDA pour {instrument}"
+            )
+            return 0.0
 
-    fallback_rates = {
-        "JPY": 0.00625,
-        "EUR": 1.10,
-        "GBP": 1.30,
-        "CAD": 0.74,
-        "AUD": 0.67,
-        "CHF": 1.08,
-        "NZD": 0.58,
-        "XAU": 4400.0,
-    }
+        price = prices[0]
 
-    rate = float(
-        fallback_rates.get(currency, 1.0)
-    )
+        bid = float(price.get("bids", [{}])[0].get("price", 0))
+        ask = float(price.get("asks", [{}])[0].get("price", 0))
 
-    cache_set(
-        f"fx_rate:{currency}",
-        rate
-    )
+        if bid > 0 and ask > 0:
+            market_price = (bid + ask) / 2.0
+        elif bid > 0:
+            market_price = bid
+        elif ask > 0:
+            market_price = ask
+        else:
+            logger.error(
+                f"[FX] Prix invalide pour {instrument}: "
+                f"bid={bid}, ask={ask}"
+            )
+            return 0.0
 
-    return rate
+        # Instruments déjà exprimés en XXX/USD
+        if currency in {"EUR", "GBP", "AUD", "NZD"}:
+            rate = market_price
+
+        # Instruments exprimés en USD/XXX -> inversion
+        else:
+            rate = 1.0 / market_price if market_price > 0 else 0.0
+
+        logger.debug(
+            f"[FX] {currency}->USD | "
+            f"instrument={instrument} | "
+            f"price={market_price:.8f} | "
+            f"rate={rate:.10f}"
+        )
+
+        return float(rate)
+
+    except Exception as e:
+        logger.error(
+            f"[FX] Erreur conversion {currency}->USD: {e}"
+        )
+        return 0.0
+
+
 def calculate_margin(pair: str, units: int, entry_price: float) -> dict:
     """
-    Calcule correctement la marge requise en devise du compte (USD).
+    Calcule la marge requise en USD.
 
-    OANDA exprime les units dans la devise de base :
-        AUD_JPY -> units = AUD
-        USD_JPY -> units = USD
-        EUR_USD -> units = EUR
-
-    Le notionnel USD dépend donc de la paire :
-        - quote USD  -> units * prix
-        - base USD   -> units
-        - aucune des deux en USD -> conversion du notionnel quote en USD
+    OANDA exprime les units dans la devise de base.
+    Le notionnel doit donc être correctement converti en USD.
     """
-
     try:
-        pair = pair.upper().strip()
+        pair = str(pair).upper().strip()
+        units = int(units)
+        entry_price = float(entry_price)
+
+        margin_available = float(get_available_margin())
 
         if units <= 0 or entry_price <= 0:
             return {
                 "margin_required": 0.0,
-                "margin_available": get_available_margin(),
+                "margin_available": margin_available,
                 "sufficient": False
             }
 
         parts = pair.split("_")
 
         if len(parts) != 2:
-            logger.error(f"[MARGIN] Paire invalide: {pair}")
+            logger.error(
+                f"[MARGIN] Paire invalide: {pair}"
+            )
             return {
                 "margin_required": 0.0,
-                "margin_available": get_available_margin(),
+                "margin_available": margin_available,
                 "sufficient": False
             }
 
@@ -457,45 +396,53 @@ def calculate_margin(pair: str, units: int, entry_price: float) -> dict:
         # NOTIONNEL EN USD
         # ---------------------------------------------------------
 
+        # USD/XXX
+        # Ex: USD_JPY -> 10000 units = 10000 USD
         if base == "USD":
-            # Exemple USD_JPY :
-            # 10 000 units = 10 000 USD de notionnel
             notional_usd = float(units)
 
+        # XXX/USD
+        # Ex: GBP_USD -> units * prix
         elif quote == "USD":
-            # Exemple EUR_USD :
-            # 10 000 EUR * 1.16 USD = 11 600 USD
-            notional_usd = float(units) * float(entry_price)
+            notional_usd = float(units) * entry_price
 
+        # XXX/YYY
+        # Ex: AUD_JPY
+        # units * prix = notionnel en JPY
+        # puis JPY -> USD
         else:
-            # Exemple AUD_JPY :
-            # units * prix = notionnel en JPY
-            notional_quote = float(units) * float(entry_price)
+            notional_quote = float(units) * entry_price
 
-            # Conversion JPY -> USD
-            quote_to_usd = float(get_fx_rate_to_usd(quote))
+            quote_to_usd = float(
+                get_fx_rate_to_usd(quote)
+            )
 
             if quote_to_usd <= 0:
                 logger.error(
-                    f"[MARGIN] Taux {quote}->USD invalide pour {pair}: "
-                    f"{quote_to_usd}"
+                    f"[MARGIN] Conversion {quote}->USD invalide "
+                    f"pour {pair}: {quote_to_usd}"
                 )
-
                 return {
                     "margin_required": 0.0,
-                    "margin_available": get_available_margin(),
+                    "margin_available": margin_available,
                     "sufficient": False
                 }
 
-            notional_usd = notional_quote * quote_to_usd
+            notional_usd = (
+                notional_quote * quote_to_usd
+            )
 
-        margin_required = notional_usd * margin_rate
-        margin_available = float(get_available_margin())
+        margin_required = (
+            notional_usd * margin_rate
+        )
 
-        sufficient = margin_available >= margin_required
+        sufficient = (
+            margin_available >= margin_required
+        )
 
         logger.info(
-            f"[MARGIN] {pair} | units={units} | "
+            f"[MARGIN] {pair} | "
+            f"units={units} | "
             f"notional_usd={notional_usd:.2f} | "
             f"margin_rate={margin_rate:.4f} | "
             f"margin_required={margin_required:.2f} | "
@@ -504,13 +451,15 @@ def calculate_margin(pair: str, units: int, entry_price: float) -> dict:
         )
 
         return {
-            "margin_required": margin_required,
-            "margin_available": margin_available,
-            "sufficient": sufficient
+            "margin_required": float(margin_required),
+            "margin_available": float(margin_available),
+            "sufficient": bool(sufficient)
         }
 
     except Exception as e:
-        logger.error(f"[MARGIN] Erreur {pair}: {e}")
+        logger.error(
+            f"[MARGIN] Erreur {pair}: {e}"
+        )
 
         return {
             "margin_required": 0.0,
@@ -525,19 +474,27 @@ def cap_units_by_margin(
     balance: float
 ) -> int:
     """
-    Réduit la taille si la marge dépasse la limite autorisée.
+    Réduit les unités si la marge requise dépasse la marge autorisée.
 
-    Ne crée jamais de position dépassant :
-        - la marge disponible OANDA
-        - MAX_MARGIN_USAGE_PER_TRADE_PERCENT
+    La limite retenue est la plus restrictive entre :
+      - MAX_MARGIN_USAGE_PER_TRADE_PERCENT du solde
+      - la marge réellement disponible OANDA
     """
-
     try:
+        pair = str(pair).upper().strip()
+        units = int(units)
+        entry_price = float(entry_price)
+        balance = float(balance)
+
         if units <= 0:
             return 0
 
-        balance = float(balance)
-        entry_price = float(entry_price)
+        if balance <= 0 or entry_price <= 0:
+            logger.error(
+                f"[MARGIN_CAP] {pair} | "
+                f"balance={balance} | entry={entry_price}"
+            )
+            return 0
 
         step = int(
             UNIT_STEP_BY_PAIR.get(
@@ -549,10 +506,11 @@ def cap_units_by_margin(
         if step <= 0:
             step = 1
 
+        # Marge pour la taille demandée
         margin_info = calculate_margin(
-            pair,
-            units,
-            entry_price
+            pair=pair,
+            units=units,
+            entry_price=entry_price
         )
 
         margin_required = float(
@@ -566,22 +524,20 @@ def cap_units_by_margin(
         if margin_required <= 0:
             logger.error(
                 f"[MARGIN_CAP] {pair} | "
-                f"marge calculée invalide: {margin_required}"
+                f"Marge invalide: {margin_required}"
             )
             return 0
 
-        # ---------------------------------------------------------
-        # 1. Limite interne par trade
-        # ---------------------------------------------------------
+        # Limite interne de marge par trade
         max_margin_by_balance = (
-            balance *
-            (MAX_MARGIN_USAGE_PER_TRADE_PERCENT / 100.0)
+            balance
+            * (
+                float(MAX_MARGIN_USAGE_PER_TRADE_PERCENT)
+                / 100.0
+            )
         )
 
-        # ---------------------------------------------------------
-        # 2. On prend la limite la plus restrictive :
-        #    limite interne / marge réellement disponible
-        # ---------------------------------------------------------
+        # On prend la limite la plus restrictive
         allowed_margin = min(
             max_margin_by_balance,
             margin_available
@@ -590,20 +546,32 @@ def cap_units_by_margin(
         if allowed_margin <= 0:
             logger.warning(
                 f"[MARGIN_CAP] {pair} | "
-                f"aucune marge disponible"
+                f"Aucune marge autorisée"
             )
             return 0
 
-        # Tout rentre déjà
+        # La taille demandée passe
         if margin_required <= allowed_margin:
-            return int(units)
+            logger.info(
+                f"[MARGIN_CAP] {pair} | "
+                f"units={units} | "
+                f"margin={margin_required:.2f} | "
+                f"allowed={allowed_margin:.2f} | "
+                f"OK"
+            )
+            return units
 
         # ---------------------------------------------------------
-        # Taille maximale proportionnelle
+        # CALCUL DE LA NOUVELLE TAILLE
         # ---------------------------------------------------------
-        ratio = allowed_margin / margin_required
 
-        capped_raw = units * ratio
+        ratio = (
+            allowed_margin / margin_required
+        )
+
+        capped_raw = (
+            float(units) * ratio
+        )
 
         capped_units = (
             int(capped_raw // step) * step
@@ -611,11 +579,11 @@ def cap_units_by_margin(
 
         logger.info(
             f"[MARGIN_CAP] {pair} | "
-            f"units={units} | "
+            f"units_initial={units} | "
             f"margin_required={margin_required:.2f} | "
             f"allowed_margin={allowed_margin:.2f} | "
             f"ratio={ratio:.4f} | "
-            f"capped={capped_units}"
+            f"units_cap={capped_units}"
         )
 
         return max(0, int(capped_units))
@@ -634,22 +602,13 @@ def calculate_units(
     risk_pct: float = None
 ) -> int:
     """
-    Calcule la taille de position à partir du risque USD réel,
-    puis applique la contrainte de marge.
+    Calcule la taille de position à partir du risque réel en USD.
 
-    Le risque est calculé dans la devise du quote :
-        perte_unitaire = distance_prix * conversion_quote_USD
-
-    Puis :
-        units = risque_USD / perte_unitaire
-
-    Enfin :
-        - arrondi au pas OANDA configuré
-        - plafonnement par marge
+    Le calcul du risque utilise la distance SL et convertit
+    correctement la devise de cotation vers USD.
     """
-
     try:
-        pair = pair.upper().strip()
+        pair = str(pair).upper().strip()
 
         if risk_pct is None:
             risk_pct = RISK_PERCENTAGE
@@ -659,108 +618,155 @@ def calculate_units(
         balance = float(balance)
         risk_pct = float(risk_pct)
 
+        # ---------------------------------------------------------
+        # VALIDATION
+        # ---------------------------------------------------------
+
         if balance <= 0:
-            logger.error(f"[UNITS] {pair} | Balance invalide: {balance}")
+            logger.error(
+                f"[UNITS] {pair} | "
+                f"Balance invalide: {balance}"
+            )
             return 0
 
         if entry <= 0 or stop_loss <= 0:
             logger.error(
-                f"[UNITS] {pair} | Prix invalides "
-                f"entry={entry} SL={stop_loss}"
+                f"[UNITS] {pair} | "
+                f"Prix invalides | "
+                f"entry={entry} | SL={stop_loss}"
             )
             return 0
 
         # ---------------------------------------------------------
-        # RISQUE USD AUTORISÉ
+        # RISQUE MAXIMUM EN USD
         # ---------------------------------------------------------
-        risk_usd = balance * (risk_pct / 100.0)
+
+        risk_usd = (
+            balance * (risk_pct / 100.0)
+        )
 
         if MAX_RISK_USD is not None:
-            risk_usd = min(risk_usd, float(MAX_RISK_USD))
+            risk_usd = min(
+                risk_usd,
+                float(MAX_RISK_USD)
+            )
 
         if risk_usd <= 0:
             logger.error(
-                f"[UNITS] {pair} | Risque USD invalide: {risk_usd}"
+                f"[UNITS] {pair} | "
+                f"Risque USD invalide: {risk_usd}"
             )
             return 0
 
         # ---------------------------------------------------------
-        # DISTANCE ENTRY -> SL
+        # DISTANCE SL
         # ---------------------------------------------------------
-        distance = abs(entry - stop_loss)
+
+        distance = abs(
+            entry - stop_loss
+        )
 
         if distance <= 0:
             logger.warning(
-                f"[UNITS] {pair} | Distance SL nulle"
+                f"[UNITS] {pair} | "
+                f"Distance SL nulle"
             )
             return 0
 
         # ---------------------------------------------------------
-        # DEVISE QUOTE -> USD
+        # DEVISE DE COTATION
         # ---------------------------------------------------------
+
         parts = pair.split("_")
 
         if len(parts) != 2:
-            logger.error(f"[UNITS] Paire invalide: {pair}")
+            logger.error(
+                f"[UNITS] Paire invalide: {pair}"
+            )
             return 0
 
         quote = parts[1]
 
-        quote_to_usd = float(get_fx_rate_to_usd(quote))
+        quote_to_usd = float(
+            get_fx_rate_to_usd(quote)
+        )
 
         if quote_to_usd <= 0:
             logger.error(
-                f"[UNITS] {pair} | Conversion {quote}->USD invalide: "
+                f"[UNITS] {pair} | "
+                f"Conversion {quote}->USD invalide: "
                 f"{quote_to_usd}"
             )
             return 0
 
-        # Perte USD pour 1 unité de base
-        risk_per_unit = distance * quote_to_usd
+        # ---------------------------------------------------------
+        # RISQUE PAR UNITÉ
+        # ---------------------------------------------------------
+
+        risk_per_unit = (
+            distance * quote_to_usd
+        )
 
         if risk_per_unit <= 0:
             logger.error(
-                f"[UNITS] {pair} | Risk/unit invalide: "
+                f"[UNITS] {pair} | "
+                f"Risk/unit invalide: "
                 f"{risk_per_unit}"
             )
             return 0
 
         # ---------------------------------------------------------
-        # TAILLE THÉORIQUE
+        # TAILLE BRUTE
         # ---------------------------------------------------------
-        raw_units = risk_usd / risk_per_unit
+
+        raw_units = (
+            risk_usd / risk_per_unit
+        )
 
         if raw_units <= 0:
             return 0
 
-        step = UNIT_STEP_BY_PAIR.get(
-            pair,
-            UNIT_STEP_BY_PAIR["DEFAULT"]
-        )
+        # ---------------------------------------------------------
+        # ARRONDI SELON LE STEP OANDA
+        # ---------------------------------------------------------
 
-        step = int(step)
+        step = int(
+            UNIT_STEP_BY_PAIR.get(
+                pair,
+                UNIT_STEP_BY_PAIR["DEFAULT"]
+            )
+        )
 
         if step <= 0:
             step = 1
 
-        units = int(raw_units // step) * step
+        units = (
+            int(raw_units // step) * step
+        )
 
         logger.info(
-            f"[UNITS] {pair} | risk_usd={risk_usd:.2f} | "
+            f"[UNITS] {pair} | "
+            f"risk_usd={risk_usd:.2f} | "
             f"distance={distance:.6f} | "
-            f"quote_to_usd={quote_to_usd:.8f} | "
-            f"risk/unit={risk_per_unit:.8f} | "
-            f"raw={raw_units:.2f} | "
+            f"quote_to_usd={quote_to_usd:.10f} | "
+            f"risk/unit={risk_per_unit:.10f} | "
+            f"raw_units={raw_units:.2f} | "
             f"step={step} | "
-            f"avant_marge={units}"
+            f"units_avant_marge={units}"
         )
 
         if units <= 0:
+            logger.warning(
+                f"[UNITS] {pair} | "
+                f"Taille nulle après arrondi "
+                f"(raw={raw_units:.2f}, step={step})"
+            )
             return 0
 
         # ---------------------------------------------------------
-        # PLAFOND PAR MARGE
+        # PLAFOND DE MARGE
         # ---------------------------------------------------------
+
         units_before_margin = units
 
         units = cap_units_by_margin(
@@ -776,14 +782,16 @@ def calculate_units(
             f"apres_marge={units}"
         )
 
-        return max(0, int(units))
+        return max(
+            0,
+            int(units)
+        )
 
     except Exception as e:
         logger.error(
             f"[UNITS] Erreur calcul {pair}: {e}"
         )
         return 0
-
 def round_price(pair: str, price: float) -> str:
     decimals = PRICE_DECIMALS_V88.get(pair, 5)
     return f"{float(price):.{decimals}f}"
