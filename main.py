@@ -3049,26 +3049,27 @@ def evaluate_setup(
     """
     Valide un setup avant exécution.
 
-    Pipeline :
-
-        Setup
-        ↓
+    Architecture :
+        SETUP LEVEL
+            ↓
         Distance ≤ 2 ATR
-        ↓
+            ↓
         Confirmation
-        ↓
+            ↓
+        PRIX D'EXÉCUTION = PRIX ACTUEL
+            ↓
         SL structurel
-        ↓
-        TP 2R
-        ↓
+            ↓
+        TP = 2R
+            ↓
         Espace H1
-        ↓
+            ↓
         RR >= 2
-    """
 
-    # =========================================================
-    # TYPE
-    # =========================================================
+    IMPORTANT :
+    - entry_level = niveau du setup (FVG / WICK / BOS)
+    - execution_entry = prix actuel utilisé pour calculer le trade
+    """
 
     setup_type = entry.get("type")
 
@@ -3079,20 +3080,14 @@ def evaluate_setup(
     ):
         return {
             "passed": False,
-            "reason": (
-                f"type non autorisé: "
-                f"{setup_type}"
-            ),
+            "reason": f"type non autorisé: {setup_type}",
         }
 
     # =========================================================
-    # ENTRY
+    # SETUP LEVEL
     # =========================================================
-
     try:
-        entry_level = float(
-            entry["entry_level"]
-        )
+        setup_level = float(entry["entry_level"])
     except (
         KeyError,
         TypeError,
@@ -3106,10 +3101,7 @@ def evaluate_setup(
     # =========================================================
     # ATR
     # =========================================================
-
-    atr_price = calculate_atr(
-        df_m15
-    )
+    atr_price = calculate_atr(df_m15)
 
     if atr_price is None or atr_price <= 0:
         return {
@@ -3117,29 +3109,25 @@ def evaluate_setup(
             "reason": "ATR invalide",
         }
 
-    atr_price = float(
-        atr_price
+    atr_price = float(atr_price)
+
+    # =========================================================
+    # DISTANCE SETUP / PRIX ACTUEL
+    # =========================================================
+    setup_distance = abs(
+        float(current_price) - setup_level
     )
 
-    # =========================================================
-    # DISTANCE MAX
-    # =========================================================
-
     distance_ratio = (
-        abs(
-            float(current_price)
-            - entry_level
-        )
-        / atr_price
+        setup_distance / atr_price
     )
 
     if distance_ratio > 2.0:
-
         return {
             "passed": False,
             "reason": (
                 f"prix hors zone "
-                f"(target={entry_level:.5f}, "
+                f"(setup={setup_level:.5f}, "
                 f"price={float(current_price):.5f}, "
                 f"dist={distance_ratio:.2f}ATR, "
                 f"max=2.0ATR)"
@@ -3149,18 +3137,39 @@ def evaluate_setup(
     # =========================================================
     # CONFIRMATION
     # =========================================================
-
     if setup_type == "BOS_RETEST":
 
-        # La confirmation est déjà faite
-        # dans detect_bos_retest().
+        # detect_bos_retest() possède déjà sa confirmation.
         confirmation_msg = (
             f"BOS_RETEST "
             f"{entry.get('confirmation', 'OK')}"
         )
 
+    elif setup_type == "WICK_REJECTION":
+
+        # Le rejet est déjà matérialisé par le setup WICK.
+        rejection_strength = float(
+            entry.get("rejection_strength", 0.0)
+        )
+
+        if rejection_strength < 0.35:
+            return {
+                "passed": False,
+                "reason": (
+                    f"confirmation WICK insuffisante "
+                    f"(rejet={rejection_strength:.2f})"
+                ),
+            }
+
+        confirmation_msg = (
+            f"WICK_REJECTION "
+            f"(rejet={rejection_strength:.2f})"
+        )
+
     else:
 
+        # FVG : on exige une confirmation sur la dernière
+        # bougie disponible.
         try:
             confirmation_ok, confirmation_msg = (
                 get_confirmation_signal(
@@ -3168,6 +3177,7 @@ def evaluate_setup(
                     direction
                 )
             )
+
         except Exception as e:
             return {
                 "passed": False,
@@ -3187,7 +3197,6 @@ def evaluate_setup(
             )
 
             if total <= 0:
-
                 rejection_ratio = 0.0
 
             elif direction == "BUY":
@@ -3211,14 +3220,11 @@ def evaluate_setup(
                 ) / total
 
             if direction == "BUY":
-
                 micro_break = (
                     float(last["close"])
                     > float(prev["high"])
                 )
-
             else:
-
                 micro_break = (
                     float(last["close"])
                     < float(prev["low"])
@@ -3235,36 +3241,40 @@ def evaluate_setup(
             }
 
     # =========================================================
-    # SL / TP
+    # PRIX D'EXÉCUTION
     # =========================================================
+    execution_entry = float(current_price)
 
+    if execution_entry <= 0:
+        return {
+            "passed": False,
+            "reason": "prix d'exécution invalide",
+        }
+
+    # =========================================================
+    # SL / TP STRUCTURELS
+    # =========================================================
     try:
 
-        sl, tp, risk = (
-            calculate_sl_tp_structural(
-                df_m15,
-                direction,
-                entry_level,
-                pair
-            )
+        sl, tp, risk = calculate_sl_tp_structural(
+            df_m15,
+            direction,
+            execution_entry,
+            pair
         )
 
     except Exception as e:
 
         return {
             "passed": False,
-            "reason": (
-                f"SL/TP rejeté: {e}"
-            ),
+            "reason": f"SL/TP rejeté: {e}",
         }
 
     if sl is None or tp is None:
 
         return {
             "passed": False,
-            "reason": (
-                "SL/TP impossible à calculer"
-            ),
+            "reason": "SL/TP impossible à calculer",
         }
 
     sl = float(sl)
@@ -3272,9 +3282,8 @@ def evaluate_setup(
     risk = float(risk)
 
     # =========================================================
-    # DISTANCE MINIMUM SL
+    # SL MINIMUM ADAPTATIF
     # =========================================================
-
     pip = float(
         get_pip_value(pair)
     )
@@ -3285,39 +3294,39 @@ def evaluate_setup(
             "reason": "pip invalide",
         }
 
-    min_sl_distance = (
-        pip * 10
+    # Minimum 10 pips sauf si 2 ATR est inférieur à 10 pips.
+    effective_min_sl_distance = min(
+        pip * 10.0,
+        atr_price * 2.0
     )
 
     sl_distance = abs(
-        entry_level - sl
+        execution_entry - sl
     )
 
-    if sl_distance < min_sl_distance:
+    if sl_distance < effective_min_sl_distance:
 
         return {
             "passed": False,
             "reason": (
                 f"SL trop proche "
                 f"({sl_distance:.5f} "
-                f"< {min_sl_distance:.5f})"
+                f"< min={effective_min_sl_distance:.5f})"
             ),
         }
 
     # =========================================================
     # RR
     # =========================================================
-
     risk_distance = abs(
-        entry_level - sl
+        execution_entry - sl
     )
 
     reward_distance = abs(
-        tp - entry_level
+        tp - execution_entry
     )
 
     if risk_distance <= 0:
-
         return {
             "passed": False,
             "reason": "risque nul",
@@ -3328,17 +3337,28 @@ def evaluate_setup(
         / risk_distance
     )
 
+    if rr < 2.0:
+
+        return {
+            "passed": False,
+            "reason": (
+                f"RR={rr:.3f} < 2.0 "
+                f"(SL={sl:.5f}, "
+                f"TP={tp:.5f}, "
+                f"entry={execution_entry:.5f})"
+            ),
+        }
+
     # =========================================================
     # ESPACE H1
     # =========================================================
-
     try:
 
         enough_room = (
             has_enough_room_to_tp(
                 df_h1,
                 direction,
-                entry_level,
+                execution_entry,
                 tp
             )
         )
@@ -3364,25 +3384,8 @@ def evaluate_setup(
         }
 
     # =========================================================
-    # RR MINIMUM
-    # =========================================================
-
-    if rr < 2.0:
-
-        return {
-            "passed": False,
-            "reason": (
-                f"RR={rr:.3f} < 2.0 "
-                f"(SL={sl:.5f}, "
-                f"TP={tp:.5f}, "
-                f"entry={entry_level:.5f})"
-            ),
-        }
-
-    # =========================================================
     # METRIQUES
     # =========================================================
-
     try:
         adx = float(
             calculate_adx(df_h1)
@@ -3414,17 +3417,25 @@ def evaluate_setup(
     # =========================================================
     # SUCCÈS
     # =========================================================
-
     return {
         "passed": True,
         "type": setup_type,
         "direction": direction,
-        "entry_level": entry_level,
+
+        # Niveau du setup original
+        "setup_level": setup_level,
+
+        # Prix utilisé pour calculer le trade
+        "entry_level": execution_entry,
+        "execution_entry": execution_entry,
+
         "sl": sl,
         "tp": tp,
         "risk": risk,
         "rr": rr,
+
         "confirmation": confirmation_msg,
+
         "metrics": {
             "atr": price_to_pips(
                 atr_price,
@@ -3434,6 +3445,10 @@ def evaluate_setup(
             "momentum": momentum,
             "rsi": rsi,
             "session": session,
+
+            # Utilisé par execute_trade()
+            "setup_level": setup_level,
+            "setup_distance": setup_distance,
         },
     }
     
@@ -3560,8 +3575,19 @@ last_execution_attempt = {}
 # ============================================================
 # EXÉCUTION ORDRE (VERSION 2R STRICT)
 # ============================================================
-def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: float, take_profit: float,
-                  score: int, entry_type: str, eqs: int, setup_type: str, metrics: dict) -> str | None:
+def execute_trade(
+    pair: str,
+    direction: str,
+    entry_price: float,
+    stop_loss: float,
+    take_profit: float,
+    score: int,
+    entry_type: str,
+    eqs: int,
+    setup_type: str,
+    metrics: dict
+) -> str | None:
+
     global last_execution_attempt
 
     pair = pair.upper()
@@ -3574,9 +3600,12 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
 
     if (
         pair in last_execution_attempt
-        and now - last_execution_attempt[pair] < EXECUTION_COOLDOWN_SECONDS
+        and now - last_execution_attempt[pair]
+        < EXECUTION_COOLDOWN_SECONDS
     ):
-        logger.warning(f"[ORDER] Cooldown actif pour {pair}")
+        logger.warning(
+            f"[ORDER] Cooldown actif pour {pair}"
+        )
         return None
 
     last_execution_attempt[pair] = now
@@ -3588,21 +3617,37 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
     sl = float(stop_loss)
     tp = float(take_profit)
 
-    risk = abs(expected_entry - sl)
-    reward = abs(tp - expected_entry)
+    # Niveau réel du setup pour le contrôle d'entrée
+    setup_level = float(
+        metrics.get(
+            "setup_level",
+            expected_entry
+        )
+    )
+
+    # ========================================================
+    # 3. RISQUE / RR
+    # ========================================================
+    risk = abs(
+        expected_entry - sl
+    )
+
+    reward = abs(
+        tp - expected_entry
+    )
 
     if risk <= 0:
-        logger.error(f"[ORDER] {pair} | Risque nul")
+        logger.error(
+            f"[ORDER] {pair} | Risque nul"
+        )
         return None
 
     rr = reward / risk
 
-    # ========================================================
-    # 3. RR INITIAL STRICT
-    # ========================================================
     if rr < RR_MIN_EXECUTION:
         logger.warning(
-            f"[ORDER] {pair} | RR={rr:.2f} < {RR_MIN_EXECUTION} → rejet"
+            f"[ORDER] {pair} | "
+            f"RR={rr:.2f} < {RR_MIN_EXECUTION} → rejet"
         )
         return None
 
@@ -3610,98 +3655,213 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
     # 4. VÉRIFICATIONS
     # ========================================================
     if ONE_TRADE_PER_PAIR and has_open_trade(pair):
-        logger.info(f"[ORDER] {pair}: trade déjà ouvert")
+
+        logger.info(
+            f"[ORDER] {pair}: trade déjà ouvert"
+        )
         return None
 
     if open_trade_count() >= MAX_TRADES_TOTAL:
-        logger.info(f"[ORDER] Limite trades atteinte ({MAX_TRADES_TOTAL})")
+
+        logger.info(
+            f"[ORDER] Limite trades atteinte "
+            f"({MAX_TRADES_TOTAL})"
+        )
         return None
 
     if is_maintenance_suspended():
-        logger.warning(f"[ORDER] {pair} | OANDA maintenance")
+
+        logger.warning(
+            f"[ORDER] {pair} | OANDA maintenance"
+        )
         return None
 
     # ========================================================
-    # 5. VÉRIFICATION DU PRIX ACTUEL AVANT MARKET ORDER
-    #
-    # IMPORTANT :
-    # On ne déclenche PAS une MARKET ORDER si le marché
-    # est déjà trop éloigné du niveau d'entrée calculé.
+    # 5. PRIX MARCHÉ RÉEL
     # ========================================================
-    pricing = get_price_spread(pair)
+    pricing_data = get_price_spread(pair)
 
-    bid = float(pricing.get("bid", 0) or 0)
-    ask = float(pricing.get("ask", 0) or 0)
+    bid = float(
+        pricing_data.get("bid", 0) or 0
+    )
+
+    ask = float(
+        pricing_data.get("ask", 0) or 0
+    )
 
     if direction == "BUY":
-        market_entry = ask if ask > 0 else float(pricing.get("mid", 0) or 0)
+
+        market_entry = (
+            ask
+            if ask > 0
+            else float(
+                pricing_data.get("mid", 0) or 0
+            )
+        )
+
     else:
-        market_entry = bid if bid > 0 else float(pricing.get("mid", 0) or 0)
+
+        market_entry = (
+            bid
+            if bid > 0
+            else float(
+                pricing_data.get("mid", 0) or 0
+            )
+        )
 
     if market_entry <= 0:
+
         logger.warning(
-            f"[ORDER] {pair} | Prix marché indisponible → rejet"
+            f"[ORDER] {pair} | "
+            f"Prix marché indisponible → rejet"
         )
         return None
 
     pip = get_pip_value(pair)
 
-    # Tolérance d'entrée.
+    # ========================================================
+    # 6. CONTRÔLE DISTANCE SETUP → MARCHÉ
     #
-    # Forex : 5 pips minimum
-    # JPY    : 5 pips
-    # XAU    : 20 pips = 0.20
-    # Indices : 5 pips selon leur taille configurée
-    #
-    # On ajoute également une petite marge proportionnelle pour
-    # éviter qu'un instrument à prix élevé soit bloqué inutilement.
+    # IMPORTANT :
+    # Ce contrôle porte sur le niveau du setup.
+    # Il ne porte plus sur expected_entry.
+    # ========================================================
     if pair == "XAU_USD":
-        max_entry_deviation = max(pip * 20, expected_entry * 0.00005)
-    elif "JPY" in pair:
-        max_entry_deviation = max(pip * 5, expected_entry * 0.00003)
-    else:
-        max_entry_deviation = max(pip * 5, expected_entry * 0.00003)
 
-    entry_deviation = abs(market_entry - expected_entry)
+        max_entry_deviation = max(
+            pip * 20,
+            setup_level * 0.00005
+        )
+
+    elif "JPY" in pair:
+
+        max_entry_deviation = max(
+            pip * 5,
+            setup_level * 0.00003
+        )
+
+    else:
+
+        max_entry_deviation = max(
+            pip * 5,
+            setup_level * 0.00003
+        )
+
+    setup_deviation = abs(
+        market_entry - setup_level
+    )
 
     logger.info(
         f"[ENTRY_CHECK] {pair} | {direction} | "
-        f"TARGET={expected_entry:.5f} | MARKET={market_entry:.5f} | "
-        f"DEV={entry_deviation:.5f} | MAX={max_entry_deviation:.5f}"
+        f"SETUP={setup_level:.5f} | "
+        f"EXEC_EXPECTED={expected_entry:.5f} | "
+        f"MARKET={market_entry:.5f} | "
+        f"DEV_SETUP={setup_deviation:.5f} | "
+        f"MAX={max_entry_deviation:.5f}"
     )
 
-    if entry_deviation > max_entry_deviation:
+    if setup_deviation > max_entry_deviation:
+
         logger.warning(
-            f"[ENTRY_REJECT] {pair} | marché trop éloigné du niveau d'entrée | "
-            f"target={expected_entry:.5f} | market={market_entry:.5f} | "
-            f"écart={entry_deviation:.5f} > max={max_entry_deviation:.5f}"
+            f"[ENTRY_REJECT] {pair} | "
+            f"marché trop éloigné du setup | "
+            f"setup={setup_level:.5f} | "
+            f"market={market_entry:.5f} | "
+            f"écart={setup_deviation:.5f} > "
+            f"max={max_entry_deviation:.5f}"
         )
+
         return None
 
     # ========================================================
-    # 6. BALANCE / RISK
+    # 7. LE PRIX D'ORDRE DOIT ÊTRE LE PRIX MARCHÉ CAPTURÉ
+    # ========================================================
+    expected_entry = market_entry
+
+    # Recalcul du RR avec le vrai prix d'ordre
+    risk = abs(
+        expected_entry - sl
+    )
+
+    reward = abs(
+        tp - expected_entry
+    )
+
+    if risk <= 0:
+        logger.error(
+            f"[ORDER] {pair} | Risque nul après refresh"
+        )
+        return None
+
+    rr = reward / risk
+
+    if rr < RR_MIN_EXECUTION:
+
+        logger.warning(
+            f"[ORDER] {pair} | "
+            f"RR={rr:.2f} < {RR_MIN_EXECUTION} "
+            f"après refresh prix → rejet"
+        )
+
+        return None
+
+    # ========================================================
+    # 8. BALANCE / RISQUE
     # ========================================================
     balance = get_balance()
 
     if balance <= 0:
-        logger.error(f"[ORDER] {pair} | Balance invalide")
-        return None
 
-    min_sl_distance = pip * 10
-
-    if risk < min_sl_distance:
-        logger.warning(
-            f"[ORDER] {pair} | SL trop proche "
-            f"({risk:.5f} < {min_sl_distance:.5f}) → rejet"
+        logger.error(
+            f"[ORDER] {pair} | Balance invalide"
         )
         return None
 
+    # Minimum SL adaptatif
+    atr_pips = float(
+        metrics.get("atr", 0.0) or 0.0
+    )
+
+    effective_min_sl_pips = min(
+        10.0,
+        atr_pips * 2.0
+        if atr_pips > 0
+        else 10.0
+    )
+
+    risk_pips = (
+        risk / pip
+        if pip > 0
+        else 0.0
+    )
+
+    if risk_pips < effective_min_sl_pips:
+
+        logger.warning(
+            f"[ORDER] {pair} | "
+            f"SL trop proche "
+            f"({risk_pips:.2f} pips < "
+            f"{effective_min_sl_pips:.2f} pips) "
+            f"→ rejet"
+        )
+
+        return None
+
     # ========================================================
-    # 7. RISK PERCENTAGE
+    # 9. RISK PERCENTAGE
     # ========================================================
     hour = datetime.utcnow().hour
-    is_asia = (21 <= hour or hour < 7)
-    risk_pct = 0.5 if is_asia else RISK_PERCENTAGE
+
+    is_asia = (
+        21 <= hour
+        or hour < 7
+    )
+
+    risk_pct = (
+        0.5
+        if is_asia
+        else RISK_PERCENTAGE
+    )
 
     units = calculate_units(
         pair,
@@ -3712,11 +3872,15 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
     )
 
     if units <= 0:
-        logger.error(f"[ORDER] {pair} | Units invalides: {units}")
+
+        logger.error(
+            f"[ORDER] {pair} | "
+            f"Units invalides: {units}"
+        )
         return None
 
     # ========================================================
-    # 8. MARGE
+    # 10. MARGE
     # ========================================================
     margin_info = calculate_margin(
         pair,
@@ -3725,6 +3889,7 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
     )
 
     if not margin_info["sufficient"]:
+
         units = cap_units_by_margin(
             pair,
             units,
@@ -3733,37 +3898,53 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
         )
 
         if units <= 0:
+
             logger.error(
-                f"[RISK] {pair} | Marge insuffisante"
+                f"[RISK] {pair} | "
+                f"Marge insuffisante"
             )
             return None
 
     # ========================================================
-    # 9. MARKET ORDER
+    # 11. MARKET ORDER
     # ========================================================
-    signed_units = units if direction == "BUY" else -units
+    signed_units = (
+        units
+        if direction == "BUY"
+        else -units
+    )
 
     order_data = {
         "order": {
             "type": "MARKET",
             "instrument": pair,
-            "units": str(int(signed_units)),
+            "units": str(
+                int(signed_units)
+            ),
             "positionFill": "DEFAULT",
 
             "stopLossOnFill": {
-                "price": round_price(pair, sl),
+                "price": round_price(
+                    pair,
+                    sl
+                ),
                 "timeInForce": "GTC"
             },
 
             "takeProfitOnFill": {
-                "price": round_price(pair, tp),
+                "price": round_price(
+                    pair,
+                    tp
+                ),
                 "timeInForce": "GTC"
             }
         }
     }
 
     logger.info(
-        f"[ORDER_EXPECTED] {pair} | {direction} | "
+        f"[ORDER_EXPECTED] {pair} | "
+        f"{direction} | "
+        f"SETUP={setup_level:.5f} | "
         f"ENTRY={expected_entry:.5f} | "
         f"SL={sl:.5f} | "
         f"TP={tp:.5f} | "
@@ -3772,13 +3953,17 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
     )
 
     if not EXECUTE_TRADES:
-        logger.info("[ORDER] EXECUTE_TRADES=false")
+
+        logger.info(
+            "[ORDER] EXECUTE_TRADES=false"
+        )
         return "SIMULATION"
 
     # ========================================================
-    # 10. ENVOI OANDA
+    # 12. ENVOI OANDA
     # ========================================================
     try:
+
         api = v88_client()
 
         r = orders.OrderCreate(
@@ -3787,13 +3972,16 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
         )
 
         api.request(r)
+
         resp = r.response
 
-        # ----------------------------------------------------
-        # REJET OANDA
-        # ----------------------------------------------------
         if resp.get("orderRejectTransaction"):
-            reject = resp["orderRejectTransaction"]
+
+            reject = (
+                resp[
+                    "orderRejectTransaction"
+                ]
+            )
 
             logger.error(
                 f"[ORDER] REJECT {pair}: "
@@ -3802,26 +3990,37 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
 
             return None
 
-        # ----------------------------------------------------
-        # RÉCUPÉRATION DU FILL
-        # ----------------------------------------------------
-        fill = resp.get("orderFillTransaction", {})
+        # ====================================================
+        # FILL
+        # ====================================================
+        fill = resp.get(
+            "orderFillTransaction",
+            {}
+        )
 
         trade_id = None
         actual_entry = None
 
         if fill.get("tradeOpened"):
-            trade_id = fill["tradeOpened"].get("tradeID")
+
+            trade_id = (
+                fill[
+                    "tradeOpened"
+                ].get("tradeID")
+            )
 
         if fill.get("price") is not None:
+
             try:
-                actual_entry = float(fill["price"])
+                actual_entry = float(
+                    fill["price"]
+                )
             except Exception:
                 actual_entry = None
 
-        # ----------------------------------------------------
-        # FALLBACK : RECHERCHE DU TRADE OUVERT
-        # ----------------------------------------------------
+        # ====================================================
+        # FALLBACK TRADE
+        # ====================================================
         if not trade_id:
 
             time.sleep(1)
@@ -3859,7 +4058,10 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
 
                 candidates.append(
                     (
-                        abs(t_entry - expected_entry),
+                        abs(
+                            t_entry
+                            - expected_entry
+                        ),
                         t
                     )
                 )
@@ -3870,17 +4072,18 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
                     key=lambda x: x[0]
                 )
 
-                _, best_trade = candidates[0]
+                _, best_trade = (
+                    candidates[0]
+                )
 
-                trade_id = best_trade.get("id")
+                trade_id = (
+                    best_trade.get("id")
+                )
 
                 actual_entry = float(
                     best_trade.get("price")
                 )
 
-        # ----------------------------------------------------
-        # TRADE NON CONFIRMÉ
-        # ----------------------------------------------------
         if not trade_id:
 
             logger.error(
@@ -3890,18 +4093,21 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
 
             return None
 
-        # ----------------------------------------------------
-        # FALLBACK PRIX
-        # ----------------------------------------------------
+        # ====================================================
+        # FALLBACK PRIX FILL
+        # ====================================================
         if actual_entry is None:
 
             try:
 
-                trade_details = get_trade_details(
-                    trade_id
+                trade_details = (
+                    get_trade_details(
+                        trade_id
+                    )
                 )
 
                 if trade_details:
+
                     actual_entry = float(
                         trade_details.get(
                             "price",
@@ -3913,22 +4119,21 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
 
                 logger.warning(
                     f"[ORDER] {pair} | "
-                    f"Impossible récupérer fill réel: {e}"
+                    f"Impossible récupérer "
+                    f"fill réel: {e}"
                 )
 
         if actual_entry is None:
             actual_entry = expected_entry
 
         # ====================================================
-        # 11. VÉRIFICATION DU FILL RÉEL
+        # RR RÉEL APRÈS FILL
         # ====================================================
         fill_deviation = abs(
-            actual_entry - expected_entry
+            actual_entry
+            - expected_entry
         )
 
-        # IMPORTANT :
-        # Le prix de fill ne doit pas pouvoir détruire
-        # complètement le RR.
         risk_real = abs(
             actual_entry - sl
         )
@@ -3944,7 +4149,10 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
         )
 
         slippage_pips = (
-            (actual_entry - expected_entry) / pip
+            (actual_entry - expected_entry)
+            / pip
+            if pip > 0
+            else 0.0
         )
 
         logger.info(
@@ -3957,63 +4165,67 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
         )
 
         # ====================================================
-        # 12. PROTECTION ABSOLUE DU RR
+        # PROTECTION RR
         # ====================================================
         if rr_real < RR_MIN_EXECUTION:
 
             logger.error(
                 f"[ORDER_ABORT] {pair} | "
                 f"RR réel {rr_real:.2f} < "
-                f"{RR_MIN_EXECUTION} après exécution"
+                f"{RR_MIN_EXECUTION}"
             )
 
-            # Le trade existe déjà.
-            # On ne laisse surtout pas courir une position
-            # avec un RR dégradé.
             try:
 
                 close_data = {
                     "units": "ALL"
                 }
 
-                close_request = trades.TradeClose(
-                    accountID=OANDA_ACCOUNT_ID,
-                    tradeID=str(trade_id),
-                    data=close_data
+                close_request = (
+                    trades.TradeClose(
+                        accountID=OANDA_ACCOUNT_ID,
+                        tradeID=str(
+                            trade_id
+                        ),
+                        data=close_data
+                    )
                 )
 
-                api.request(close_request)
+                api.request(
+                    close_request
+                )
 
                 logger.error(
                     f"[ORDER_ABORT] {pair} | "
-                    f"Trade {trade_id} fermé immédiatement "
-                    f"car RR réel insuffisant"
+                    f"Trade {trade_id} "
+                    f"fermé immédiatement"
                 )
 
             except Exception as close_error:
 
                 logger.critical(
                     f"[ORDER_ABORT] {pair} | "
-                    f"IMPOSSIBLE DE FERMER LE TRADE "
-                    f"{trade_id}: {close_error}"
+                    f"IMPOSSIBLE DE FERMER "
+                    f"LE TRADE {trade_id}: "
+                    f"{close_error}"
                 )
 
             return None
 
         # ====================================================
-        # 13. LOG SLIPPAGE
+        # LOG SLIPPAGE
         # ====================================================
         if fill_deviation > max_entry_deviation:
 
             logger.warning(
                 f"[SLIPPAGE] {pair} | "
-                f"Fill hors tolérance malgré contrôle pré-ordre | "
+                f"Fill hors tolérance | "
                 f"écart={fill_deviation:.5f} | "
                 f"max={max_entry_deviation:.5f}"
             )
 
         # ====================================================
-        # 14. ENREGISTREMENT
+        # ENREGISTREMENT
         # ====================================================
         trade_tracker.add_trade(
             trade_id,
@@ -4026,7 +4238,9 @@ def execute_trade(pair: str, direction: str, entry_price: float, stop_loss: floa
             eqs
         )
 
-        open_trade_details[str(trade_id)] = {
+        open_trade_details[
+            str(trade_id)
+        ] = {
             "entry": actual_entry,
             "sl": sl,
             "tp": tp,
@@ -4253,95 +4467,314 @@ def advanced_main():
         logger.error(f"❌ Échec API: {e}")
         return
 
-    # Petite fonction interne pour diagnostiquer la structure HTF
+    # Diagnostic compact de la structure HTF
     def _struct_brief(df, label):
         highs, lows = detect_swing_points(df, 5)
+
         if len(highs) >= 2 and len(lows) >= 2:
             hh = highs[-1]["price"] > highs[-2]["price"]
             hl = lows[-1]["price"] > lows[-2]["price"]
             lh = highs[-1]["price"] < highs[-2]["price"]
             ll = lows[-1]["price"] < lows[-2]["price"]
-            if hh and hl: return f"{label} BULLISH"
-            if lh and ll: return f"{label} BEARISH"
-            return f"{label} MIXED (HH={hh},HL={hl},LH={lh},LL={ll})"
+
+            if hh and hl:
+                return f"{label} BULLISH"
+
+            if lh and ll:
+                return f"{label} BEARISH"
+
+            return (
+                f"{label} MIXED "
+                f"(HH={hh},HL={hl},LH={lh},LL={ll})"
+            )
+
         return f"{label} INDETERMINE"
 
     for pair in PAIR_LIST:
+
+        # ========================================================
+        # 1. UN SEUL TRADE PAR PAIRE
+        # ========================================================
         if has_open_trade(pair):
             logger.info(f"[INFO] {pair}: trade déjà ouvert")
             continue
 
         try:
-            df_h4 = get_candles(api, pair, GRANULARITY_H4, 300)
-            df_h1 = get_candles(api, pair, GRANULARITY_H1, 200)
-            df_m15 = get_candles(api, pair, GRANULARITY_M15, 250)
-            if any(df.empty for df in [df_h4, df_h1, df_m15]):
+            # ====================================================
+            # 2. CHARGEMENT DES DONNÉES
+            # ====================================================
+            df_h4 = get_candles(
+                api,
+                pair,
+                GRANULARITY_H4,
+                300
+            )
+
+            df_h1 = get_candles(
+                api,
+                pair,
+                GRANULARITY_H1,
+                200
+            )
+
+            df_m15 = get_candles(
+                api,
+                pair,
+                GRANULARITY_M15,
+                250
+            )
+
+            if any(
+                df.empty
+                for df in [df_h4, df_h1, df_m15]
+            ):
+                logger.info(
+                    f"{pair} | Données insuffisantes"
+                )
                 continue
 
-            current_price = float(df_m15["close"].iloc[-1])
-            bias = get_directional_bias(df_h4, df_h1)
-            
-            # --- LOG DIAGNOSTIC STRUCTURE NEUTRAL (enrichi) ---
+            # Prix M15 utilisé pour le contexte / qualification
+            current_price = float(
+                df_m15["close"].iloc[-1]
+            )
+
+            # ====================================================
+            # 3. BIAIS H4 SOUVERAIN
+            # ====================================================
+            bias = get_directional_bias(
+                df_h4,
+                df_h1
+            )
+
+            # ====================================================
+            # 4. DIAGNOSTIC SI NEUTRE
+            # ====================================================
             if bias == "NEUTRAL":
-                logger.info(f"{pair} | BIAS_DIAG: H4={_struct_brief(df_h4,'H4')} | H1={_struct_brief(df_h1,'H1')} | -> NEUTRAL")
+                logger.info(
+                    f"{pair} | BIAS_DIAG: "
+                    f"H4={_struct_brief(df_h4, 'H4')} | "
+                    f"H1={_struct_brief(df_h1, 'H1')} | "
+                    f"-> NEUTRAL"
+                )
                 continue
 
-            setups = detect_setups(pair, df_m15, df_h1, bias)
-            
-            # --- LOG DES SETUPS DÉTECTÉS (enrichi) ---
+            # ====================================================
+            # 5. DÉTECTION DES SETUPS M15
+            # ====================================================
+            setups = detect_setups(
+                pair,
+                df_m15,
+                df_h1,
+                bias
+            )
+
             if not setups:
-                logger.info(f"{pair} | Aucun setup {bias} détecté")
+                logger.info(
+                    f"{pair} | Aucun setup {bias} détecté"
+                )
                 continue
-            else:
-                setup_summary = ", ".join([f"{s.get('type')}@{round(s.get('entry_level',0),5)}" for s in setups[:3]])
-                logger.info(f"{pair} | SETUPS_FOUND: {len(setups)} | Types: {setup_summary}{' ...' if len(setups)>3 else ''}")
 
+            setup_summary = ", ".join(
+                [
+                    (
+                        f"{s.get('type')}"
+                        f"@"
+                        f"{round(float(s.get('entry_level', 0)), 5)}"
+                    )
+                    for s in setups[:3]
+                ]
+            )
+
+            logger.info(
+                f"{pair} | SETUPS_FOUND: {len(setups)} | "
+                f"Types: {setup_summary}"
+                f"{' ...' if len(setups) > 3 else ''}"
+            )
+
+            # ====================================================
+            # 6. ÉVALUATION DES SETUPS
+            # ====================================================
             valid_trades = []
-            for entry in setups:
-                result = evaluate_setup(pair, bias, entry, df_m15, df_h1, current_price)
-                if result["passed"]:
-                    valid_trades.append({
-                        "entry": entry,
-                        "sl": result["sl"],
-                        "tp": result["tp"],
-                        "risk": result["risk"],
-                        "rr": result["rr"],
-                        "metrics": result["metrics"]
-                    })
-                else:
-                    logger.info(f"[REJECT] {pair} {bias} {entry.get('type')} : {result['reason']}")
 
+            for entry in setups:
+
+                result = evaluate_setup(
+                    pair=pair,
+                    direction=bias,
+                    entry=entry,
+                    df_m15=df_m15,
+                    df_h1=df_h1,
+                    current_price=current_price
+                )
+
+                if not result.get("passed"):
+                    logger.info(
+                        f"[REJECT] {pair} {bias} "
+                        f"{entry.get('type')} : "
+                        f"{result.get('reason', 'raison inconnue')}"
+                    )
+                    continue
+
+                # -----------------------------------------------
+                # setup_level = niveau structurel du setup
+                # execution_entry = prix utilisable pour l'ordre
+                # -----------------------------------------------
+                setup_level = float(
+                    result.get(
+                        "setup_level",
+                        entry.get("entry_level")
+                    )
+                )
+
+                execution_entry = float(
+                    result["execution_entry"]
+                )
+
+                valid_trades.append(
+                    {
+                        "entry": entry,
+                        "setup_level": setup_level,
+                        "execution_entry": execution_entry,
+                        "sl": float(result["sl"]),
+                        "tp": float(result["tp"]),
+                        "risk": float(result["risk"]),
+                        "rr": float(result["rr"]),
+                        "confirmation": result.get(
+                            "confirmation",
+                            {}
+                        ),
+                        "metrics": result.get(
+                            "metrics",
+                            {}
+                        ),
+                    }
+                )
+
+            # ====================================================
+            # 7. AUCUN TRADE VALIDE
+            # ====================================================
             if not valid_trades:
                 continue
 
-            # Sélection du meilleur RR
-            valid_trades.sort(key=lambda x: x["rr"], reverse=True)
-            best = valid_trades[0]
-
-            entry_level = float(best["entry"]["entry_level"])
-            stop_loss = best["sl"]
-            take_profit = best["tp"]
-            rr = best["rr"]
-            metrics = best["metrics"]
-
-            logger.info(f"[TRADE] {pair} {bias} @{entry_level:.5f} | SL={stop_loss:.5f} | TP={take_profit:.5f} | RR={rr:.2f}")
-
-            trade_id = execute_trade(
-                pair=pair, direction=bias, entry_price=entry_level,
-                stop_loss=stop_loss, take_profit=take_profit,
-                score=0, entry_type=best["entry"]["type"], eqs=0,
-                setup_type=best["entry"]["type"], metrics=metrics
+            # ====================================================
+            # 8. TRI :
+            #    - RR prioritaire
+            #    - puis proximité du setup
+            # ====================================================
+            valid_trades.sort(
+                key=lambda x: (
+                    x["rr"],
+                    -abs(
+                        x["execution_entry"]
+                        - x["setup_level"]
+                    )
+                ),
+                reverse=True
             )
 
+            best = valid_trades[0]
+
+            # ====================================================
+            # 9. RÉCUPÉRATION DES VALEURS
+            # ====================================================
+            setup_level = float(
+                best["setup_level"]
+            )
+
+            execution_entry = float(
+                best["execution_entry"]
+            )
+
+            stop_loss = float(
+                best["sl"]
+            )
+
+            take_profit = float(
+                best["tp"]
+            )
+
+            rr = float(
+                best["rr"]
+            )
+
+            metrics = dict(
+                best.get("metrics") or {}
+            )
+
+            setup_type = best["entry"].get(
+                "type",
+                "UNKNOWN"
+            )
+
+            # On conserve explicitement le niveau structurel
+            metrics["setup_level"] = setup_level
+            metrics["execution_entry"] = execution_entry
+
+            # ====================================================
+            # 10. LOG AVANT EXÉCUTION
+            # ====================================================
+            logger.info(
+                f"[TRADE] {pair} {bias} "
+                f"| SETUP={setup_type} "
+                f"| SETUP_LEVEL={setup_level:.5f} "
+                f"| EXEC_ENTRY={execution_entry:.5f} "
+                f"| SL={stop_loss:.5f} "
+                f"| TP={take_profit:.5f} "
+                f"| RR={rr:.2f}"
+            )
+
+            # ====================================================
+            # 11. EXÉCUTION
+            #
+            # IMPORTANT :
+            # On ne transmet plus le setup_level comme
+            # prix d'entrée de l'ordre.
+            # ====================================================
+            trade_id = execute_trade(
+                pair=pair,
+                direction=bias,
+                entry_price=execution_entry,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                score=0,
+                entry_type=setup_type,
+                eqs=0,
+                setup_type=setup_type,
+                metrics=metrics
+            )
+
+            # ====================================================
+            # 12. RÉSULTAT
+            # ====================================================
             if trade_id:
-                logger.info(f"✅ {pair} trade exécuté (ID {trade_id})")
-                send_telegram(pair, bias, entry_level, stop_loss, take_profit, rr, best["entry"]["type"])
+                logger.info(
+                    f"✅ {pair} trade exécuté "
+                    f"(ID {trade_id})"
+                )
+
+                send_telegram(
+                    pair,
+                    bias,
+                    execution_entry,
+                    stop_loss,
+                    take_profit,
+                    rr,
+                    setup_type
+                )
             else:
-                logger.error(f"❌ {pair} échec exécution")
+                logger.error(
+                    f"❌ {pair} échec exécution"
+                )
 
         except Exception as e:
-            logger.error(f"💥 Erreur sur {pair}: {e}")
+            logger.error(
+                f"💥 Erreur sur {pair}: {e}",
+                exc_info=True
+            )
 
+    # ============================================================
+    # 13. SUMMARY
+    # ============================================================
     stats.log_summary()
 # ============================================================
 # TELEGRAM (optionnel)
