@@ -2387,25 +2387,65 @@ def calculate_sl_tp_structural(
     entry: float,
     pair: str
 ) -> Tuple[float, float, float]:
-    """Calcule un SL structurel exploitable et un TP à 2R."""
-    pair = pair.upper()
-    direction = direction.upper()
+    """
+    Calcule un SL structurel exploitable et un TP à 2R.
+
+    Règles :
+    - BUY  : sous un swing low M15 exploitable
+    - SELL : au-dessus d'un swing high M15 exploitable
+    - Buffer structurel : 5 pips
+    - Recherche des swings sur les 64 dernières bougies
+    - SL maximum : 2 ATR
+    - Le minimum de SL est ADAPTATIF :
+        * 10 pips si compatible avec 2 ATR
+        * sinon limité à 2 ATR pour éviter une contradiction mathématique
+    - Fallback : 1.5 ATR
+    - TP = 2R
+    - RR final >= 2
+    """
+
+    pair = str(pair).upper().strip()
+    direction = str(direction).upper().strip()
     entry = float(entry)
 
     if direction not in ("BUY", "SELL"):
         raise ValueError(f"Direction inconnue: {direction}")
-    if df_m15 is None or len(df_m15) < 20:
-        raise ValueError(f"Données M15 insuffisantes pour {pair}")
 
-    highs, lows = detect_swing_points(df_m15, 5)
-    pip = float(get_pip_value(pair))
-    atr = calculate_atr(df_m15)
+    if df_m15 is None or len(df_m15) < 20:
+        raise ValueError(
+            f"Données M15 insuffisantes pour {pair}"
+        )
+
+    # ---------------------------------------------------------
+    # SWINGS / ATR / PIP
+    # ---------------------------------------------------------
+
+    highs, lows = detect_swing_points(
+        df_m15,
+        5
+    )
+
+    pip = float(
+        get_pip_value(pair)
+    )
+
+    atr = calculate_atr(
+        df_m15
+    )
+
     if atr is None or atr <= 0:
         atr = pip * 10
+
     atr = float(atr)
 
     if pip <= 0 or atr <= 0:
-        raise ValueError(f"Paramètres SL invalides pour {pair}")
+        raise ValueError(
+            f"Paramètres SL invalides pour {pair}"
+        )
+
+    # ---------------------------------------------------------
+    # PARAMÈTRES
+    # ---------------------------------------------------------
 
     SL_BUFFER_PIPS = 5.0
     MIN_SL_PIPS = 10.0
@@ -2414,125 +2454,428 @@ def calculate_sl_tp_structural(
     FALLBACK_SL_ATR = 1.5
     TARGET_RR = 2.0
 
-    sl_buffer = SL_BUFFER_PIPS * pip
-    min_sl_distance = MIN_SL_PIPS * pip
-    max_sl_distance = atr * MAX_SL_ATR
-    recent_cutoff = max(0, len(df_m15) - STRUCTURAL_SWING_LOOKBACK_BARS)
+    sl_buffer = (
+        SL_BUFFER_PIPS * pip
+    )
+
+    # Limite absolue du SL.
+    max_sl_distance = (
+        atr * MAX_SL_ATR
+    )
+
+    # IMPORTANT :
+    # Le minimum 10 pips ne doit JAMAIS dépasser
+    # la limite maximale de 2 ATR.
+    requested_min_sl_distance = (
+        MIN_SL_PIPS * pip
+    )
+
+    effective_min_sl_distance = min(
+        requested_min_sl_distance,
+        max_sl_distance
+    )
+
+    recent_cutoff = max(
+        0,
+        len(df_m15) - STRUCTURAL_SWING_LOOKBACK_BARS
+    )
 
     sl = None
     sl_source = None
 
-    # Le problème de la v139 : valid_lows[-1]/valid_highs[-1]
-    # choisissait le dernier swing dans le temps, même s'il était
-    # trop éloigné. On cherche maintenant le swing STRUCTUREL
-    # le plus proche de l'entrée qui respecte déjà la limite 2 ATR.
+    # ---------------------------------------------------------
+    # SL STRUCTUREL
+    # ---------------------------------------------------------
+
     if direction == "BUY":
+
         candidates = []
+
         for low in lows:
-            if int(low.get("index", -1)) < recent_cutoff:
+
+            index = int(
+                low.get("index", -1)
+            )
+
+            if index < recent_cutoff:
                 continue
-            level = float(low["price"])
+
+            level = float(
+                low["price"]
+            )
+
             if level >= entry:
                 continue
-            candidate_sl = level - sl_buffer
-            candidate_risk = entry - candidate_sl
-            if 0 < candidate_risk <= max_sl_distance:
-                candidates.append((candidate_risk, level, candidate_sl))
+
+            candidate_sl = (
+                level - sl_buffer
+            )
+
+            candidate_risk = (
+                entry - candidate_sl
+            )
+
+            if (
+                0 < candidate_risk
+                <= max_sl_distance
+            ):
+                candidates.append(
+                    (
+                        candidate_risk,
+                        level,
+                        candidate_sl
+                    )
+                )
 
         if candidates:
-            candidates.sort(key=lambda x: (x[0], -x[1]))
+
+            candidates.sort(
+                key=lambda x: (
+                    x[0],
+                    -x[1]
+                )
+            )
+
             _, level, sl = candidates[0]
-            sl_source = f"SWING_LOW_NEAREST {level:.5f}"
+
+            sl_source = (
+                f"SWING_LOW_NEAREST "
+                f"{level:.5f}"
+            )
+
         else:
-            sl = entry - atr * FALLBACK_SL_ATR
-            sl_source = "ATR_FALLBACK_NO_VALID_SWING"
+
+            # Fallback ATR 1.5,
+            # toujours compatible avec 2 ATR.
+            fallback_distance = min(
+                atr * FALLBACK_SL_ATR,
+                max_sl_distance
+            )
+
+            fallback_distance = max(
+                fallback_distance,
+                effective_min_sl_distance
+            )
+
+            # Sécurité absolue.
+            fallback_distance = min(
+                fallback_distance,
+                max_sl_distance
+            )
+
+            sl = (
+                entry - fallback_distance
+            )
+
+            sl_source = (
+                "ATR_FALLBACK_NO_VALID_SWING"
+            )
+
     else:
+
         candidates = []
+
         for high in highs:
-            if int(high.get("index", -1)) < recent_cutoff:
+
+            index = int(
+                high.get("index", -1)
+            )
+
+            if index < recent_cutoff:
                 continue
-            level = float(high["price"])
+
+            level = float(
+                high["price"]
+            )
+
             if level <= entry:
                 continue
-            candidate_sl = level + sl_buffer
-            candidate_risk = candidate_sl - entry
-            if 0 < candidate_risk <= max_sl_distance:
-                candidates.append((candidate_risk, level, candidate_sl))
+
+            candidate_sl = (
+                level + sl_buffer
+            )
+
+            candidate_risk = (
+                candidate_sl - entry
+            )
+
+            if (
+                0 < candidate_risk
+                <= max_sl_distance
+            ):
+                candidates.append(
+                    (
+                        candidate_risk,
+                        level,
+                        candidate_sl
+                    )
+                )
 
         if candidates:
-            candidates.sort(key=lambda x: (x[0], x[1]))
+
+            candidates.sort(
+                key=lambda x: (
+                    x[0],
+                    x[1]
+                )
+            )
+
             _, level, sl = candidates[0]
-            sl_source = f"SWING_HIGH_NEAREST {level:.5f}"
+
+            sl_source = (
+                f"SWING_HIGH_NEAREST "
+                f"{level:.5f}"
+            )
+
         else:
-            sl = entry + atr * FALLBACK_SL_ATR
-            sl_source = "ATR_FALLBACK_NO_VALID_SWING"
 
-    # Sécurité directionnelle.
+            fallback_distance = min(
+                atr * FALLBACK_SL_ATR,
+                max_sl_distance
+            )
+
+            fallback_distance = max(
+                fallback_distance,
+                effective_min_sl_distance
+            )
+
+            fallback_distance = min(
+                fallback_distance,
+                max_sl_distance
+            )
+
+            sl = (
+                entry + fallback_distance
+            )
+
+            sl_source = (
+                "ATR_FALLBACK_NO_VALID_SWING"
+            )
+
+    # ---------------------------------------------------------
+    # SÉCURITÉ DIRECTIONNELLE
+    # ---------------------------------------------------------
+
     if direction == "BUY" and sl >= entry:
-        sl = entry - max(min_sl_distance, atr * FALLBACK_SL_ATR)
-        sl_source = "ATR_FALLBACK_INVALID_STRUCTURE"
-    elif direction == "SELL" and sl <= entry:
-        sl = entry + max(min_sl_distance, atr * FALLBACK_SL_ATR)
-        sl_source = "ATR_FALLBACK_INVALID_STRUCTURE"
 
-    risk_before_rounding = abs(entry - sl)
-    if risk_before_rounding <= 0:
-        raise ValueError(f"Risque nul {pair}")
-
-    if risk_before_rounding > max_sl_distance:
-        raise ValueError(
-            f"SL structurel > {MAX_SL_ATR:.1f} ATR "
-            f"(risk={risk_before_rounding:.5f}, max={max_sl_distance:.5f})"
+        sl = (
+            entry
+            - effective_min_sl_distance
         )
 
-    if risk_before_rounding < min_sl_distance:
-        sl = entry - min_sl_distance if direction == "BUY" else entry + min_sl_distance
-
-    sl = float(round_price(pair, sl))
-
-    if direction == "BUY" and sl >= entry:
-        sl = float(round_price(pair, entry - min_sl_distance))
-    elif direction == "SELL" and sl <= entry:
-        sl = float(round_price(pair, entry + min_sl_distance))
-
-    risk = abs(entry - sl)
-    if risk <= 0:
-        raise ValueError(f"Risk nul après arrondi {pair}")
-    if risk > max_sl_distance:
-        raise ValueError(
-            f"SL après arrondi > {MAX_SL_ATR:.1f} ATR "
-            f"(risk={risk:.5f}, max={max_sl_distance:.5f})"
+        sl_source = (
+            "ATR_FALLBACK_INVALID_STRUCTURE"
         )
 
-    # TP strictement à 2R.
-    tp = entry + risk * TARGET_RR if direction == "BUY" else entry - risk * TARGET_RR
-    tp = float(round_price(pair, tp))
+    elif direction == "SELL" and sl <= entry:
 
-    final_risk = abs(entry - sl)
-    final_reward = abs(tp - entry)
-    rr = final_reward / final_risk if final_risk > 0 else 0.0
+        sl = (
+            entry
+            + effective_min_sl_distance
+        )
 
-    if rr < TARGET_RR:
-        tp = float(round_price(
-            pair,
-            entry + final_risk * 2.01
-            if direction == "BUY"
-            else entry - final_risk * 2.01
-        ))
-        final_reward = abs(tp - entry)
-        rr = final_reward / final_risk if final_risk > 0 else 0.0
+        sl_source = (
+            "ATR_FALLBACK_INVALID_STRUCTURE"
+        )
 
-    if rr < TARGET_RR:
-        raise ValueError(f"RR final insuffisant après arrondi (RR={rr:.3f})")
+    # ---------------------------------------------------------
+    # DISTANCE AVANT ARRONDI
+    # ---------------------------------------------------------
 
-    logger.debug(
-        f"[SLTP] {pair} | {direction} | ENTRY={entry:.5f} | "
-        f"SL={sl:.5f} | TP={tp:.5f} | RISK={final_risk:.5f} | "
-        f"ATR={atr:.5f} | SL_ATR={final_risk / atr:.2f} | "
-        f"RR={rr:.3f} | SOURCE={sl_source}"
+    risk_before_rounding = abs(
+        entry - sl
     )
 
-    return sl, tp, final_risk
+    if risk_before_rounding <= 0:
+        raise ValueError(
+            f"Risque nul {pair}"
+        )
+
+    # Le SL structurel trop large reste rejeté.
+    if risk_before_rounding > max_sl_distance:
+        raise ValueError(
+            f"SL structurel > "
+            f"{MAX_SL_ATR:.1f} ATR "
+            f"(risk={risk_before_rounding:.5f}, "
+            f"max={max_sl_distance:.5f})"
+        )
+
+    # ---------------------------------------------------------
+    # MINIMUM ADAPTATIF
+    # ---------------------------------------------------------
+
+    if risk_before_rounding < effective_min_sl_distance:
+
+        if direction == "BUY":
+
+            sl = (
+                entry
+                - effective_min_sl_distance
+            )
+
+        else:
+
+            sl = (
+                entry
+                + effective_min_sl_distance
+            )
+
+    # ---------------------------------------------------------
+    # ARRONDI
+    # ---------------------------------------------------------
+
+    sl = float(
+        round_price(
+            pair,
+            sl
+        )
+    )
+
+    # ---------------------------------------------------------
+    # SÉCURITÉ APRÈS ARRONDI
+    # ---------------------------------------------------------
+
+    if direction == "BUY" and sl >= entry:
+
+        sl = float(
+            round_price(
+                pair,
+                entry - effective_min_sl_distance
+            )
+        )
+
+    elif direction == "SELL" and sl <= entry:
+
+        sl = float(
+            round_price(
+                pair,
+                entry + effective_min_sl_distance
+            )
+        )
+
+    risk = abs(
+        entry - sl
+    )
+
+    if risk <= 0:
+        raise ValueError(
+            f"Risk nul après arrondi {pair}"
+        )
+
+    if risk > max_sl_distance:
+        raise ValueError(
+            f"SL après arrondi > "
+            f"{MAX_SL_ATR:.1f} ATR "
+            f"(risk={risk:.5f}, "
+            f"max={max_sl_distance:.5f})"
+        )
+
+    # ---------------------------------------------------------
+    # TP = 2R
+    # ---------------------------------------------------------
+
+    if direction == "BUY":
+
+        tp = (
+            entry
+            + risk * TARGET_RR
+        )
+
+    else:
+
+        tp = (
+            entry
+            - risk * TARGET_RR
+        )
+
+    tp = float(
+        round_price(
+            pair,
+            tp
+        )
+    )
+
+    # ---------------------------------------------------------
+    # RR FINAL
+    # ---------------------------------------------------------
+
+    final_risk = abs(
+        entry - sl
+    )
+
+    final_reward = abs(
+        tp - entry
+    )
+
+    if final_risk <= 0:
+        raise ValueError(
+            f"Risque final nul {pair}"
+        )
+
+    rr = (
+        final_reward / final_risk
+    )
+
+    # Garantie RR >= 2 après arrondi.
+    if rr < TARGET_RR:
+
+        if direction == "BUY":
+
+            tp = float(
+                round_price(
+                    pair,
+                    entry
+                    + final_risk * 2.01
+                )
+            )
+
+        else:
+
+            tp = float(
+                round_price(
+                    pair,
+                    entry
+                    - final_risk * 2.01
+                )
+            )
+
+        final_reward = abs(
+            tp - entry
+        )
+
+        rr = (
+            final_reward / final_risk
+        )
+
+    if rr < TARGET_RR:
+        raise ValueError(
+            f"RR final insuffisant après arrondi "
+            f"(RR={rr:.3f})"
+        )
+
+    # ---------------------------------------------------------
+    # LOG
+    # ---------------------------------------------------------
+
+    logger.info(
+        f"[SLTP] {pair} | "
+        f"{direction} | "
+        f"ENTRY={entry:.5f} | "
+        f"SL={sl:.5f} | "
+        f"TP={tp:.5f} | "
+        f"RISK={final_risk:.5f} | "
+        f"ATR={atr:.5f} | "
+        f"SL_ATR={final_risk / atr:.2f} | "
+        f"RR={rr:.3f} | "
+        f"MIN_SL={effective_min_sl_distance:.5f} | "
+        f"SOURCE={sl_source}"
+    )
+
+    return (
+        sl,
+        tp,
+        final_risk
+    )
 
 def has_enough_room_to_tp(
     df_h1: pd.DataFrame,
