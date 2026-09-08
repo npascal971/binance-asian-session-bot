@@ -1006,12 +1006,13 @@ def detect_wick_rejection(df: pd.DataFrame, bias: str) -> list:
     """
     Détecte uniquement les rejets de mèches récents et exploitables.
 
-    Contrairement à l'ancienne version :
-    - ne scanne pas toute l'historique
-    - regarde seulement les dernières bougies
+    Logique :
+    - ne scanne que les dernières bougies M15
     - exige une vraie mèche dominante
-    - exige une clôture située du bon côté
+    - exige une clôture du bon côté
     - conserve uniquement les niveaux proches du prix actuel
+    - le niveau d'entrée est basé sur la clôture de la bougie de rejet,
+      et non sur l'extrême de la mèche
     """
 
     poi = []
@@ -1022,7 +1023,9 @@ def detect_wick_rejection(df: pd.DataFrame, bias: str) -> list:
     try:
         data = df.copy()
 
-        # On regarde seulement les dernières bougies M15.
+        # ---------------------------------------------------------
+        # Dernières bougies M15 uniquement
+        # ---------------------------------------------------------
         recent = data.iloc[-8:].copy()
 
         atr = calculate_atr(data)
@@ -1030,14 +1033,20 @@ def detect_wick_rejection(df: pd.DataFrame, bias: str) -> list:
         if atr is None or atr <= 0:
             return poi
 
+        atr = float(atr)
+
+        # Prix actuel = dernière clôture disponible
         current_price = float(recent["close"].iloc[-1])
 
-        # Tolérance autour du niveau de rejet.
+        # Tolérance maximale autour du niveau de rejet
         max_distance = atr * 0.75
 
-        # On examine les 4 dernières bougies fermées.
-        # La dernière a le plus de poids.
-        for i in range(max(1, len(recent) - 4), len(recent)):
+        # ---------------------------------------------------------
+        # On examine seulement les 4 dernières bougies fermées
+        # ---------------------------------------------------------
+        start_idx = max(1, len(recent) - 4)
+
+        for i in range(start_idx, len(recent)):
 
             c = recent.iloc[i]
 
@@ -1051,23 +1060,40 @@ def detect_wick_rejection(df: pd.DataFrame, bias: str) -> list:
             if total <= 0:
                 continue
 
+            # Corps de la bougie
             body = abs(close_price - open_price)
 
-            # Pour éviter qu'une toute petite bougie soit considérée
-            # comme une grosse rejection.
-            effective_body = max(body, total * 0.05)
-
-            upper = high_price - max(open_price, close_price)
-            lower = min(open_price, close_price) - low_price
+            # Évite qu'une micro-bougie soit interprétée
+            # comme une énorme rejection.
+            effective_body = max(
+                body,
+                total * 0.05
+            )
 
             # -----------------------------------------------------
-            # BUY : forte mèche basse + clôture dans la partie
-            # supérieure de la bougie.
+            # Taille des mèches
             # -----------------------------------------------------
+            upper = high_price - max(
+                open_price,
+                close_price
+            )
+
+            lower = min(
+                open_price,
+                close_price
+            ) - low_price
+
+            # =====================================================
+            # BUY
+            # Forte mèche basse + clôture dans la partie haute
+            # =====================================================
             if bias == "BUY":
 
                 rejection_strength = lower / total
-                close_position = (close_price - low_price) / total
+
+                close_position = (
+                    close_price - low_price
+                ) / total
 
                 valid = (
                     rejection_strength >= 0.35
@@ -1076,29 +1102,41 @@ def detect_wick_rejection(df: pd.DataFrame, bias: str) -> list:
                     and close_position >= 0.55
                 )
 
-                if valid:
+                if not valid:
+                    continue
 
-                    level = low_price
-                    distance = abs(current_price - level)
+                # IMPORTANT :
+                # On ne prend PAS le bas de la mèche comme entrée.
+                # L'entrée correspond au niveau confirmé par la
+                # clôture de la bougie de rejet.
+                level = close_price
 
-                    if distance <= max_distance:
+                distance = abs(
+                    current_price - level
+                )
 
-                        poi.append({
-                            "direction": "BUY",
-                            "price_level": level,
-                            "time": recent.index[i],
-                            "rejection_strength": rejection_strength,
-                            "distance": distance,
-                        })
+                if distance > max_distance:
+                    continue
 
-            # -----------------------------------------------------
-            # SELL : forte mèche haute + clôture dans la partie
-            # inférieure de la bougie.
-            # -----------------------------------------------------
+                poi.append({
+                    "direction": "BUY",
+                    "price_level": level,
+                    "time": recent.index[i],
+                    "rejection_strength": rejection_strength,
+                    "distance": distance,
+                })
+
+            # =====================================================
+            # SELL
+            # Forte mèche haute + clôture dans la partie basse
+            # =====================================================
             elif bias == "SELL":
 
                 rejection_strength = upper / total
-                close_position = (high_price - close_price) / total
+
+                close_position = (
+                    high_price - close_price
+                ) / total
 
                 valid = (
                     rejection_strength >= 0.35
@@ -1107,22 +1145,35 @@ def detect_wick_rejection(df: pd.DataFrame, bias: str) -> list:
                     and close_position >= 0.55
                 )
 
-                if valid:
+                if not valid:
+                    continue
 
-                    level = high_price
-                    distance = abs(current_price - level)
+                # IMPORTANT :
+                # On ne prend PAS le haut de la mèche comme entrée.
+                # L'entrée correspond au niveau confirmé par la
+                # clôture de la bougie de rejet.
+                level = close_price
 
-                    if distance <= max_distance:
+                distance = abs(
+                    current_price - level
+                )
 
-                        poi.append({
-                            "direction": "SELL",
-                            "price_level": level,
-                            "time": recent.index[i],
-                            "rejection_strength": rejection_strength,
-                            "distance": distance,
-                        })
+                if distance > max_distance:
+                    continue
 
-        # Plus proche d'abord, puis plus récent
+                poi.append({
+                    "direction": "SELL",
+                    "price_level": level,
+                    "time": recent.index[i],
+                    "rejection_strength": rejection_strength,
+                    "distance": distance,
+                })
+
+        # ---------------------------------------------------------
+        # Priorité :
+        # 1. niveau le plus proche du prix
+        # 2. niveau le plus récent
+        # ---------------------------------------------------------
         poi.sort(
             key=lambda x: (
                 float(x.get("distance", 999999)),
@@ -1130,12 +1181,14 @@ def detect_wick_rejection(df: pd.DataFrame, bias: str) -> list:
             )
         )
 
+        # Maximum 4 rejets exploitables
         return poi[:4]
 
     except Exception as e:
-        logger.warning(f"[WICK] Erreur détection : {e}")
+        logger.warning(
+            f"[WICK] Erreur détection : {e}"
+        )
         return []
-
 def detect_bos(df: pd.DataFrame) -> dict:
     highs, lows = detect_swing_points(df, 5)
     if len(highs) < 1 or len(lows) < 1:
