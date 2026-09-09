@@ -298,93 +298,72 @@ def get_fx_rate_to_usd(currency: str) -> float:
             return 1.0
 
         # --------------------------------------------------------
-        # Paires directes : XXX_USD
+        # NOUVEAU : devises dont la seule paire valide chez OANDA
+        # est USD_XXX (la paire directe XXX_USD n'existe pas).
+        # Sans cette liste, on tentait systématiquement XXX_USD
+        # en premier pour TOUTES les devises -> échec garanti +
+        # log ERROR + appel API perdu pour JPY/CAD/CHF à chaque
+        # calcul de position.
         # --------------------------------------------------------
+        usd_quoted_only = {"JPY", "CAD", "CHF"}
+
         direct_pair = f"{currency}_USD"
-
-        try:
-            api = v88_client()
-
-            r = pricing.PricingInfo(
-                accountID=OANDA_ACCOUNT_ID,
-                params={"instruments": direct_pair}
-            )
-
-            api.request(r)
-
-            prices = r.response.get("prices", [])
-
-            if prices:
-                item = prices[0]
-
-                bid = float(
-                    item.get("bids", [{}])[0].get("price", 0)
-                )
-
-                ask = float(
-                    item.get("asks", [{}])[0].get("price", 0)
-                )
-
-                if bid > 0 and ask > 0:
-                    rate = (bid + ask) / 2.0
-
-                    if rate > 0:
-                        logger.debug(
-                            f"[FX] {currency}->USD via {direct_pair} = {rate:.8f}"
-                        )
-
-                        return rate
-
-        except Exception as e:
-            logger.debug(
-                f"[FX] Paire directe {direct_pair} indisponible: {e}"
-            )
-
-        # --------------------------------------------------------
-        # Paires inverses : USD_XXX
-        # --------------------------------------------------------
         inverse_pair = f"USD_{currency}"
 
-        try:
-            api = v88_client()
+        pair_attempts = (
+            [inverse_pair, direct_pair]
+            if currency in usd_quoted_only
+            else [direct_pair, inverse_pair]
+        )
 
-            r = pricing.PricingInfo(
-                accountID=OANDA_ACCOUNT_ID,
-                params={"instruments": inverse_pair}
-            )
+        for attempt_pair in pair_attempts:
 
-            api.request(r)
+            is_inverse = (attempt_pair == inverse_pair)
 
-            prices = r.response.get("prices", [])
+            try:
+                api = v88_client()
 
-            if prices:
-                item = prices[0]
-
-                bid = float(
-                    item.get("bids", [{}])[0].get("price", 0)
+                r = pricing.PricingInfo(
+                    accountID=OANDA_ACCOUNT_ID,
+                    params={"instruments": attempt_pair}
                 )
 
-                ask = float(
-                    item.get("asks", [{}])[0].get("price", 0)
+                api.request(r)
+
+                prices = r.response.get("prices", [])
+
+                if prices:
+                    item = prices[0]
+
+                    bid = float(
+                        item.get("bids", [{}])[0].get("price", 0)
+                    )
+
+                    ask = float(
+                        item.get("asks", [{}])[0].get("price", 0)
+                    )
+
+                    if bid > 0 and ask > 0:
+                        raw_rate = (bid + ask) / 2.0
+
+                        if raw_rate > 0:
+                            rate = (
+                                1.0 / raw_rate
+                                if is_inverse
+                                else raw_rate
+                            )
+
+                            logger.debug(
+                                f"[FX] {currency}->USD via "
+                                f"{attempt_pair} = {rate:.8f}"
+                            )
+
+                            return rate
+
+            except Exception as e:
+                logger.debug(
+                    f"[FX] Paire {attempt_pair} indisponible: {e}"
                 )
-
-                if bid > 0 and ask > 0:
-                    rate_usd_currency = (bid + ask) / 2.0
-
-                    if rate_usd_currency > 0:
-                        rate = 1.0 / rate_usd_currency
-
-                        logger.debug(
-                            f"[FX] {currency}->USD via inverse "
-                            f"{inverse_pair} = {rate:.8f}"
-                        )
-
-                        return rate
-
-        except Exception as e:
-            logger.debug(
-                f"[FX] Paire inverse {inverse_pair} indisponible: {e}"
-            )
 
         logger.error(
             f"[FX] Impossible de convertir {currency}->USD"
@@ -2347,6 +2326,55 @@ def get_confirmation_signal(
                     f"close={close_position:.2f})"
                 )
 
+            # -----------------------------------------------------
+            # NOUVEAU : continuation par paliers.
+            #
+            # Un marché qui monte par petites bougies régulières
+            # (plus haut + plus bas croissants sur 3 bougies) ne
+            # déclenche jamais ni le rejet net, ni le micro-break
+            # (qui ne regarde que la bougie précédente). On rate
+            # alors des continuations réelles pendant des heures,
+            # jusqu'à ce que le prix se soit trop éloigné du setup.
+            # -----------------------------------------------------
+            if len(df_m15) >= 4:
+
+                c0 = df_m15.iloc[-4]
+                c1 = df_m15.iloc[-3]
+                c2 = df_m15.iloc[-2]
+                c3 = last
+
+                higher_highs = (
+                    float(c1["high"]) > float(c0["high"])
+                    and float(c2["high"]) > float(c1["high"])
+                    and float(c3["high"]) > float(c2["high"])
+                )
+
+                higher_lows = (
+                    float(c1["low"]) > float(c0["low"])
+                    and float(c2["low"]) > float(c1["low"])
+                    and float(c3["low"]) > float(c2["low"])
+                )
+
+                avg_range = float(
+                    (df_m15["high"] - df_m15["low"]).tail(10).mean()
+                )
+
+                net_move = close_price - float(c0["close"])
+
+                if (
+                    higher_highs
+                    and higher_lows
+                    and avg_range > 0
+                    and net_move >= avg_range * 0.5
+                    and close_price >= open_price
+                ):
+                    return True, (
+                        f"continuation par paliers OK "
+                        f"(HH/HL sur 3 bougies, "
+                        f"net={net_move:.5f}, "
+                        f"avg_range={avg_range:.5f})"
+                    )
+
             reasons = []
 
             if not bullish_rejection:
@@ -2423,6 +2451,48 @@ def get_confirmation_signal(
                     f"(rejet={upper_ratio:.2f}, "
                     f"close={close_position:.2f})"
                 )
+
+            # -----------------------------------------------------
+            # NOUVEAU : continuation par paliers (symétrique du BUY)
+            # -----------------------------------------------------
+            if len(df_m15) >= 4:
+
+                c0 = df_m15.iloc[-4]
+                c1 = df_m15.iloc[-3]
+                c2 = df_m15.iloc[-2]
+                c3 = last
+
+                lower_highs = (
+                    float(c1["high"]) < float(c0["high"])
+                    and float(c2["high"]) < float(c1["high"])
+                    and float(c3["high"]) < float(c2["high"])
+                )
+
+                lower_lows = (
+                    float(c1["low"]) < float(c0["low"])
+                    and float(c2["low"]) < float(c1["low"])
+                    and float(c3["low"]) < float(c2["low"])
+                )
+
+                avg_range = float(
+                    (df_m15["high"] - df_m15["low"]).tail(10).mean()
+                )
+
+                net_move = float(c0["close"]) - close_price
+
+                if (
+                    lower_highs
+                    and lower_lows
+                    and avg_range > 0
+                    and net_move >= avg_range * 0.5
+                    and close_price <= open_price
+                ):
+                    return True, (
+                        f"continuation par paliers OK "
+                        f"(LH/LL sur 3 bougies, "
+                        f"net={net_move:.5f}, "
+                        f"avg_range={avg_range:.5f})"
+                    )
 
             reasons = []
 
@@ -5118,8 +5188,14 @@ def advanced_main():
                     setup_type
                 )
             else:
-                logger.error(
-                    f"❌ {pair} échec exécution"
+                # Pas une erreur : execute_trade() a déjà loggé
+                # la raison précise (cooldown, écart d'entrée,
+                # RR insuffisant, marge, etc.) au bon niveau
+                # juste au-dessus. Un ERROR ici polluait les logs
+                # de fausses alertes sur des rejets tout à fait
+                # normaux.
+                logger.info(
+                    f"⏭️ {pair} aucun trade exécuté ce cycle"
                 )
 
         except Exception as e:
