@@ -60,6 +60,15 @@ EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
 # --- NOUVEAU : marge de sécurité pour le slippage ---
 RR_MIN_EXECUTION = 2.0   # exigé avant ordre, pour absorber le slippage normal
 
+# --- NOUVEAU : filtres qualité (win rate) ---
+# Ces filtres utilisent des métriques déjà calculées (ADX, RSI) mais qui
+# n'étaient jusqu'ici jamais utilisées pour rejeter un setup.
+ENABLE_QUALITY_FILTERS = True   # coupe-circuit global, pour A/B tester facilement
+MIN_ADX_TREND = 20.0            # ADX H1 minimum : sous ce seuil, marché sans tendance -> setups de continuation peu fiables
+RSI_OVERBOUGHT = 78.0           # RSI M15 : au-dessus, on n'ouvre plus de BUY (mouvement déjà très étiré)
+RSI_OVERSOLD = 22.0             # RSI M15 : en-dessous, on n'ouvre plus de SELL
+STRICT_BIAS_ALIGNMENT = False   # True = exige HH+HL (ou LH+LL) complet en H4, rejette les biais "_WEAK" partiels
+
 PIP_SIZE_V88 = {
     "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
     "USD_CAD": 0.0001, "AUD_CAD": 0.0001,
@@ -1363,6 +1372,17 @@ def get_directional_bias(
 
     h4_struct = structure_htf(df_h4)
     h1_struct = structure_htf(df_h1)
+
+    # =========================================================
+    # MODE STRICT (optionnel) : on exige une structure H4
+    # complète (HH+HL ou LH+LL), pas seulement partielle.
+    # =========================================================
+    if STRICT_BIAS_ALIGNMENT and h4_struct in ("BUY_WEAK", "SELL_WEAK"):
+        logger.info(
+            f"[BIAS_DIAG] H4={h4_struct} | H1={h1_struct} | "
+            f"rejeté par STRICT_BIAS_ALIGNMENT -> NEUTRAL"
+        )
+        return "NEUTRAL"
 
     # =========================================================
     # H4 HAUSSIER = BIAIS BUY
@@ -3288,6 +3308,61 @@ def evaluate_setup(
             }
 
     # =========================================================
+    # FILTRES QUALITÉ (WIN RATE)
+    #
+    # ADX H1 : un setup de continuation (retest dans le sens
+    # du biais H4) a besoin d'une tendance H1 réelle. Sous le
+    # seuil, le marché est en range et ces setups échouent
+    # nettement plus souvent (faux retests).
+    #
+    # RSI M15 : on évite d'ouvrir un BUY quand le mouvement est
+    # déjà extrêmement étiré à la hausse (et inversement pour
+    # SELL), ce qui augmente le risque de retournement avant
+    # d'atteindre le TP à 2R.
+    # =========================================================
+    if ENABLE_QUALITY_FILTERS:
+
+        try:
+            adx_h1 = float(calculate_adx(df_h1))
+        except Exception:
+            adx_h1 = 0.0
+
+        if adx_h1 < MIN_ADX_TREND:
+            return {
+                "passed": False,
+                "reason": (
+                    f"ADX H1 trop faible "
+                    f"({adx_h1:.1f} < {MIN_ADX_TREND}) "
+                    f"-> marché sans tendance"
+                )
+            }
+
+        try:
+            rsi_m15 = float(get_last_rsi(df_m15["close"]))
+        except Exception:
+            rsi_m15 = 50.0
+
+        if direction == "BUY" and rsi_m15 > RSI_OVERBOUGHT:
+            return {
+                "passed": False,
+                "reason": (
+                    f"RSI M15 suracheté "
+                    f"({rsi_m15:.1f} > {RSI_OVERBOUGHT}) "
+                    f"-> mouvement trop étiré pour un BUY"
+                )
+            }
+
+        if direction == "SELL" and rsi_m15 < RSI_OVERSOLD:
+            return {
+                "passed": False,
+                "reason": (
+                    f"RSI M15 survendu "
+                    f"({rsi_m15:.1f} < {RSI_OVERSOLD}) "
+                    f"-> mouvement trop étiré pour un SELL"
+                )
+            }
+
+    # =========================================================
     # EXECUTION ENTRY
     #
     # C'est le prix courant M15 utilisé comme base
@@ -3413,13 +3488,17 @@ def evaluate_setup(
 
     # =========================================================
     # MÉTRIQUES
+    #
+    # NOTE CORRECTIF : get_last_rsi() attend une pd.Series de
+    # clôtures, pas un DataFrame. L'appel get_last_rsi(df_m15)
+    # levait systématiquement une exception (dimensions
+    # invalides pour talib), avalée par le except ci-dessous,
+    # ce qui figeait "rsi" à 50.0 en permanence. On réutilise
+    # ici les valeurs déjà calculées par le filtre qualité
+    # quand celui-ci est actif, sinon on les recalcule.
     # =========================================================
     try:
-        adx = float(
-            calculate_adx(
-                df_h1
-            )
-        )
+        adx = float(adx_h1) if ENABLE_QUALITY_FILTERS else float(calculate_adx(df_h1))
     except Exception:
         adx = 0.0
 
@@ -3433,11 +3512,7 @@ def evaluate_setup(
         momentum = 0.0
 
     try:
-        rsi = float(
-            get_last_rsi(
-                df_m15
-            )
-        )
+        rsi = float(rsi_m15) if ENABLE_QUALITY_FILTERS else float(get_last_rsi(df_m15["close"]))
     except Exception:
         rsi = 50.0
 
