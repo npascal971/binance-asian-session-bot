@@ -3725,8 +3725,8 @@ def execute_trade(
 
     global last_execution_attempt
 
-    pair = pair.upper()
-    direction = direction.upper()
+    pair = str(pair).upper().strip()
+    direction = str(direction).upper().strip()
 
     # ========================================================
     # 1. COOLDOWN
@@ -3746,13 +3746,16 @@ def execute_trade(
     last_execution_attempt[pair] = now
 
     # ========================================================
-    # 2. PARAMÈTRES
+    # 2. PARAMÈTRES INITIAUX
     # ========================================================
     expected_entry = float(entry_price)
     sl = float(stop_loss)
     tp = float(take_profit)
 
-    # Niveau réel du setup pour le contrôle d'entrée
+    metrics = dict(metrics or {})
+
+    # Niveau structurel réel du setup.
+    # Il sert uniquement au contrôle de distance d'entrée.
     setup_level = float(
         metrics.get(
             "setup_level",
@@ -3761,14 +3764,10 @@ def execute_trade(
     )
 
     # ========================================================
-    # 3. RISQUE / RR
+    # 3. CONTRÔLE INITIAL DU RISQUE / RR
     # ========================================================
     risk = abs(
         expected_entry - sl
-    )
-
-    reward = abs(
-        tp - expected_entry
     )
 
     if risk <= 0:
@@ -3777,27 +3776,41 @@ def execute_trade(
         )
         return None
 
-    rr = reward / risk
+    reward = abs(
+        tp - expected_entry
+    )
 
-    if rr < RR_MIN_EXECUTION:
+    rr = (
+        reward / risk
+        if risk > 0
+        else 0.0
+    )
+
+    if rr < RR_MIN_EXECUTION - 0.001:
         logger.warning(
             f"[ORDER] {pair} | "
-            f"RR={rr:.2f} < {RR_MIN_EXECUTION} → rejet"
+            f"RR={rr:.3f} < "
+            f"{RR_MIN_EXECUTION} "
+            f"avant exécution → rejet"
         )
         return None
 
     # ========================================================
-    # 4. VÉRIFICATIONS
+    # 4. VÉRIFICATIONS GÉNÉRALES
     # ========================================================
-    if ONE_TRADE_PER_PAIR and has_open_trade(pair):
-
+    if (
+        ONE_TRADE_PER_PAIR
+        and has_open_trade(pair)
+    ):
         logger.info(
             f"[ORDER] {pair}: trade déjà ouvert"
         )
         return None
 
-    if open_trade_count() >= MAX_TRADES_TOTAL:
-
+    if (
+        open_trade_count()
+        >= MAX_TRADES_TOTAL
+    ):
         logger.info(
             f"[ORDER] Limite trades atteinte "
             f"({MAX_TRADES_TOTAL})"
@@ -3805,23 +3818,34 @@ def execute_trade(
         return None
 
     if is_maintenance_suspended():
-
         logger.warning(
-            f"[ORDER] {pair} | OANDA maintenance"
+            f"[ORDER] {pair} | "
+            f"OANDA maintenance"
         )
         return None
 
     # ========================================================
-    # 5. PRIX MARCHÉ RÉEL
+    # 5. RÉCUPÉRATION DU PRIX MARCHÉ
+    #
+    # BUY  = ASK
+    # SELL = BID
     # ========================================================
-    pricing_data = get_price_spread(pair)
+    pricing_data = get_price_spread(
+        pair
+    )
 
     bid = float(
-        pricing_data.get("bid", 0) or 0
+        pricing_data.get(
+            "bid",
+            0
+        ) or 0
     )
 
     ask = float(
-        pricing_data.get("ask", 0) or 0
+        pricing_data.get(
+            "ask",
+            0
+        ) or 0
     )
 
     if direction == "BUY":
@@ -3830,55 +3854,76 @@ def execute_trade(
             ask
             if ask > 0
             else float(
-                pricing_data.get("mid", 0) or 0
+                pricing_data.get(
+                    "mid",
+                    0
+                ) or 0
             )
         )
 
-    else:
+    elif direction == "SELL":
 
         market_entry = (
             bid
             if bid > 0
             else float(
-                pricing_data.get("mid", 0) or 0
+                pricing_data.get(
+                    "mid",
+                    0
+                ) or 0
             )
         )
 
-    if market_entry <= 0:
+    else:
 
+        logger.error(
+            f"[ORDER] {pair} | "
+            f"Direction invalide: {direction}"
+        )
+        return None
+
+    if market_entry <= 0:
         logger.warning(
             f"[ORDER] {pair} | "
             f"Prix marché indisponible → rejet"
         )
         return None
 
-    pip = get_pip_value(pair)
+    pip = float(
+        get_pip_value(pair)
+    )
+
+    if pip <= 0:
+        logger.error(
+            f"[ORDER] {pair} | "
+            f"Valeur pip invalide"
+        )
+        return None
 
     # ========================================================
-    # 6. CONTRÔLE DISTANCE SETUP → MARCHÉ
+    # 6. CONTRÔLE DISTANCE SETUP -> MARCHÉ
     #
-    # IMPORTANT :
-    # Ce contrôle porte sur le niveau du setup.
-    # Il ne porte plus sur expected_entry.
+    # On compare le marché au setup structurel,
+    # PAS à l'ancien prix d'évaluation.
     # ========================================================
     if pair == "XAU_USD":
 
         max_entry_deviation = max(
-            pip * 20,
+            pip * 20.0,
             setup_level * 0.00005
         )
 
     elif "JPY" in pair:
 
         max_entry_deviation = max(
-            pip * 5,
+            pip * 5.0,
             setup_level * 0.00003
         )
 
     else:
 
         max_entry_deviation = max(
-            pip * 5,
+            pip * 5.0,
             setup_level * 0.00003
         )
 
@@ -3887,7 +3932,8 @@ def execute_trade(
     )
 
     logger.info(
-        f"[ENTRY_CHECK] {pair} | {direction} | "
+        f"[ENTRY_CHECK] {pair} | "
+        f"{direction} | "
         f"SETUP={setup_level:.5f} | "
         f"EXEC_EXPECTED={expected_entry:.5f} | "
         f"MARKET={market_entry:.5f} | "
@@ -3895,8 +3941,16 @@ def execute_trade(
         f"MAX={max_entry_deviation:.5f}"
     )
 
-    if setup_deviation > max_entry_deviation:
+    # Très petite tolérance technique pour éviter
+    # qu'un flottant provoque un rejet à la frontière.
+    deviation_eps = (
+        pip * 0.05
+    )
 
+    if (
+        setup_deviation
+        > max_entry_deviation + deviation_eps
+    ):
         logger.warning(
             f"[ENTRY_REJECT] {pair} | "
             f"marché trop éloigné du setup | "
@@ -3905,56 +3959,126 @@ def execute_trade(
             f"écart={setup_deviation:.5f} > "
             f"max={max_entry_deviation:.5f}"
         )
-
         return None
 
     # ========================================================
-    # 7. LE PRIX D'ORDRE DOIT ÊTRE LE PRIX MARCHÉ CAPTURÉ
+    # 7. PRIX D'ORDRE = PRIX MARCHÉ CAPTURÉ
     # ========================================================
-    expected_entry = market_entry
+    expected_entry = float(
+        market_entry
+    )
 
-    # Recalcul du RR avec le vrai prix d'ordre
+    # ========================================================
+    # 8. RECALCUL DU RISQUE LIVE
+    #
+    # Le SL reste structurel.
+    # Le prix d'entrée devient le prix ASK/BID réel.
+    # ========================================================
     risk = abs(
         expected_entry - sl
     )
 
+    if risk <= 0:
+        logger.error(
+            f"[ORDER] {pair} | "
+            f"Risque nul après refresh prix"
+        )
+        return None
+
+    # ========================================================
+    # 9. TP LIVE = EXACTEMENT 2R
+    #
+    # IMPORTANT :
+    # On ne conserve PAS l'ancien TP calculé avant
+    # le refresh du prix.
+    # ========================================================
+    if direction == "BUY":
+
+        tp = (
+            expected_entry
+            + risk * RR_MIN_EXECUTION
+        )
+
+    else:
+
+        tp = (
+            expected_entry
+            - risk * RR_MIN_EXECUTION
+        )
+
+    tp = float(
+        round_price(
+            pair,
+            tp
+        )
+    )
+
+    # ========================================================
+    # 10. RR APRÈS ARRONDI
+    # ========================================================
     reward = abs(
         tp - expected_entry
     )
 
-    if risk <= 0:
-        logger.error(
-            f"[ORDER] {pair} | Risque nul après refresh"
-        )
-        return None
+    rr = (
+        reward / risk
+        if risk > 0
+        else 0.0
+    )
 
-    rr = reward / risk
-
+    # L'arrondi peut exceptionnellement faire passer
+    # le RR légèrement sous 2.0.
+    # On pousse alors très légèrement le TP.
     if rr < RR_MIN_EXECUTION:
+
+        if direction == "BUY":
+
+            tp = float(
+                round_price(
+                    pair,
+                    expected_entry
+                    + risk * 2.01
+                )
+            )
+
+        else:
+
+            tp = float(
+                round_price(
+                    pair,
+                    expected_entry
+                    - risk * 2.01
+                )
+            )
+
+        reward = abs(
+            tp - expected_entry
+        )
+
+        rr = (
+            reward / risk
+            if risk > 0
+            else 0.0
+        )
+
+    if rr < RR_MIN_EXECUTION - 0.001:
 
         logger.warning(
             f"[ORDER] {pair} | "
-            f"RR={rr:.2f} < {RR_MIN_EXECUTION} "
-            f"après refresh prix → rejet"
-        )
-
-        return None
-
-    # ========================================================
-    # 8. BALANCE / RISQUE
-    # ========================================================
-    balance = get_balance()
-
-    if balance <= 0:
-
-        logger.error(
-            f"[ORDER] {pair} | Balance invalide"
+            f"RR={rr:.3f} < "
+            f"{RR_MIN_EXECUTION} "
+            f"après recalcul live → rejet"
         )
         return None
 
-    # Minimum SL adaptatif
+    # ========================================================
+    # 11. MINIMUM SL ADAPTATIF
+    # ========================================================
     atr_pips = float(
-        metrics.get("atr", 0.0) or 0.0
+        metrics.get(
+            "atr",
+            0.0
+        ) or 0.0
     )
 
     effective_min_sl_pips = min(
@@ -3966,12 +4090,19 @@ def execute_trade(
 
     risk_pips = (
         risk / pip
-        if pip > 0
-        else 0.0
     )
 
-    if risk_pips < effective_min_sl_pips:
+    eps_pips = max(
+        0.05,
+        atr_pips * 0.001
+        if atr_pips > 0
+        else 0.05
+    )
 
+    if (
+        risk_pips
+        < effective_min_sl_pips - eps_pips
+    ):
         logger.warning(
             f"[ORDER] {pair} | "
             f"SL trop proche "
@@ -3979,11 +4110,22 @@ def execute_trade(
             f"{effective_min_sl_pips:.2f} pips) "
             f"→ rejet"
         )
-
         return None
 
     # ========================================================
-    # 9. RISK PERCENTAGE
+    # 12. BALANCE
+    # ========================================================
+    balance = get_balance()
+
+    if balance <= 0:
+        logger.error(
+            f"[ORDER] {pair} | "
+            f"Balance invalide"
+        )
+        return None
+
+    # ========================================================
+    # 13. RISK PERCENTAGE
     # ========================================================
     hour = datetime.utcnow().hour
 
@@ -3998,6 +4140,9 @@ def execute_trade(
         else RISK_PERCENTAGE
     )
 
+    # ========================================================
+    # 14. CALCUL UNITÉS
+    # ========================================================
     units = calculate_units(
         pair,
         expected_entry,
@@ -4007,7 +4152,6 @@ def execute_trade(
     )
 
     if units <= 0:
-
         logger.error(
             f"[ORDER] {pair} | "
             f"Units invalides: {units}"
@@ -4015,7 +4159,7 @@ def execute_trade(
         return None
 
     # ========================================================
-    # 10. MARGE
+    # 15. VÉRIFICATION MARGE
     # ========================================================
     margin_info = calculate_margin(
         pair,
@@ -4033,7 +4177,6 @@ def execute_trade(
         )
 
         if units <= 0:
-
             logger.error(
                 f"[RISK] {pair} | "
                 f"Marge insuffisante"
@@ -4041,7 +4184,38 @@ def execute_trade(
             return None
 
     # ========================================================
-    # 11. MARKET ORDER
+    # 16. RECHECK FINAL DES PARAMÈTRES
+    #
+    # Sécurité avant envoi OANDA.
+    # ========================================================
+    final_risk = abs(
+        expected_entry - sl
+    )
+
+    final_reward = abs(
+        tp - expected_entry
+    )
+
+    final_rr = (
+        final_reward / final_risk
+        if final_risk > 0
+        else 0.0
+    )
+
+    if (
+        final_risk <= 0
+        or final_rr < RR_MIN_EXECUTION - 0.001
+    ):
+        logger.warning(
+            f"[ORDER] {pair} | "
+            f"Validation finale échouée | "
+            f"risk={final_risk:.5f} | "
+            f"RR={final_rr:.3f}"
+        )
+        return None
+
+    # ========================================================
+    # 17. MARKET ORDER
     # ========================================================
     signed_units = (
         units
@@ -4083,19 +4257,19 @@ def execute_trade(
         f"ENTRY={expected_entry:.5f} | "
         f"SL={sl:.5f} | "
         f"TP={tp:.5f} | "
-        f"RR={rr:.2f} | "
+        f"RISK={final_risk:.5f} | "
+        f"RR={final_rr:.3f} | "
         f"UNITS={units}"
     )
 
     if not EXECUTE_TRADES:
-
         logger.info(
             "[ORDER] EXECUTE_TRADES=false"
         )
         return "SIMULATION"
 
     # ========================================================
-    # 12. ENVOI OANDA
+    # 18. ENVOI OANDA
     # ========================================================
     try:
 
@@ -4110,13 +4284,13 @@ def execute_trade(
 
         resp = r.response
 
-        if resp.get("orderRejectTransaction"):
+        if resp.get(
+            "orderRejectTransaction"
+        ):
 
-            reject = (
-                resp[
-                    "orderRejectTransaction"
-                ]
-            )
+            reject = resp[
+                "orderRejectTransaction"
+            ]
 
             logger.error(
                 f"[ORDER] REJECT {pair}: "
@@ -4126,7 +4300,7 @@ def execute_trade(
             return None
 
         # ====================================================
-        # FILL
+        # 19. RÉCUPÉRATION DU FILL
         # ====================================================
         fill = resp.get(
             "orderFillTransaction",
@@ -4136,25 +4310,34 @@ def execute_trade(
         trade_id = None
         actual_entry = None
 
-        if fill.get("tradeOpened"):
+        if fill.get(
+            "tradeOpened"
+        ):
 
             trade_id = (
                 fill[
                     "tradeOpened"
-                ].get("tradeID")
+                ].get(
+                    "tradeID"
+                )
             )
 
-        if fill.get("price") is not None:
+        if fill.get(
+            "price"
+        ) is not None:
 
             try:
+
                 actual_entry = float(
                     fill["price"]
                 )
+
             except Exception:
+
                 actual_entry = None
 
         # ====================================================
-        # FALLBACK TRADE
+        # 20. FALLBACK TRADE OUVERT
         # ====================================================
         if not trade_id:
 
@@ -4168,12 +4351,21 @@ def execute_trade(
 
             for t in open_trades:
 
-                if t.get("instrument") != pair:
+                if (
+                    t.get("instrument")
+                    != pair
+                ):
                     continue
 
                 current_units = float(
-                    t.get("currentUnits", 0)
+                    t.get(
+                        "currentUnits",
+                        0
+                    )
                 )
+
+                if current_units == 0:
+                    continue
 
                 t_direction = (
                     "BUY"
@@ -4181,11 +4373,17 @@ def execute_trade(
                     else "SELL"
                 )
 
-                if t_direction != direction:
+                if (
+                    t_direction
+                    != direction
+                ):
                     continue
 
                 t_entry = float(
-                    t.get("price", 0)
+                    t.get(
+                        "price",
+                        0
+                    )
                 )
 
                 if t_entry <= 0:
@@ -4212,12 +4410,19 @@ def execute_trade(
                 )
 
                 trade_id = (
-                    best_trade.get("id")
+                    best_trade.get(
+                        "id"
+                    )
                 )
 
-                actual_entry = float(
-                    best_trade.get("price")
-                )
+                try:
+                    actual_entry = float(
+                        best_trade.get(
+                            "price"
+                        )
+                    )
+                except Exception:
+                    actual_entry = None
 
         if not trade_id:
 
@@ -4229,7 +4434,7 @@ def execute_trade(
             return None
 
         # ====================================================
-        # FALLBACK PRIX FILL
+        # 21. FALLBACK PRIX FILL
         # ====================================================
         if actual_entry is None:
 
@@ -4237,7 +4442,7 @@ def execute_trade(
 
                 trade_details = (
                     get_trade_details(
-                        trade_id
+                        str(trade_id)
                     )
                 )
 
@@ -4261,8 +4466,12 @@ def execute_trade(
         if actual_entry is None:
             actual_entry = expected_entry
 
+        actual_entry = float(
+            actual_entry
+        )
+
         # ====================================================
-        # RR RÉEL APRÈS FILL
+        # 22. RR RÉEL APRÈS FILL
         # ====================================================
         fill_deviation = abs(
             actual_entry
@@ -4270,22 +4479,26 @@ def execute_trade(
         )
 
         risk_real = abs(
-            actual_entry - sl
+            actual_entry
+            - sl
         )
 
         reward_real = abs(
-            tp - actual_entry
+            tp
+            - actual_entry
         )
 
         rr_real = (
             reward_real / risk_real
             if risk_real > 0
-            else 0
+            else 0.0
         )
 
         slippage_pips = (
-            (actual_entry - expected_entry)
-            / pip
+            (
+                actual_entry
+                - expected_entry
+            ) / pip
             if pip > 0
             else 0.0
         )
@@ -4296,17 +4509,20 @@ def execute_trade(
             f"ENTRY_EXPECTED={expected_entry:.5f} | "
             f"ENTRY_FILLED={actual_entry:.5f} | "
             f"SLIPPAGE={slippage_pips:+.2f} pips | "
-            f"RR_REAL={rr_real:.2f}"
+            f"RR_REAL={rr_real:.3f}"
         )
 
         # ====================================================
-        # PROTECTION RR
+        # 23. PROTECTION RR APRÈS FILL
         # ====================================================
-        if rr_real < RR_MIN_EXECUTION:
+        if (
+            rr_real
+            < RR_MIN_EXECUTION - 0.001
+        ):
 
             logger.error(
                 f"[ORDER_ABORT] {pair} | "
-                f"RR réel {rr_real:.2f} < "
+                f"RR réel {rr_real:.3f} < "
                 f"{RR_MIN_EXECUTION}"
             )
 
@@ -4348,9 +4564,12 @@ def execute_trade(
             return None
 
         # ====================================================
-        # LOG SLIPPAGE
+        # 24. LOG SLIPPAGE
         # ====================================================
-        if fill_deviation > max_entry_deviation:
+        if (
+            fill_deviation
+            > max_entry_deviation
+        ):
 
             logger.warning(
                 f"[SLIPPAGE] {pair} | "
@@ -4360,7 +4579,7 @@ def execute_trade(
             )
 
         # ====================================================
-        # ENREGISTREMENT
+        # 25. ENREGISTREMENT TRADE
         # ====================================================
         trade_tracker.add_trade(
             trade_id,
@@ -4394,22 +4613,24 @@ def execute_trade(
             f"ENTRY={actual_entry:.5f} | "
             f"SL={sl:.5f} | "
             f"TP={tp:.5f} | "
-            f"RR={rr_real:.2f}"
+            f"RR={rr_real:.3f}"
         )
 
-        return str(trade_id)
+        return str(
+            trade_id
+        )
 
     except Exception as e:
 
         logger.error(
-            f"[ORDER] Erreur {pair}: {e}"
+            f"[ORDER] Erreur {pair}: {e}",
+            exc_info=True
         )
 
         if is_oanda_maintenance(e):
             handle_api_error(e)
 
         return None
-
 # ============================================================
 # GESTION DES POSITIONS (BE / TRAILING)
 # ============================================================
