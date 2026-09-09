@@ -3179,12 +3179,15 @@ def evaluate_setup(
 
     elif setup_type == "WICK_REJECTION":
 
-        rejection_strength = float(
-            entry.get(
-                "rejection_strength",
-                0.0
+        try:
+            rejection_strength = float(
+                entry.get(
+                    "rejection_strength",
+                    0.0
+                )
             )
-        )
+        except Exception:
+            rejection_strength = 0.0
 
         if rejection_strength < 0.35:
             return {
@@ -3210,13 +3213,23 @@ def evaluate_setup(
         }
 
     else:
-
-        confirmation_ok, confirmation_msg = (
-            get_confirmation_signal(
-                df_m15,
-                direction
+        # =====================================================
+        # FVG : confirmation locale
+        # =====================================================
+        try:
+            confirmation_ok, confirmation_msg = (
+                get_confirmation_signal(
+                    df_m15,
+                    direction
+                )
             )
-        )
+        except Exception as e:
+            return {
+                "passed": False,
+                "reason": (
+                    f"erreur confirmation FVG: {e}"
+                )
+            }
 
         confirmation = {
             "ok": bool(confirmation_ok),
@@ -3276,6 +3289,9 @@ def evaluate_setup(
 
     # =========================================================
     # EXECUTION ENTRY
+    #
+    # C'est le prix courant M15 utilisé comme base
+    # pour calculer SL / TP.
     # =========================================================
     execution_entry = float(
         current_price
@@ -3283,9 +3299,6 @@ def evaluate_setup(
 
     # =========================================================
     # SL / TP STRUCTURELS
-    # IMPORTANT :
-    # Le SL/TP sont calculés sur le prix réellement
-    # utilisable comme base d'exécution.
     # =========================================================
     try:
         sl, tp, risk = (
@@ -3303,7 +3316,7 @@ def evaluate_setup(
         }
 
     # =========================================================
-    # EPS / MIN SL
+    # MIN SL ADAPTATIF
     # =========================================================
     max_sl_distance = (
         atr_price * 2.0
@@ -3314,6 +3327,8 @@ def evaluate_setup(
         max_sl_distance
     )
 
+    # Tolérance uniquement pour les comparaisons
+    # flottantes / arrondis.
     EPS = max(
         pip * 0.05,
         atr_price * 0.001
@@ -3337,17 +3352,17 @@ def evaluate_setup(
         }
 
     # =========================================================
-    # RR
+    # RR STRICT
     # =========================================================
-    reward = abs(
-        tp - execution_entry
-    )
-
     if risk <= 0:
         return {
             "passed": False,
             "reason": "risque nul"
         }
+
+    reward = abs(
+        tp - execution_entry
+    )
 
     rr = (
         reward / risk
@@ -3364,17 +3379,22 @@ def evaluate_setup(
 
     # =========================================================
     # ROOM H1
+    #
+    # IMPORTANT :
+    # has_enough_room_to_tp() retourne un BOOL,
+    # pas (bool, message).
     # =========================================================
     try:
-        room_ok, room_msg = (
-            has_enough_room_to_tp(
-                df_h1,
-                direction,
-                execution_entry,
-                tp
-            )
+
+        room_ok = has_enough_room_to_tp(
+            df_h1,
+            direction,
+            execution_entry,
+            tp
         )
+
     except Exception as e:
+
         return {
             "passed": False,
             "reason": (
@@ -3386,8 +3406,8 @@ def evaluate_setup(
         return {
             "passed": False,
             "reason": (
-                f"espace H1 insuffisant: "
-                f"{room_msg}"
+                "espace H1 insuffisant "
+                "pour atteindre le TP"
             )
         }
 
@@ -3427,27 +3447,68 @@ def evaluate_setup(
         "adx": float(adx),
         "momentum": float(momentum),
         "rsi": float(rsi),
-        "setup_level": float(setup_level),
-        "execution_entry": float(execution_entry),
-        "setup_distance": float(setup_distance),
-        "setup_distance_atr": float(distance_ratio),
+
+        # Niveau structurel du setup
+        "setup_level": float(
+            setup_level
+        ),
+
+        # Prix utilisé pour la préparation de l'ordre
+        "execution_entry": float(
+            execution_entry
+        ),
+
+        "setup_distance": float(
+            setup_distance
+        ),
+
+        "setup_distance_atr": float(
+            distance_ratio
+        ),
+
         "confirmation": confirmation,
-        "confirmation_message": confirmation_msg
+
+        "confirmation_message": (
+            confirmation_msg
+        )
     }
 
     # =========================================================
-    # RESULTAT
+    # RESULTAT FINAL
     # =========================================================
     return {
         "passed": True,
-        "setup_level": float(setup_level),
-        "entry_level": float(execution_entry),
-        "execution_entry": float(execution_entry),
-        "sl": float(sl),
-        "tp": float(tp),
-        "risk": float(risk),
-        "rr": float(rr),
+
+        "setup_level": float(
+            setup_level
+        ),
+
+        "entry_level": float(
+            execution_entry
+        ),
+
+        "execution_entry": float(
+            execution_entry
+        ),
+
+        "sl": float(
+            sl
+        ),
+
+        "tp": float(
+            tp
+        ),
+
+        "risk": float(
+            risk
+        ),
+
+        "rr": float(
+            rr
+        ),
+
         "confirmation": confirmation,
+
         "metrics": metrics
     }
     
