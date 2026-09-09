@@ -2441,7 +2441,7 @@ def calculate_sl_tp_structural(
     pair: str
 ) -> Tuple[float, float, float]:
     """
-    Calcule un SL structurel exploitable et un TP à 2R.
+    Calcule un SL structurel M15 et un TP à 2R.
 
     Règles :
     - BUY  : sous un swing low M15 exploitable
@@ -2449,12 +2449,12 @@ def calculate_sl_tp_structural(
     - Buffer structurel : 5 pips
     - Recherche des swings sur les 64 dernières bougies
     - SL maximum : 2 ATR
-    - Le minimum de SL est ADAPTATIF :
-        * 10 pips si compatible avec 2 ATR
-        * sinon limité à 2 ATR pour éviter une contradiction mathématique
-    - Fallback : 1.5 ATR
+    - Minimum SL : 10 pips si compatible avec 2 ATR
+    - Si 10 pips > 2 ATR, le minimum effectif devient 2 ATR
+    - USD_JPY / AUD_JPY : AUCUN fallback ATR
+    - Autres paires : fallback ATR 1.5x si aucun swing exploitable
     - TP = 2R
-    - RR final >= 2
+    - Garantie finale RR >= 2.0 après arrondi
     """
 
     pair = str(pair).upper().strip()
@@ -2462,7 +2462,9 @@ def calculate_sl_tp_structural(
     entry = float(entry)
 
     if direction not in ("BUY", "SELL"):
-        raise ValueError(f"Direction inconnue: {direction}")
+        raise ValueError(
+            f"Direction inconnue: {direction}"
+        )
 
     if df_m15 is None or len(df_m15) < 20:
         raise ValueError(
@@ -2472,7 +2474,6 @@ def calculate_sl_tp_structural(
     # ---------------------------------------------------------
     # SWINGS / ATR / PIP
     # ---------------------------------------------------------
-
     highs, lows = detect_swing_points(
         df_m15,
         5
@@ -2499,7 +2500,6 @@ def calculate_sl_tp_structural(
     # ---------------------------------------------------------
     # PARAMÈTRES
     # ---------------------------------------------------------
-
     SL_BUFFER_PIPS = 5.0
     MIN_SL_PIPS = 10.0
     STRUCTURAL_SWING_LOOKBACK_BARS = 64
@@ -2511,18 +2511,16 @@ def calculate_sl_tp_structural(
         SL_BUFFER_PIPS * pip
     )
 
-    # Limite absolue du SL.
     max_sl_distance = (
         atr * MAX_SL_ATR
     )
 
-    # IMPORTANT :
-    # Le minimum 10 pips ne doit JAMAIS dépasser
-    # la limite maximale de 2 ATR.
     requested_min_sl_distance = (
         MIN_SL_PIPS * pip
     )
 
+    # Le minimum 10 pips ne doit jamais
+    # dépasser la limite absolue de 2 ATR.
     effective_min_sl_distance = min(
         requested_min_sl_distance,
         max_sl_distance
@@ -2536,16 +2534,21 @@ def calculate_sl_tp_structural(
     sl = None
     sl_source = None
 
+    # EPS uniquement pour éviter les rejets
+    # artificiels liés aux arrondis flottants.
+    EPS = max(
+        pip * 0.05,
+        atr * 0.001
+    )
+
     # ---------------------------------------------------------
     # SL STRUCTUREL
     # ---------------------------------------------------------
-
     if direction == "BUY":
 
         candidates = []
 
         for low in lows:
-
             index = int(
                 low.get("index", -1)
             )
@@ -2570,7 +2573,7 @@ def calculate_sl_tp_structural(
 
             if (
                 0 < candidate_risk
-                <= max_sl_distance
+                <= max_sl_distance + EPS
             ):
                 candidates.append(
                     (
@@ -2582,6 +2585,8 @@ def calculate_sl_tp_structural(
 
         if candidates:
 
+            # Plus petit risque structurel valide
+            # = swing exploitable le plus proche.
             candidates.sort(
                 key=lambda x: (
                     x[0],
@@ -2598,8 +2603,18 @@ def calculate_sl_tp_structural(
 
         else:
 
-            # Fallback ATR 1.5,
-            # toujours compatible avec 2 ATR.
+            # IMPORTANT :
+            # USD_JPY et AUD_JPY ne doivent plus
+            # utiliser de fallback ATR.
+            if pair in {
+                "USD_JPY",
+                "AUD_JPY"
+            }:
+                raise ValueError(
+                    f"{pair} | aucun swing low M15 "
+                    f"exploitable dans 2 ATR → rejet"
+                )
+
             fallback_distance = min(
                 atr * FALLBACK_SL_ATR,
                 max_sl_distance
@@ -2610,7 +2625,6 @@ def calculate_sl_tp_structural(
                 effective_min_sl_distance
             )
 
-            # Sécurité absolue.
             fallback_distance = min(
                 fallback_distance,
                 max_sl_distance
@@ -2624,12 +2638,11 @@ def calculate_sl_tp_structural(
                 "ATR_FALLBACK_NO_VALID_SWING"
             )
 
-    else:
+    else:  # SELL
 
         candidates = []
 
         for high in highs:
-
             index = int(
                 high.get("index", -1)
             )
@@ -2654,7 +2667,7 @@ def calculate_sl_tp_structural(
 
             if (
                 0 < candidate_risk
-                <= max_sl_distance
+                <= max_sl_distance + EPS
             ):
                 candidates.append(
                     (
@@ -2682,6 +2695,18 @@ def calculate_sl_tp_structural(
 
         else:
 
+            # IMPORTANT :
+            # USD_JPY et AUD_JPY ne doivent plus
+            # utiliser de fallback ATR.
+            if pair in {
+                "USD_JPY",
+                "AUD_JPY"
+            }:
+                raise ValueError(
+                    f"{pair} | aucun swing high M15 "
+                    f"exploitable dans 2 ATR → rejet"
+                )
+
             fallback_distance = min(
                 atr * FALLBACK_SL_ATR,
                 max_sl_distance
@@ -2708,12 +2733,19 @@ def calculate_sl_tp_structural(
     # ---------------------------------------------------------
     # SÉCURITÉ DIRECTIONNELLE
     # ---------------------------------------------------------
-
     if direction == "BUY" and sl >= entry:
 
+        if pair in {
+            "USD_JPY",
+            "AUD_JPY"
+        }:
+            raise ValueError(
+                f"{pair} | SL structurel invalide "
+                f"pour BUY → rejet"
+            )
+
         sl = (
-            entry
-            - effective_min_sl_distance
+            entry - effective_min_sl_distance
         )
 
         sl_source = (
@@ -2722,9 +2754,17 @@ def calculate_sl_tp_structural(
 
     elif direction == "SELL" and sl <= entry:
 
+        if pair in {
+            "USD_JPY",
+            "AUD_JPY"
+        }:
+            raise ValueError(
+                f"{pair} | SL structurel invalide "
+                f"pour SELL → rejet"
+            )
+
         sl = (
-            entry
-            + effective_min_sl_distance
+            entry + effective_min_sl_distance
         )
 
         sl_source = (
@@ -2732,9 +2772,8 @@ def calculate_sl_tp_structural(
         )
 
     # ---------------------------------------------------------
-    # DISTANCE AVANT ARRONDI
+    # RISQUE AVANT ARRONDI
     # ---------------------------------------------------------
-
     risk_before_rounding = abs(
         entry - sl
     )
@@ -2744,8 +2783,10 @@ def calculate_sl_tp_structural(
             f"Risque nul {pair}"
         )
 
-    # Le SL structurel trop large reste rejeté.
-    if risk_before_rounding > max_sl_distance:
+    if (
+        risk_before_rounding
+        > max_sl_distance + EPS
+    ):
         raise ValueError(
             f"SL structurel > "
             f"{MAX_SL_ATR:.1f} ATR "
@@ -2754,29 +2795,24 @@ def calculate_sl_tp_structural(
         )
 
     # ---------------------------------------------------------
-    # MINIMUM ADAPTATIF
+    # MINIMUM SL
     # ---------------------------------------------------------
-
-    if risk_before_rounding < effective_min_sl_distance:
-
+    if (
+        risk_before_rounding
+        < effective_min_sl_distance - EPS
+    ):
         if direction == "BUY":
-
             sl = (
-                entry
-                - effective_min_sl_distance
+                entry - effective_min_sl_distance
             )
-
         else:
-
             sl = (
-                entry
-                + effective_min_sl_distance
+                entry + effective_min_sl_distance
             )
 
     # ---------------------------------------------------------
-    # ARRONDI
+    # ARRONDI SL
     # ---------------------------------------------------------
-
     sl = float(
         round_price(
             pair,
@@ -2787,7 +2823,6 @@ def calculate_sl_tp_structural(
     # ---------------------------------------------------------
     # SÉCURITÉ APRÈS ARRONDI
     # ---------------------------------------------------------
-
     if direction == "BUY" and sl >= entry:
 
         sl = float(
@@ -2815,7 +2850,7 @@ def calculate_sl_tp_structural(
             f"Risk nul après arrondi {pair}"
         )
 
-    if risk > max_sl_distance:
+    if risk > max_sl_distance + EPS:
         raise ValueError(
             f"SL après arrondi > "
             f"{MAX_SL_ATR:.1f} ATR "
@@ -2826,16 +2861,12 @@ def calculate_sl_tp_structural(
     # ---------------------------------------------------------
     # TP = 2R
     # ---------------------------------------------------------
-
     if direction == "BUY":
-
         tp = (
             entry
             + risk * TARGET_RR
         )
-
     else:
-
         tp = (
             entry
             - risk * TARGET_RR
@@ -2851,7 +2882,6 @@ def calculate_sl_tp_structural(
     # ---------------------------------------------------------
     # RR FINAL
     # ---------------------------------------------------------
-
     final_risk = abs(
         entry - sl
     )
@@ -2869,11 +2899,11 @@ def calculate_sl_tp_structural(
         final_reward / final_risk
     )
 
-    # Garantie RR >= 2 après arrondi.
+    # Petite marge uniquement pour absorber
+    # la granularité d'arrondi du prix.
     if rr < TARGET_RR:
 
         if direction == "BUY":
-
             tp = float(
                 round_price(
                     pair,
@@ -2881,9 +2911,7 @@ def calculate_sl_tp_structural(
                     + final_risk * 2.01
                 )
             )
-
         else:
-
             tp = float(
                 round_price(
                     pair,
@@ -2906,10 +2934,6 @@ def calculate_sl_tp_structural(
             f"(RR={rr:.3f})"
         )
 
-    # ---------------------------------------------------------
-    # LOG
-    # ---------------------------------------------------------
-
     logger.info(
         f"[SLTP] {pair} | "
         f"{direction} | "
@@ -2925,11 +2949,10 @@ def calculate_sl_tp_structural(
     )
 
     return (
-        sl,
-        tp,
-        final_risk
+        float(sl),
+        float(tp),
+        float(final_risk)
     )
-
 def has_enough_room_to_tp(
     df_h1: pd.DataFrame,
     direction: str,
@@ -3039,83 +3062,84 @@ def has_enough_room_to_tp(
     return True
 
 def evaluate_setup(
-    pair: str,
-    direction: str,
-    entry: dict,
-    df_m15: pd.DataFrame,
-    df_h1: pd.DataFrame,
-    current_price: float
-) -> dict:
-    """
-    Valide un setup avant exécution.
-
-    Architecture :
-        SETUP LEVEL
-            ↓
-        Distance ≤ 2 ATR
-            ↓
-        Confirmation
-            ↓
-        PRIX D'EXÉCUTION = PRIX ACTUEL
-            ↓
-        SL structurel
-            ↓
-        TP = 2R
-            ↓
-        Espace H1
-            ↓
-        RR >= 2
-
-    IMPORTANT :
-    - entry_level = niveau du setup (FVG / WICK / BOS)
-    - execution_entry = prix actuel utilisé pour calculer le trade
-    """
-
+    pair,
+    direction,
+    entry,
+    df_m15,
+    df_h1,
+    current_price
+):
+    # =========================================================
+    # TYPES DE SETUPS AUTORISÉS
+    # =========================================================
     setup_type = entry.get("type")
 
     if setup_type not in (
         "FVG_RETEST",
         "WICK_REJECTION",
-        "BOS_RETEST",
+        "BOS_RETEST"
     ):
         return {
             "passed": False,
-            "reason": f"type non autorisé: {setup_type}",
+            "reason": (
+                f"type non autorisé: "
+                f"{setup_type}"
+            )
         }
 
     # =========================================================
     # SETUP LEVEL
     # =========================================================
     try:
-        setup_level = float(entry["entry_level"])
-    except (
-        KeyError,
-        TypeError,
-        ValueError
-    ):
+        setup_level = float(
+            entry["entry_level"]
+        )
+    except Exception:
         return {
             "passed": False,
-            "reason": "entry_level invalide",
+            "reason": "entry_level invalide"
         }
 
     # =========================================================
     # ATR
     # =========================================================
-    atr_price = calculate_atr(df_m15)
+    atr_price = calculate_atr(
+        df_m15
+    )
 
     if atr_price is None or atr_price <= 0:
         return {
             "passed": False,
-            "reason": "ATR invalide",
+            "reason": "ATR invalide"
         }
 
-    atr_price = float(atr_price)
+    atr_price = float(
+        atr_price
+    )
 
     # =========================================================
-    # DISTANCE SETUP / PRIX ACTUEL
+    # PIP
+    # =========================================================
+    pip = float(
+        get_pip_value(pair)
+    )
+
+    if pip <= 0:
+        return {
+            "passed": False,
+            "reason": "pip invalide"
+        }
+
+    atr_pips = (
+        atr_price / pip
+    )
+
+    # =========================================================
+    # DISTANCE MAXIMALE AU SETUP
     # =========================================================
     setup_distance = abs(
-        float(current_price) - setup_level
+        float(current_price)
+        - setup_level
     )
 
     distance_ratio = (
@@ -3127,64 +3151,78 @@ def evaluate_setup(
             "passed": False,
             "reason": (
                 f"prix hors zone "
-                f"(setup={setup_level:.5f}, "
-                f"price={float(current_price):.5f}, "
+                f"(target={setup_level:.5f}, "
+                f"price={current_price:.5f}, "
                 f"dist={distance_ratio:.2f}ATR, "
                 f"max=2.0ATR)"
-            ),
+            )
         }
 
     # =========================================================
     # CONFIRMATION
     # =========================================================
+
     if setup_type == "BOS_RETEST":
 
-        # detect_bos_retest() possède déjà sa confirmation.
+        confirmation_ok = True
+
         confirmation_msg = (
             f"BOS_RETEST "
             f"{entry.get('confirmation', 'OK')}"
         )
 
+        confirmation = {
+            "ok": True,
+            "type": "BOS_RETEST",
+            "message": confirmation_msg
+        }
+
     elif setup_type == "WICK_REJECTION":
 
-        # Le rejet est déjà matérialisé par le setup WICK.
         rejection_strength = float(
-            entry.get("rejection_strength", 0.0)
+            entry.get(
+                "rejection_strength",
+                0.0
+            )
         )
 
         if rejection_strength < 0.35:
             return {
                 "passed": False,
                 "reason": (
-                    f"confirmation WICK insuffisante "
-                    f"(rejet={rejection_strength:.2f})"
-                ),
+                    f"rejet insuffisant "
+                    f"({rejection_strength:.2f} < 0.35)"
+                )
             }
 
+        confirmation_ok = True
+
         confirmation_msg = (
-            f"WICK_REJECTION "
+            f"WICK confirmé "
             f"(rejet={rejection_strength:.2f})"
         )
 
+        confirmation = {
+            "ok": True,
+            "type": "WICK_REJECTION",
+            "rejection_strength": rejection_strength,
+            "message": confirmation_msg
+        }
+
     else:
 
-        # FVG : on exige une confirmation sur la dernière
-        # bougie disponible.
-        try:
-            confirmation_ok, confirmation_msg = (
-                get_confirmation_signal(
-                    df_m15,
-                    direction
-                )
+        confirmation_ok, confirmation_msg = (
+            get_confirmation_signal(
+                df_m15,
+                direction
             )
+        )
 
-        except Exception as e:
-            return {
-                "passed": False,
-                "reason": (
-                    f"erreur confirmation: {e}"
-                ),
-            }
+        confirmation = {
+            "ok": bool(confirmation_ok),
+            "type": "FVG_RETEST",
+            "message": confirmation_msg
+        }
 
         if not confirmation_ok:
 
@@ -3200,7 +3238,6 @@ def evaluate_setup(
                 rejection_ratio = 0.0
 
             elif direction == "BUY":
-
                 rejection_ratio = (
                     min(
                         float(last["open"]),
@@ -3210,7 +3247,6 @@ def evaluate_setup(
                 ) / total
 
             else:
-
                 rejection_ratio = (
                     float(last["high"])
                     - max(
@@ -3219,16 +3255,14 @@ def evaluate_setup(
                     )
                 ) / total
 
-            if direction == "BUY":
-                micro_break = (
-                    float(last["close"])
-                    > float(prev["high"])
-                )
-            else:
-                micro_break = (
-                    float(last["close"])
-                    < float(prev["low"])
-                )
+            micro_break = (
+                float(last["close"])
+                > float(prev["high"])
+                if direction == "BUY"
+                else
+                float(last["close"])
+                < float(prev["low"])
+            )
 
             return {
                 "passed": False,
@@ -3237,124 +3271,102 @@ def evaluate_setup(
                     f"{confirmation_msg} "
                     f"(rejet={rejection_ratio:.2f}, "
                     f"micro_break={micro_break})"
-                ),
+                )
             }
 
     # =========================================================
-    # PRIX D'EXÉCUTION
+    # EXECUTION ENTRY
     # =========================================================
-    execution_entry = float(current_price)
-
-    if execution_entry <= 0:
-        return {
-            "passed": False,
-            "reason": "prix d'exécution invalide",
-        }
+    execution_entry = float(
+        current_price
+    )
 
     # =========================================================
     # SL / TP STRUCTURELS
+    # IMPORTANT :
+    # Le SL/TP sont calculés sur le prix réellement
+    # utilisable comme base d'exécution.
     # =========================================================
     try:
-
-        sl, tp, risk = calculate_sl_tp_structural(
-            df_m15,
-            direction,
-            execution_entry,
-            pair
+        sl, tp, risk = (
+            calculate_sl_tp_structural(
+                df_m15,
+                direction,
+                execution_entry,
+                pair
+            )
         )
-
     except Exception as e:
-
         return {
             "passed": False,
-            "reason": f"SL/TP rejeté: {e}",
+            "reason": str(e)
         }
 
-    if sl is None or tp is None:
-
-        return {
-            "passed": False,
-            "reason": "SL/TP impossible à calculer",
-        }
-
-    sl = float(sl)
-    tp = float(tp)
-    risk = float(risk)
-
     # =========================================================
-    # SL MINIMUM ADAPTATIF
+    # EPS / MIN SL
     # =========================================================
-    pip = float(
-        get_pip_value(pair)
+    max_sl_distance = (
+        atr_price * 2.0
     )
 
-    if pip <= 0:
-        return {
-            "passed": False,
-            "reason": "pip invalide",
-        }
-
-    # Minimum 10 pips sauf si 2 ATR est inférieur à 10 pips.
     effective_min_sl_distance = min(
-        pip * 10.0,
-        atr_price * 2.0
+        10.0 * pip,
+        max_sl_distance
+    )
+
+    EPS = max(
+        pip * 0.05,
+        atr_price * 0.001
     )
 
     sl_distance = abs(
         execution_entry - sl
     )
 
-    if sl_distance < effective_min_sl_distance:
-
+    if (
+        sl_distance
+        < effective_min_sl_distance - EPS
+    ):
         return {
             "passed": False,
             "reason": (
                 f"SL trop proche "
-                f"({sl_distance:.5f} "
-                f"< min={effective_min_sl_distance:.5f})"
-            ),
+                f"({sl_distance / pip:.2f} pips < "
+                f"{effective_min_sl_distance / pip:.2f} pips)"
+            )
         }
 
     # =========================================================
     # RR
     # =========================================================
-    risk_distance = abs(
-        execution_entry - sl
-    )
-
-    reward_distance = abs(
+    reward = abs(
         tp - execution_entry
     )
 
-    if risk_distance <= 0:
+    if risk <= 0:
         return {
             "passed": False,
-            "reason": "risque nul",
+            "reason": "risque nul"
         }
 
     rr = (
-        reward_distance
-        / risk_distance
+        reward / risk
     )
 
-    if rr < 2.0:
-
+    if rr < 2.0 - 0.001:
         return {
             "passed": False,
             "reason": (
-                f"RR={rr:.3f} < 2.0 "
-                f"(SL={sl:.5f}, "
-                f"TP={tp:.5f}, "
-                f"entry={execution_entry:.5f})"
-            ),
+                f"RR insuffisant "
+                f"({rr:.3f} < 2.0)"
+            )
         }
 
     # =========================================================
-    # ESPACE H1
+    # ROOM H1
     # =========================================================
     try:
-
-        enough_room = (
+        room_ok, room_msg = (
             has_enough_room_to_tp(
                 df_h1,
                 direction,
@@ -3362,40 +3374,40 @@ def evaluate_setup(
                 tp
             )
         )
-
     except Exception as e:
-
         return {
             "passed": False,
             "reason": (
-                f"erreur espace H1: {e}"
-            ),
+                f"contrôle room H1 erreur: {e}"
+            )
         }
 
-    if not enough_room:
-
+    if not room_ok:
         return {
             "passed": False,
             "reason": (
-                f"RR réel impossible "
-                f"(swing H1 bloque le TP "
-                f"à {tp:.5f})"
-            ),
+                f"espace H1 insuffisant: "
+                f"{room_msg}"
+            )
         }
 
     # =========================================================
-    # METRIQUES
+    # MÉTRIQUES
     # =========================================================
     try:
         adx = float(
-            calculate_adx(df_h1)
+            calculate_adx(
+                df_h1
+            )
         )
     except Exception:
         adx = 0.0
 
     try:
         momentum = float(
-            calculate_momentum(df_m15)
+            calculate_momentum(
+                df_m15
+            )
         )
     except Exception:
         momentum = 0.0
@@ -3403,53 +3415,40 @@ def evaluate_setup(
     try:
         rsi = float(
             get_last_rsi(
-                df_m15["close"]
+                df_m15
             )
         )
     except Exception:
-        rsi = 0.0
+        rsi = 50.0
 
-    try:
-        session = get_session_label()
-    except Exception:
-        session = "UNKNOWN"
+    metrics = {
+        "atr": float(atr_pips),
+        "atr_price": float(atr_price),
+        "adx": float(adx),
+        "momentum": float(momentum),
+        "rsi": float(rsi),
+        "setup_level": float(setup_level),
+        "execution_entry": float(execution_entry),
+        "setup_distance": float(setup_distance),
+        "setup_distance_atr": float(distance_ratio),
+        "confirmation": confirmation,
+        "confirmation_message": confirmation_msg
+    }
 
     # =========================================================
-    # SUCCÈS
+    # RESULTAT
     # =========================================================
     return {
         "passed": True,
-        "type": setup_type,
-        "direction": direction,
-
-        # Niveau du setup original
-        "setup_level": setup_level,
-
-        # Prix utilisé pour calculer le trade
-        "entry_level": execution_entry,
-        "execution_entry": execution_entry,
-
-        "sl": sl,
-        "tp": tp,
-        "risk": risk,
-        "rr": rr,
-
-        "confirmation": confirmation_msg,
-
-        "metrics": {
-            "atr": price_to_pips(
-                atr_price,
-                pair
-            ),
-            "adx": adx,
-            "momentum": momentum,
-            "rsi": rsi,
-            "session": session,
-
-            # Utilisé par execute_trade()
-            "setup_level": setup_level,
-            "setup_distance": setup_distance,
-        },
+        "setup_level": float(setup_level),
+        "entry_level": float(execution_entry),
+        "execution_entry": float(execution_entry),
+        "sl": float(sl),
+        "tp": float(tp),
+        "risk": float(risk),
+        "rr": float(rr),
+        "confirmation": confirmation,
+        "metrics": metrics
     }
     
 def get_session_label() -> str:
