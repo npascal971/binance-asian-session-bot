@@ -43,7 +43,8 @@ ATR_PERIOD = 14
 
 # Paramètres de gestion
 BASE_BREAKEVEN_TRIGGER_R = 0.55
-BASE_TRAILING_ACTIVATION_R = 0.80
+BASE_BREAKEVEN_LOCK_R = 0.25   # NOUVEAU : fraction de R réellement verrouillée au trigger BE (au lieu d'un simple +1 pip symbolique)
+BASE_TRAILING_ACTIVATION_R = 0.65   # NOUVEAU : rapproché de 0.80 pour réduire la zone morte entre BE et trailing
 BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER = 1.5
 BASE_TRAILING_STOP_MIN_DISTANCE_PIPS = 8.0
 
@@ -3710,18 +3711,25 @@ class TradeTracker:
         if trade_id not in self.trades or self.trades[trade_id]["closed"]:
             return
         t = self.trades[trade_id]
+        t["highest"] = max(t["highest"], price)
+        t["lowest"] = min(t["lowest"], price)
+
+        # --------------------------------------------------------
+        # CORRECTIF : mfe et mae doivent venir de la MÊME série
+        # d'excursion (favorable = positif, défavorable = négatif),
+        # avec un max glissant pour l'un et un min glissant pour
+        # l'autre. L'ancien code calculait mae = -mfe_instantané
+        # à chaque appel, ce qui forçait mathématiquement
+        # mae = -MFE final, quel que soit le vrai pire drawdown
+        # traversé par le trade.
+        # --------------------------------------------------------
         if t["direction"] == "BUY":
-            t["highest"] = max(t["highest"], price)
-            t["lowest"] = min(t["lowest"], price)
-            mfe = (price - t["entry"]) / get_pip_value(t["pair"])
-            mae = (t["entry"] - price) / get_pip_value(t["pair"])
+            excursion = (price - t["entry"]) / get_pip_value(t["pair"])
         else:
-            t["highest"] = max(t["highest"], price)
-            t["lowest"] = min(t["lowest"], price)
-            mfe = (t["entry"] - price) / get_pip_value(t["pair"])
-            mae = (price - t["entry"]) / get_pip_value(t["pair"])
-        t["mfe"] = max(t["mfe"], mfe)
-        t["mae"] = min(t["mae"], mae)
+            excursion = (t["entry"] - price) / get_pip_value(t["pair"])
+
+        t["mfe"] = max(t["mfe"], excursion)
+        t["mae"] = min(t["mae"], excursion)
 
     def close_trade(self, trade_id, exit_price, r_multiple):
         if trade_id not in self.trades:
@@ -4772,18 +4780,19 @@ def check_breakeven():
                 initial_risk = abs(entry - current_sl)
             r = profit / initial_risk if initial_risk > 0 else 0.0
 
-            # BE à 0.55R (ne modifie pas le TP)
+            # BE à 0.55R : verrouille réellement une fraction du risque
+            # (0.25R par défaut), pas juste +1 pip symbolique.
+            # Ne modifie pas le TP.
             is_already_be = (direction == "BUY" and current_sl >= entry) or (direction == "SELL" and current_sl <= entry)
             if not is_already_be and r >= BASE_BREAKEVEN_TRIGGER_R:
-                pip = get_pip_value(pair)
-                offset = max(0, pip * 1.0)
+                lock_amount = initial_risk * BASE_BREAKEVEN_LOCK_R
                 if direction == "BUY":
-                    be_sl = entry + offset
+                    be_sl = entry + lock_amount
                 else:
-                    be_sl = entry - offset
+                    be_sl = entry - lock_amount
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     if modify_sl(trade_id, pair, be_sl, adjust_tp=False):
-                        logger.info(f"[BE] SL déplacé à {be_sl:.5f} pour {trade_id}")
+                        logger.info(f"[BE] SL déplacé à {be_sl:.5f} pour {trade_id} (verrouille {BASE_BREAKEVEN_LOCK_R:.2f}R)")
                         current_sl = be_sl
 
             # Trailing stop (ne modifie pas le TP)
@@ -4795,10 +4804,30 @@ def check_breakeven():
                 atr = calculate_atr(get_candles(v88_client(), pair, "M15", 40))
                 pip = get_pip_value(pair)
                 distance = max(atr * BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER, pip * BASE_TRAILING_STOP_MIN_DISTANCE_PIPS)
+
+                # --------------------------------------------------------
+                # NOUVEAU : garde-fou anti-recul.
+                #
+                # Un ordre TRAILING_STOP_LOSS OANDA place son stop initial
+                # à (prix_courant ± distance), sans connaître le SL déjà
+                # en place. Si "distance" dépasse le profit non réalisé
+                # actuel, le stop initial du trailing serait PIRE que le
+                # SL déjà verrouillé par le breakeven -> on redonnerait
+                # du terrain gagné dès l'activation. On plafonne donc la
+                # distance pour que le stop initial ne recule jamais
+                # sous le niveau déjà acquis.
+                # --------------------------------------------------------
+                if direction == "BUY":
+                    max_safe_distance = max(0.0, current_price - current_sl)
+                else:
+                    max_safe_distance = max(0.0, current_sl - current_price)
+
+                distance = min(distance, max_safe_distance) if max_safe_distance > 0 else distance
                 distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
+
                 if distance > 0:
                     if create_trailing_stop(trade_id, pair, distance):
-                        logger.info(f"[TSL] Trailing activé pour {trade_id}")
+                        logger.info(f"[TSL] Trailing activé pour {trade_id} (distance={distance:.5f}, plafond_securite={max_safe_distance:.5f})")
     except Exception as e:
         logger.error(f"[BE] Erreur: {e}")
 
