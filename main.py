@@ -65,7 +65,7 @@ RR_MIN_EXECUTION = 2.0   # exigé avant ordre, pour absorber le slippage normal
 # Ces filtres utilisent des métriques déjà calculées (ADX, RSI) mais qui
 # n'étaient jusqu'ici jamais utilisées pour rejeter un setup.
 ENABLE_QUALITY_FILTERS = True   # coupe-circuit global, pour A/B tester facilement
-MIN_ADX_TREND = 20.0            # ADX H1 minimum : sous ce seuil, marché sans tendance -> setups de continuation peu fiables
+MIN_ADX_TREND = 15.0            # ADX H1 minimum : sous ce seuil, marché sans tendance -> setups de continuation peu fiables
 RSI_OVERBOUGHT = 78.0           # RSI M15 : au-dessus, on n'ouvre plus de BUY (mouvement déjà très étiré)
 RSI_OVERSOLD = 22.0             # RSI M15 : en-dessous, on n'ouvre plus de SELL
 STRICT_BIAS_ALIGNMENT = False   # True = exige HH+HL (ou LH+LL) complet en H4, rejette les biais "_WEAK" partiels
