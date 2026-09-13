@@ -65,7 +65,7 @@ RR_MIN_EXECUTION = 2.0   # exigé avant ordre, pour absorber le slippage normal
 # Ces filtres utilisent des métriques déjà calculées (ADX, RSI) mais qui
 # n'étaient jusqu'ici jamais utilisées pour rejeter un setup.
 ENABLE_QUALITY_FILTERS = True   # coupe-circuit global, pour A/B tester facilement
-MIN_ADX_TREND = 15.0            # ADX H1 minimum : sous ce seuil, marché sans tendance -> setups de continuation peu fiables
+MIN_ADX_TREND = 20.0            # ADX H1 minimum : sous ce seuil, marché sans tendance -> setups de continuation peu fiables
 RSI_OVERBOUGHT = 78.0           # RSI M15 : au-dessus, on n'ouvre plus de BUY (mouvement déjà très étiré)
 RSI_OVERSOLD = 22.0             # RSI M15 : en-dessous, on n'ouvre plus de SELL
 STRICT_BIAS_ALIGNMENT = False   # True = exige HH+HL (ou LH+LL) complet en H4, rejette les biais "_WEAK" partiels
@@ -135,6 +135,19 @@ MAINTENANCE_SUSPEND_TIME = 0
 
 def is_oanda_maintenance(error: Exception) -> bool:
     return any(p in str(error).lower() for p in ["maintenance", "temporarily unavailable", "service unavailable"])
+
+def short_error(error: Exception, limit: int = 300) -> str:
+    """
+    NOUVEAU : tronque la représentation d'une exception avant de la logger.
+    Certaines erreurs OANDA (timeout, 5xx) renvoient une page HTML entière
+    (avec images en base64) au lieu du JSON attendu ; sans troncature, cette
+    page finit intégralement dans les logs, une ligne par entrée, et noie
+    tout le reste (c'est ce qui s'est produit avec la page "Gateway time-out").
+    """
+    s = str(error)
+    if len(s) <= limit:
+        return s
+    return f"{s[:limit]}... [tronqué, {len(s)} caractères au total]"
 
 def handle_api_error(error: Exception):
     global MAINTENANCE_DETECTED, MAINTENANCE_SUSPEND_TIME
@@ -717,7 +730,7 @@ def calculate_units(
         return max(0, int(units))
 
     except Exception as e:
-        logger.error(f"[UNITS] Erreur calcul {pair}: {e}")
+        logger.error(f"[UNITS] Erreur calcul {pair}: {short_error(e)}")
         return 0
 
 def round_price(pair: str, price: float) -> str:
@@ -988,7 +1001,7 @@ def detect_fvg(df: pd.DataFrame, max_lookback_bars: int = 24) -> List[Dict]:
         return fvgs[:5]
 
     except Exception as e:
-        logger.warning(f"[FVG] Erreur détection : {e}")
+        logger.warning(f"[FVG] Erreur détection : {short_error(e)}")
         return []
         
 def detect_wick_rejection(df: pd.DataFrame, bias: str) -> list:
@@ -1285,7 +1298,7 @@ def detect_setups(
         return setups
 
     except Exception as e:
-        logger.warning(f"[SETUPS] {pair} erreur génération setups : {e}")
+        logger.warning(f"[SETUPS] {pair} erreur génération setups : {short_error(e)}")
         return []
 
 def get_directional_bias(
@@ -4725,7 +4738,7 @@ def modify_sl(trade_id: str, pair: str, new_sl: float, adjust_tp: bool = False) 
         clear_cache()
         return True
     except Exception as e:
-        logger.error(f"[BE] Erreur modif SL {trade_id}: {e}")
+        logger.error(f"[BE] Erreur modif SL {trade_id}: {short_error(e)}")
         return False
 
 def create_trailing_stop(trade_id: str, pair: str, distance: float) -> bool:
@@ -4740,7 +4753,7 @@ def create_trailing_stop(trade_id: str, pair: str, distance: float) -> bool:
         clear_cache()
         return True
     except Exception as e:
-        logger.error(f"[TSL] Erreur création trailing {trade_id}: {e}")
+        logger.error(f"[TSL] Erreur création trailing {trade_id}: {short_error(e)}")
         return False
 
 def check_breakeven():
@@ -4829,7 +4842,7 @@ def check_breakeven():
                     if create_trailing_stop(trade_id, pair, distance):
                         logger.info(f"[TSL] Trailing activé pour {trade_id} (distance={distance:.5f}, plafond_securite={max_safe_distance:.5f})")
     except Exception as e:
-        logger.error(f"[BE] Erreur: {e}")
+        logger.error(f"[BE] Erreur: {short_error(e)}")
 
 # ============================================================
 # SUIVI DES TRADES FERMÉS
@@ -4889,7 +4902,7 @@ def check_closed_trades():
             stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl, close_price, is_estimate, trade_info)
             trade_tracker.close_trade(trade_id, close_price, r_multiple)
     except Exception as e:
-        logger.error(f"[CLOSE] Erreur: {e}")
+        logger.error(f"[CLOSE] Erreur: {short_error(e)}")
 
 # ============================================================
 # FONCTIONS DE DÉDUPLICATION ET FILTRES
@@ -4919,7 +4932,7 @@ def advanced_main():
         logger.info("✅ API OANDA initialisée")
         logger.info("🎯 MODE 2R STRICT : Biais → Retracement → Confirmation → 2R")
     except Exception as e:
-        logger.error(f"❌ Échec API: {e}")
+        logger.error(f"❌ Échec API: {short_error(e)}")
         return
 
     # Diagnostic compact de la structure HTF
@@ -5304,6 +5317,10 @@ if __name__ == "__main__":
             logger.info("🛑 Arrêt demandé")
             break
         except Exception as e:
-            logger.error(f"💥 Erreur critique: {e}")
-            traceback.print_exc()
+            logger.error(f"💥 Erreur critique: {short_error(e)}")
+            # Trace complète disponible en DEBUG uniquement (via le logger,
+            # pas via traceback.print_exc() qui écrivait sur stderr sans
+            # troncature et pouvait inonder les logs avec une page HTML
+            # entière en cas d'erreur HTTP non-JSON).
+            logger.debug("Traceback complet de l'erreur critique", exc_info=True)
             time.sleep(30)
