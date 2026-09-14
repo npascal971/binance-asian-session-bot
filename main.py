@@ -3283,6 +3283,9 @@ def evaluate_setup(
 
     elif setup_type == "WICK_REJECTION":
 
+        # =====================================================
+        # WICK REJECTION
+        # =====================================================
         try:
             rejection_strength = float(
                 entry.get(
@@ -3293,6 +3296,9 @@ def evaluate_setup(
         except Exception:
             rejection_strength = 0.0
 
+        # -----------------------------------------------------
+        # 1. FORCE MINIMALE DU REJET
+        # -----------------------------------------------------
         if rejection_strength < 0.35:
             return {
                 "passed": False,
@@ -3302,23 +3308,87 @@ def evaluate_setup(
                 )
             }
 
+        # -----------------------------------------------------
+        # 2. MICRO-BREAK OBLIGATOIRE
+        #
+        # BUY :
+        # clôture de la dernière bougie > plus haut
+        # de la bougie précédente.
+        #
+        # SELL :
+        # clôture de la dernière bougie < plus bas
+        # de la bougie précédente.
+        # -----------------------------------------------------
+        try:
+            if len(df_m15) < 2:
+                return {
+                    "passed": False,
+                    "reason": (
+                        "WICK_REJECTION : "
+                        "pas assez de bougies pour "
+                        "confirmer le micro-break"
+                    )
+                }
+
+            last = df_m15.iloc[-1]
+            prev = df_m15.iloc[-2]
+
+            if direction == "BUY":
+                micro_break = (
+                    float(last["close"])
+                    > float(prev["high"])
+                )
+
+            else:
+                micro_break = (
+                    float(last["close"])
+                    < float(prev["low"])
+                )
+
+        except Exception as e:
+            return {
+                "passed": False,
+                "reason": (
+                    f"erreur micro-break WICK: {e}"
+                )
+            }
+
+        # -----------------------------------------------------
+        # 3. MICRO-BREAK OBLIGATOIRE
+        # -----------------------------------------------------
+        if not micro_break:
+            return {
+                "passed": False,
+                "reason": (
+                    f"WICK_REJECTION non confirmé : "
+                    f"rejet={rejection_strength:.2f}, "
+                    f"micro_break=False"
+                )
+            }
+
+        # -----------------------------------------------------
+        # 4. CONFIRMATION VALIDÉE
+        # -----------------------------------------------------
         confirmation_ok = True
 
         confirmation_msg = (
-            f"WICK confirmé "
-            f"(rejet={rejection_strength:.2f})"
+            f"WICK confirmé + micro-break "
+            f"(rejet={rejection_strength:.2f}, "
+            f"micro_break=True)"
         )
 
         confirmation = {
             "ok": True,
             "type": "WICK_REJECTION",
             "rejection_strength": rejection_strength,
+            "micro_break": True,
             "message": confirmation_msg
         }
 
     else:
+
         # =====================================================
-        # FVG : confirmation locale
+        # FVG : CONFIRMATION LOCALE
         # =====================================================
         try:
             confirmation_ok, confirmation_msg = (
@@ -3327,6 +3397,7 @@ def evaluate_setup(
                     direction
                 )
             )
+
         except Exception as e:
             return {
                 "passed": False,
@@ -3392,22 +3463,22 @@ def evaluate_setup(
             }
 
     # =========================================================
-    # FILTRES QUALITÉ (WIN RATE)
+    # FILTRES QUALITÉ
+    # =========================================================
     #
-    # ADX H1 : un setup de continuation (retest dans le sens
-    # du biais H4) a besoin d'une tendance H1 réelle. Sous le
-    # seuil, le marché est en range et ces setups échouent
-    # nettement plus souvent (faux retests).
+    # ADX H1 :
+    # un setup de continuation dans le sens du biais H4
+    # nécessite une tendance H1 suffisamment présente.
     #
-    # RSI M15 : on évite d'ouvrir un BUY quand le mouvement est
-    # déjà extrêmement étiré à la hausse (et inversement pour
-    # SELL), ce qui augmente le risque de retournement avant
-    # d'atteindre le TP à 2R.
+    # RSI M15 :
+    # évite BUY trop étiré et SELL trop étiré.
     # =========================================================
     if ENABLE_QUALITY_FILTERS:
 
         try:
-            adx_h1 = float(calculate_adx(df_h1))
+            adx_h1 = float(
+                calculate_adx(df_h1)
+            )
         except Exception:
             adx_h1 = 0.0
 
@@ -3416,40 +3487,55 @@ def evaluate_setup(
                 "passed": False,
                 "reason": (
                     f"ADX H1 trop faible "
-                    f"({adx_h1:.1f} < {MIN_ADX_TREND}) "
+                    f"({adx_h1:.1f} < "
+                    f"{MIN_ADX_TREND}) "
                     f"-> marché sans tendance"
                 )
             }
 
         try:
-            rsi_m15 = float(get_last_rsi(df_m15["close"]))
+            rsi_m15 = float(
+                get_last_rsi(
+                    df_m15["close"]
+                )
+            )
         except Exception:
             rsi_m15 = 50.0
 
-        if direction == "BUY" and rsi_m15 > RSI_OVERBOUGHT:
+        if (
+            direction == "BUY"
+            and rsi_m15 > RSI_OVERBOUGHT
+        ):
             return {
                 "passed": False,
                 "reason": (
                     f"RSI M15 suracheté "
-                    f"({rsi_m15:.1f} > {RSI_OVERBOUGHT}) "
-                    f"-> mouvement trop étiré pour un BUY"
+                    f"({rsi_m15:.1f} > "
+                    f"{RSI_OVERBOUGHT}) "
+                    f"-> mouvement trop étiré "
+                    f"pour un BUY"
                 )
             }
 
-        if direction == "SELL" and rsi_m15 < RSI_OVERSOLD:
+        if (
+            direction == "SELL"
+            and rsi_m15 < RSI_OVERSOLD
+        ):
             return {
                 "passed": False,
                 "reason": (
                     f"RSI M15 survendu "
-                    f"({rsi_m15:.1f} < {RSI_OVERSOLD}) "
-                    f"-> mouvement trop étiré pour un SELL"
+                    f"({rsi_m15:.1f} < "
+                    f"{RSI_OVERSOLD}) "
+                    f"-> mouvement trop étiré "
+                    f"pour un SELL"
                 )
             }
 
     # =========================================================
     # EXECUTION ENTRY
     #
-    # C'est le prix courant M15 utilisé comme base
+    # Prix courant M15 utilisé comme base
     # pour calculer SL / TP.
     # =========================================================
     execution_entry = float(
@@ -3468,6 +3554,7 @@ def evaluate_setup(
                 pair
             )
         )
+
     except Exception as e:
         return {
             "passed": False,
@@ -3539,12 +3626,9 @@ def evaluate_setup(
     # =========================================================
     # ROOM H1
     #
-    # IMPORTANT :
-    # has_enough_room_to_tp() retourne un BOOL,
-    # pas (bool, message).
+    # has_enough_room_to_tp() retourne un BOOL.
     # =========================================================
     try:
-
         room_ok = has_enough_room_to_tp(
             df_h1,
             direction,
@@ -3553,7 +3637,6 @@ def evaluate_setup(
         )
 
     except Exception as e:
-
         return {
             "passed": False,
             "reason": (
@@ -3573,16 +3656,14 @@ def evaluate_setup(
     # =========================================================
     # MÉTRIQUES
     #
-    # NOTE CORRECTIF : get_last_rsi() attend une pd.Series de
-    # clôtures, pas un DataFrame. L'appel get_last_rsi(df_m15)
-    # levait systématiquement une exception (dimensions
-    # invalides pour talib), avalée par le except ci-dessous,
-    # ce qui figeait "rsi" à 50.0 en permanence. On réutilise
-    # ici les valeurs déjà calculées par le filtre qualité
-    # quand celui-ci est actif, sinon on les recalcule.
+    # get_last_rsi() attend une pd.Series de clôtures.
     # =========================================================
     try:
-        adx = float(adx_h1) if ENABLE_QUALITY_FILTERS else float(calculate_adx(df_h1))
+        adx = (
+            float(adx_h1)
+            if ENABLE_QUALITY_FILTERS
+            else float(calculate_adx(df_h1))
+        )
     except Exception:
         adx = 0.0
 
@@ -3596,7 +3677,15 @@ def evaluate_setup(
         momentum = 0.0
 
     try:
-        rsi = float(rsi_m15) if ENABLE_QUALITY_FILTERS else float(get_last_rsi(df_m15["close"]))
+        rsi = (
+            float(rsi_m15)
+            if ENABLE_QUALITY_FILTERS
+            else float(
+                get_last_rsi(
+                    df_m15["close"]
+                )
+            )
+        )
     except Exception:
         rsi = 50.0
 
