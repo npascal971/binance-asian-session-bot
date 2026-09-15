@@ -66,6 +66,16 @@ RR_MIN_EXECUTION = 2.0   # exigé avant ordre, pour absorber le slippage normal
 # n'étaient jusqu'ici jamais utilisées pour rejeter un setup.
 ENABLE_QUALITY_FILTERS = True   # coupe-circuit global, pour A/B tester facilement
 MIN_ADX_TREND = 20.0            # ADX H1 minimum : sous ce seuil, marché sans tendance -> setups de continuation peu fiables
+# --- NOUVEAU : voie alternative à l'ADX pour les tendances douces mais régulières ---
+# L'ADX sous-note les tendances à pente faible (ex: USD/JPY, AUD/JPY qui montent
+# en escalier serré) : il regarde une fenêtre trop longue et rate le mouvement
+# frais. On autorise donc un setup si l'ADX est faible MAIS que la pente de l'EMA20
+# H1 est nettement orientée DANS LE SENS du trade. La pente est normalisée par l'ATR
+# pour être comparable d'une paire à l'autre. Un range garde une pente ~plate et
+# reste bloqué.
+TREND_SLOPE_EMA_PERIOD = 20      # EMA de référence sur H1
+TREND_SLOPE_LOOKBACK = 6         # nombre de bougies H1 pour mesurer la pente
+MIN_TREND_SLOPE_ATR = 0.60       # pente minimale (en multiples d'ATR sur le lookback) pour valider une tendance douce
 RSI_OVERBOUGHT = 78.0           # RSI M15 : au-dessus, on n'ouvre plus de BUY (mouvement déjà très étiré)
 RSI_OVERSOLD = 22.0             # RSI M15 : en-dessous, on n'ouvre plus de SELL
 STRICT_BIAS_ALIGNMENT = False   # True = exige HH+HL (ou LH+LL) complet en H4, rejette les biais "_WEAK" partiels
@@ -835,6 +845,35 @@ def calculate_momentum(df: pd.DataFrame, period: int = 5) -> float:
         return 0.0
     return (df['close'].iloc[-1] - df['close'].iloc[-period]) / df['close'].iloc[-period] * 100
 
+def trend_slope_atr(df: pd.DataFrame,
+                    ema_period: int = TREND_SLOPE_EMA_PERIOD,
+                    lookback: int = TREND_SLOPE_LOOKBACK) -> float:
+    """
+    NOUVEAU : mesure la pente de l'EMA sur `lookback` bougies, exprimée en
+    multiples d'ATR (donc comparable d'une paire à l'autre).
+
+    Retour > 0 : tendance haussière ; < 0 : baissière ; ~0 : range.
+    La valeur absolue indique la force : ex. +0.8 = l'EMA a monté de 0.8 ATR
+    sur les `lookback` dernières bougies.
+
+    Utilisé comme voie alternative à l'ADX pour les tendances régulières mais
+    à pente douce, que l'ADX sous-note.
+    """
+    try:
+        if len(df) < ema_period + lookback + 1:
+            return 0.0
+        ema = talib.EMA(df['close'].values, timeperiod=ema_period)
+        ema_now = ema[-1]
+        ema_past = ema[-1 - lookback]
+        if np.isnan(ema_now) or np.isnan(ema_past):
+            return 0.0
+        atr = calculate_atr(df)
+        if atr <= 0:
+            return 0.0
+        return float((ema_now - ema_past) / atr)
+    except Exception:
+        return 0.0
+
 def get_last_rsi(prices: pd.Series, period: int = 14) -> float:
     try:
         rsi = talib.RSI(prices.values, timeperiod=period)
@@ -1338,7 +1377,8 @@ def detect_setups(
 
 def get_directional_bias(
     df_h4: pd.DataFrame,
-    df_h1: pd.DataFrame
+    df_h1: pd.DataFrame,
+    pair: str = "?"
 ) -> str:
     """
     Biais souverain H4.
@@ -1407,7 +1447,7 @@ def get_directional_bias(
     # =========================================================
     if STRICT_BIAS_ALIGNMENT and h4_struct in ("BUY_WEAK", "SELL_WEAK"):
         logger.info(
-            f"[BIAS_DIAG] H4={h4_struct} | H1={h1_struct} | "
+            f"[BIAS_DIAG] {pair} | H4={h4_struct} | H1={h1_struct} | "
             f"rejeté par STRICT_BIAS_ALIGNMENT -> NEUTRAL"
         )
         return "NEUTRAL"
@@ -1428,7 +1468,7 @@ def get_directional_bias(
             phase = "NEUTRAL_H1"
 
         logger.info(
-            f"[BIAS_DIAG] "
+            f"[BIAS_DIAG] {pair} | "
             f"H4={h4_struct} | "
             f"H1={h1_struct} | "
             f"Phase H1={phase} | "
@@ -1453,7 +1493,7 @@ def get_directional_bias(
             phase = "NEUTRAL_H1"
 
         logger.info(
-            f"[BIAS_DIAG] "
+            f"[BIAS_DIAG] {pair} | "
             f"H4={h4_struct} | "
             f"H1={h1_struct} | "
             f"Phase H1={phase} | "
@@ -1467,7 +1507,7 @@ def get_directional_bias(
     # =========================================================
 
     logger.info(
-        f"[BIAS_DIAG] "
+        f"[BIAS_DIAG] {pair} | "
         f"H4={h4_struct} | "
         f"H1={h1_struct} | "
         f"Structure H4 incertaine -> BIAIS=NEUTRAL"
@@ -3458,15 +3498,31 @@ def evaluate_setup(
         except Exception:
             adx_h1 = 0.0
 
-        if adx_h1 < MIN_ADX_TREND:
+        # Voie alternative : pente EMA H1 orientée DANS LE SENS du trade.
+        # Un BUY n'est sauvé que par une pente haussière, un SELL par une
+        # pente baissière -> un range (pente ~plate) reste bloqué.
+        slope = trend_slope_atr(df_h1)
+        slope_confirms = (
+            (direction == "BUY" and slope >= MIN_TREND_SLOPE_ATR)
+            or (direction == "SELL" and slope <= -MIN_TREND_SLOPE_ATR)
+        )
+
+        if adx_h1 < MIN_ADX_TREND and not slope_confirms:
             return {
                 "passed": False,
                 "reason": (
                     f"ADX H1 trop faible "
                     f"({adx_h1:.1f} < {MIN_ADX_TREND}) "
-                    f"-> marché sans tendance"
+                    f"et pente EMA non concluante "
+                    f"({slope:+.2f} ATR) -> marché sans tendance"
                 )
             }
+
+        if adx_h1 < MIN_ADX_TREND and slope_confirms:
+            logger.info(
+                f"[ADX_SLOPE] {pair} {direction} : ADX faible ({adx_h1:.1f}) "
+                f"mais pente EMA confirme la tendance ({slope:+.2f} ATR) -> accepté"
+            )
 
         try:
             rsi_m15 = float(get_last_rsi(df_m15["close"]))
@@ -5087,7 +5143,8 @@ def advanced_main():
             # ====================================================
             bias = get_directional_bias(
                 df_h4,
-                df_h1
+                df_h1,
+                pair=pair
             )
 
             # ====================================================
