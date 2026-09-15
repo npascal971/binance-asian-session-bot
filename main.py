@@ -102,6 +102,29 @@ EXECUTION_COOLDOWN_SECONDS = 60
 # ============================================================
 logger = logging.getLogger("TradingBot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+# --------------------------------------------------------------
+# NOUVEAU : la bibliothèque oandapyV20 loggue elle-même chaque
+# requête HTTP échouée avec le corps de réponse BRUT et non tronqué
+# (oandapyV20/oandapyV20.py : logger.error("request %s failed
+# [%d,%s]", url, status, body)) -- indépendamment de la façon dont
+# le bot gère l'exception ensuite. Quand OANDA renvoie une page
+# d'erreur HTML entière (timeout, 5xx) au lieu du JSON attendu,
+# cette page atterrit intégralement dans les logs, une ligne par
+# entrée, et noie tout le reste. short_error() ne peut pas
+# intercepter ça car ce n'est pas notre code qui logue ce message.
+# On tronque donc directement au niveau du logger de la bibliothèque.
+# --------------------------------------------------------------
+class _OandaLogTruncateFilter(logging.Filter):
+    def filter(self, record):
+        if record.args:
+            record.args = tuple(
+                (a[:300] + f"...[tronqué, {len(a)} caractères]") if isinstance(a, str) and len(a) > 300 else a
+                for a in record.args
+            )
+        return True
+
+logging.getLogger("oandapyV20.oandapyV20").addFilter(_OandaLogTruncateFilter())
 for noisy in ("urllib3", "requests", "oandapyV20"):
     logging.getLogger(noisy).setLevel(logging.ERROR)
 
@@ -4839,11 +4862,28 @@ def check_breakeven():
                     max_safe_distance = max(0.0, current_sl - current_price)
 
                 distance = min(distance, max_safe_distance) if max_safe_distance > 0 else distance
-                distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
 
-                if distance > 0:
-                    if create_trailing_stop(trade_id, pair, distance):
-                        logger.info(f"[TSL] Trailing activé pour {trade_id} (distance={distance:.5f}, plafond_securite={max_safe_distance:.5f})")
+                # --------------------------------------------------------
+                # NOUVEAU : si la distance plafonnée par le garde-fou
+                # anti-recul (ci-dessus) tombe sous notre propre plancher
+                # minimum, elle est quasi certainement aussi sous le
+                # minimum imposé par OANDA -> l'ordre serait rejeté
+                # (PRICE_DISTANCE_MINIMUM_NOT_MET), et on le retenterait
+                # en boucle à chaque cycle (observé : 11 rejets de suite
+                # sur un même trade). On attend plutôt que le prix
+                # progresse encore, sans appel API ni log d'erreur inutile.
+                # --------------------------------------------------------
+                min_floor = pip * BASE_TRAILING_STOP_MIN_DISTANCE_PIPS
+                if distance < min_floor:
+                    logger.debug(
+                        f"[TSL] {trade_id}: distance sûre {distance:.5f} "
+                        f"< plancher {min_floor:.5f}, on attend un meilleur moment"
+                    )
+                else:
+                    distance = round(distance, PRICE_DECIMALS_V88.get(pair, 5))
+                    if distance > 0:
+                        if create_trailing_stop(trade_id, pair, distance):
+                            logger.info(f"[TSL] Trailing activé pour {trade_id} (distance={distance:.5f}, plafond_securite={max_safe_distance:.5f})")
     except Exception as e:
         logger.error(f"[BE] Erreur: {short_error(e)}")
 
