@@ -70,6 +70,18 @@ RSI_OVERBOUGHT = 78.0           # RSI M15 : au-dessus, on n'ouvre plus de BUY (m
 RSI_OVERSOLD = 22.0             # RSI M15 : en-dessous, on n'ouvre plus de SELL
 STRICT_BIAS_ALIGNMENT = False   # True = exige HH+HL (ou LH+LL) complet en H4, rejette les biais "_WEAK" partiels
 
+# --- NOUVEAU : exclusion paire/sens (analyse du 15/09 sur 210 trades, 7-15 sept) ---
+# Ces trois combinaisons ont un échantillon assez large (24-38 trades) et un
+# PL moyen nettement négatif, avec un coût de spread ~2x plus élevé que les
+# paires rentables (GBP/USD, USD/CAD, AUD/USD ~11-12 vs EUR/USD, USD/JPY,
+# XAU/USD ~6.5-7.5) -- assez pour transformer un edge marginal en perte nette.
+# Retire une entrée (ou vide le set) pour la réactiver.
+DISABLED_PAIR_DIRECTIONS = {
+    ("GBP_USD", "SELL"),   # 24 trades, PL moyen -56.69
+    ("USD_CAD", "BUY"),    # 38 trades, PL moyen -48.84
+    ("AUD_USD", "SELL"),   # 30 trades, PL moyen -45.76
+}
+
 PIP_SIZE_V88 = {
     "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
     "USD_CAD": 0.0001, "AUD_CAD": 0.0001,
@@ -3196,6 +3208,18 @@ def evaluate_setup(
     df_h1,
     current_price
 ):
+    # =========================================================
+    # EXCLUSION PAIRE/SENS (drag structurel identifié le 15/09)
+    # =========================================================
+    if (pair, direction) in DISABLED_PAIR_DIRECTIONS:
+        return {
+            "passed": False,
+            "reason": (
+                f"{pair} {direction} désactivé "
+                f"(PL moyen négatif confirmé sur échantillon large)"
+            )
+        }
+
     # =========================================================
     # TYPES DE SETUPS AUTORISÉS
     # =========================================================
