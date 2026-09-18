@@ -1,5 +1,10 @@
 # ============================================================
-# main.py - Version PROD "2R Strict" (v140)
+# main.py - Version PROD "2R Strict" (v141)
+# v141 : correctifs issus de l'analyse transactions + logs du 17-18/09
+#        (trades ouverts puis fermés à la seconde, bougies M15 en cours
+#        utilisées comme "fermées", stops < 1 ATR, ré-entrées en boucle,
+#        bug R des SELL après breakeven...). Voir CHANGELOG.md.
+# v141 rév.2 : confirmation des WICK_REJECTION (micro-break obligatoire + mèche non invalidée)
 # Stratégie : Biais H4/H1 → Retracement → Confirmation → 2R
 # ============================================================
 
@@ -9,6 +14,7 @@ import time
 import logging
 import requests
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import numpy as np
@@ -25,6 +31,31 @@ from typing import List, Dict, Tuple, Optional
 # CHARGEMENT .env
 # =========================
 load_dotenv()
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(float(os.getenv(name, default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return str(os.getenv(name, str(default))).strip().lower() in ("1", "true", "yes", "on")
+
+
+def utcnow() -> datetime:
+    """datetime.utcnow() est déprécié (Python 3.12) : version timezone-aware."""
+    return datetime.now(timezone.utc)
+
+
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 
@@ -50,16 +81,76 @@ BASE_TRAILING_STOP_MIN_DISTANCE_PIPS = 8.0
 
 MAX_TRADES_TOTAL = 10
 ONE_TRADE_PER_PAIR = True
-RISK_PERCENTAGE = 0.75
+# v141 : le risque réel par trade était incohérent. RISK_PERCENTAGE=0.75 (= ~675 USD)
+# n'était JAMAIS atteint : la limite de marge (5 %) plafonnait presque toujours la
+# taille, et le risque réellement pris variait de ~80 USD (AUD/JPY) à ~316 USD
+# (XAU, USD/JPY) selon la distance du SL. Le pourcentage ci-dessous est donc calé sur
+# le risque FX réellement observé (~0.11-0.17 %), et il s'applique maintenant vraiment
+# à tous les instruments (l'or et l'USD/JPY sont réduits, le reste ne change presque pas).
+RISK_PERCENTAGE = _env_float("RISK_PERCENTAGE", 0.15)
+ASIA_RISK_FACTOR = _env_float("ASIA_RISK_FACTOR", 0.67)   # avant : 0.5 codé en dur (0.5/0.75)
 MAX_RISK_USD = 1250
 MAX_MARGIN_USAGE_PER_TRADE_PERCENT = 5.0
 
-OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "101-004-31348578-001")
+# v141 : plus de compte codé en dur par défaut (risque d'ordres sur le mauvais compte).
+OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "").strip()
+OANDA_HTTP_TIMEOUT = _env_float("OANDA_HTTP_TIMEOUT", 15.0)
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
 EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
 
 # --- NOUVEAU : marge de sécurité pour le slippage ---
 RR_MIN_EXECUTION = 2.0   # exigé avant ordre, pour absorber le slippage normal
+
+# ------------------------------------------------------------
+# v141 : EXÉCUTION
+# ------------------------------------------------------------
+# Avant : si le fill avait le moindre slippage (ex. 0.1 pip sur USD/JPY, RR réel
+# 1.992 < 2.0) le trade était FERMÉ immédiatement au marché -> spread payé pour rien
+# (7 trades sur 30 ce jour-là : -112 USD, plus des ré-entrées en boucle).
+# Maintenant : on borne le slippage à l'envoi (priceBound) et, si le RR réel est
+# légèrement sous 2.0, on recale le TP à exactement 2R du prix réellement obtenu.
+MAX_ENTRY_SLIPPAGE_R = _env_float("MAX_ENTRY_SLIPPAGE_R", 0.10)      # slippage max accepté, en fraction de R
+MIN_PRICEBOUND_PIPS = _env_float("MIN_PRICEBOUND_PIPS", 1.0)          # plancher de la borne de prix
+RR_ABORT_FLOOR = _env_float("RR_ABORT_FLOOR", 1.50)                   # sous ce RR réel seulement, on ferme (échec du recalage TP)
+MAX_SPREAD_R_FRACTION = _env_float("MAX_SPREAD_R_FRACTION", 0.20)     # rejet si spread > 20 % du risque (spread anormal)
+
+# ------------------------------------------------------------
+# v141 : STOP LOSS
+# ------------------------------------------------------------
+# Les 4 pertes AUD/JPY (SL = 0.63-0.77 ATR M15, sorties en 1 à 20 min) et les
+# stops or/GBP étaient DANS le bruit normal du M15. Plancher = 1 ATR M15, et
+# buffer sous/sur le swing proportionnel à l'ATR (avant : 5 pips fixes, soit
+# 0.05 USD sur l'or dont l'ATR M15 vaut ~9 USD). Mettre MIN_SL_ATR=0 pour désactiver.
+MIN_SL_ATR = _env_float("MIN_SL_ATR", 1.0)
+SL_BUFFER_ATR = _env_float("SL_BUFFER_ATR", 0.10)
+
+# ------------------------------------------------------------
+# v141 : GARDE-FOUS DE RISQUE (0 = désactivé)
+# ------------------------------------------------------------
+COOLDOWN_AFTER_LOSS_MIN = _env_float("COOLDOWN_AFTER_LOSS_MIN", 60)   # pause sur (paire, sens) après une perte
+COOLDOWN_AFTER_WIN_MIN = _env_float("COOLDOWN_AFTER_WIN_MIN", 15)     # pause après un gain / breakeven
+MAX_LOSSES_PER_PAIR_DIR = _env_int("MAX_LOSSES_PER_PAIR_DIR", 2)      # pertes max sur (paire, sens)...
+LOSS_STREAK_WINDOW_HOURS = _env_float("LOSS_STREAK_WINDOW_HOURS", 6)  # ...dans cette fenêtre
+MAX_NET_CURRENCY_EXPOSURE = _env_int("MAX_NET_CURRENCY_EXPOSURE", 3)  # trades max dans le même sens sur une devise (ex. long USD)
+MAX_DAILY_LOSS_PCT = _env_float("MAX_DAILY_LOSS_PCT", 1.5)            # arrêt des nouvelles entrées si perte réalisée du jour > x %
+
+# ------------------------------------------------------------
+# v141 : DONNÉES / CADENCE
+# ------------------------------------------------------------
+# get_candles() renvoyait la bougie EN COURS comme si elle était fermée (le code
+# le suppose pourtant : "4 dernières bougies fermées"). Un "rejet de mèche" pouvait
+# donc être détecté sur une bougie de 12 minutes encore en formation, puis disparaître.
+USE_COMPLETED_CANDLES_ONLY = _env_bool("USE_COMPLETED_CANDLES_ONLY", True)
+SIGNAL_SCAN_INTERVAL = 900                                            # M15
+SIGNAL_SCAN_DELAY_SECONDS = _env_int("SIGNAL_SCAN_DELAY_SECONDS", 8)  # scan juste après la clôture M15
+
+# --- v141 rév.2 : confirmation des WICK_REJECTION ---
+# Avant : un WICK n'avait AUCUNE confirmation (seulement rejection_strength >= 0.35) :
+# get_confirmation_signal() n'est appelée que pour les FVG. Deux exigences ajoutées :
+#   1. micro-break sur la dernière bougie FERMÉE (BUY : close > high précédent ; SELL : close < low précédent)
+#   2. l'extrême de la mèche n'a pas été violé depuis la bougie de rejet (sinon le rejet est invalidé)
+WICK_REQUIRE_MICRO_BREAK = _env_bool("WICK_REQUIRE_MICRO_BREAK", True)
+WICK_INVALIDATE_ON_BREAK = _env_bool("WICK_INVALIDATE_ON_BREAK", True)
 
 # --- NOUVEAU : filtres qualité (win rate) ---
 # Ces filtres utilisent des métriques déjà calculées (ADX, RSI) mais qui
@@ -134,7 +225,14 @@ EXECUTION_COOLDOWN_SECONDS = 60
 # LOGGING
 # ============================================================
 logger = logging.getLogger("TradingBot")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+# v141 : sortie sur stdout. Sur stderr (défaut), la plateforme marquait chaque ligne
+# INFO en severity "error" -> impossible de filtrer les vraies erreurs.
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG_MODE else getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+)
 
 # --------------------------------------------------------------
 # NOUVEAU : la bibliothèque oandapyV20 loggue elle-même chaque
@@ -231,20 +329,72 @@ def reset_maintenance():
 # ============================================================
 # FONCTIONS OANDA
 # ============================================================
-def v88_client():
-    token = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN")
-    return oandapyV20.API(access_token=token, environment=os.getenv("OANDA_ENVIRONMENT", "practice"))
+_API_CLIENT = None
 
-def get_candles(api, instrument: str, granularity: str, count: int = 500) -> pd.DataFrame:
+
+def v88_client():
+    """
+    v141 : client OANDA unique et réutilisé (session HTTP persistante) AVEC timeout.
+    Avant : un nouveau client à chaque appel et aucun timeout -> une connexion qui
+    se fige suffisait à bloquer toute la boucle du bot (BE, trailing, scans) sans erreur.
+    """
+    global _API_CLIENT
+    if _API_CLIENT is None:
+        token = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN")
+        if not token:
+            raise RuntimeError("OANDA_API_KEY / OANDA_ACCESS_TOKEN manquant")
+        _API_CLIENT = oandapyV20.API(
+            access_token=token,
+            environment=OANDA_ENVIRONMENT,
+            request_params={"timeout": OANDA_HTTP_TIMEOUT},
+        )
+    return _API_CLIENT
+
+
+def oanda_request(request, api=None, retries: int = 2, backoff: float = 0.7) -> dict:
+    """
+    Requête OANDA en LECTURE avec retries sur erreurs transitoires (réseau, timeout,
+    5xx, 429). NE PAS utiliser pour créer/fermer un ordre : un retry pourrait doubler
+    l'ordre (les ordres passent par api.request direct, sans retry).
+    """
+    api = api or v88_client()
+    for attempt in range(retries + 1):
+        try:
+            api.request(request)
+            return request.response
+        except Exception as e:
+            code = getattr(e, "code", None)          # V20Error : code HTTP ; réseau/timeout/JSON : None
+            transient = code is None or code >= 500 or code == 429
+            if is_oanda_maintenance(e) or not transient or attempt >= retries:
+                raise
+            logger.debug(f"[HTTP] tentative {attempt + 1}/{retries + 1} échouée ({short_error(e, 120)}), retry")
+            time.sleep(backoff * (attempt + 1))
+    return {}
+
+
+def get_candles(api, instrument: str, granularity: str, count: int = 500,
+                complete_only: Optional[bool] = None) -> pd.DataFrame:
+    """
+    v141 : ne renvoie par défaut QUE des bougies fermées (flag OANDA "complete").
+    Avant, la bougie en cours (ex. M15 âgée de 12 min) était incluse et traitée comme
+    fermée par les détecteurs (rejet de mèche, FVG, confirmation), d'où des signaux
+    qui se "repeignaient" et des entrées prises sur une mèche encore en formation.
+    """
+    if complete_only is None:
+        complete_only = USE_COMPLETED_CANDLES_ONLY
     if is_maintenance_suspended():
         return pd.DataFrame()
     try:
-        params = {"granularity": granularity, "count": min(count, 500), "price": "M"}
+        # +1 : on retire la bougie en cours, on garde donc `count` bougies fermées
+        wanted = min(count + (1 if complete_only else 0), 500)
+        params = {"granularity": granularity, "count": wanted, "price": "M"}
         r = instruments.InstrumentsCandles(instrument=instrument, params=params)
-        api.request(r)
-        candles = r.response.get("candles", [])
+        resp = oanda_request(r, api=api)
+        candles = resp.get("candles", [])
         data = []
         for c in candles:
+            if complete_only and not c.get("complete", True):
+                continue
             mid = c.get("mid")
             if mid:
                 data.append({
@@ -262,8 +412,17 @@ def get_candles(api, instrument: str, granularity: str, count: int = 500) -> pd.
             df.attrs['instrument'] = instrument
         return df
     except Exception as e:
-        handle_api_error(e)
+        if not handle_api_error(e):
+            # v141 : avant, l'échec était silencieux ("Données insuffisantes" sans cause)
+            logger.warning(f"[CANDLES] {instrument} {granularity} : {short_error(e, 200)}")
         return pd.DataFrame()
+
+def _parse_price_item(item: dict) -> dict:
+    bid = float(item.get("bids", [{}])[0].get("price", 0))
+    ask = float(item.get("asks", [{}])[0].get("price", 0))
+    mid = (bid + ask) / 2.0 if bid and ask else 0
+    return {"bid": bid, "ask": ask, "mid": mid, "spread": max(ask - bid, 0)}
+
 
 def get_price_spread(pair: str) -> dict:
     cached = cache_get(f"pricing:{pair}")
@@ -272,30 +431,69 @@ def get_price_spread(pair: str) -> dict:
     try:
         if is_maintenance_suspended():
             return {"bid": 0, "ask": 0, "mid": 0, "spread": 0}
-        api = v88_client()
         r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
-        api.request(r)
-        prices = r.response.get("prices", [])
+        resp = oanda_request(r)
+        prices = resp.get("prices", [])
         if prices:
-            item = prices[0]
-            bid = float(item.get("bids", [{}])[0].get("price", 0))
-            ask = float(item.get("asks", [{}])[0].get("price", 0))
-            mid = (bid + ask) / 2.0 if bid and ask else 0
-            data = {"bid": bid, "ask": ask, "mid": mid, "spread": max(ask - bid, 0)}
+            data = _parse_price_item(prices[0])
             cache_set(f"pricing:{pair}", data)
             return data
-    except Exception:
-        pass
+    except Exception as e:
+        handle_api_error(e)
+        logger.debug(f"[PRICE] {pair} indisponible : {short_error(e, 150)}")
     return {"bid": 0, "ask": 0, "mid": 0, "spread": 0}
 
+
+def get_prices_bulk(pairs) -> dict:
+    """v141 : UN seul appel pricing pour plusieurs instruments (avant : 1 appel de bougies M5 par trade et par 30 s)."""
+    pairs = sorted({str(p) for p in pairs if p})
+    out = {}
+    if not pairs or is_maintenance_suspended():
+        return out
+    try:
+        r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": ",".join(pairs)})
+        resp = oanda_request(r)
+        for item in resp.get("prices", []):
+            inst = item.get("instrument")
+            if not inst:
+                continue
+            data = _parse_price_item(item)
+            if data["mid"] > 0:
+                out[inst] = data
+                cache_set(f"pricing:{inst}", data)
+    except Exception as e:
+        handle_api_error(e)
+        logger.debug(f"[PRICE] bulk indisponible : {short_error(e, 150)}")
+    return out
+
+
 def get_current_price(pair: str) -> float:
-    df = get_candles(v88_client(), pair, "M5", 10)
+    """Prix mid live (endpoint pricing). Repli : dernière clôture M5 (bougie en cours incluse)."""
+    p = get_price_spread(pair)
+    if p.get("mid", 0) > 0:
+        return float(p["mid"])
+    df = get_candles(v88_client(), pair, "M5", 10, complete_only=False)
     if not df.empty:
         return float(df["close"].iloc[-1])
     return 0.0
 
-def get_open_trades(force_refresh=False) -> list:
+
+def exit_price_from_quote(quote: dict, direction: str) -> float:
+    """Un BUY se ferme au BID, un SELL à l'ASK (avant : le mid, qui surestime le gain de ½ spread)."""
+    if not quote:
+        return 0.0
+    px = quote.get("bid") if direction == "BUY" else quote.get("ask")
+    return float(px or quote.get("mid") or 0.0)
+
+def get_open_trades(force_refresh=False, strict=False) -> list:
+    """
+    strict=True : lève l'exception au lieu de renvoyer [] en cas d'échec.
+    v141 : "lecture impossible" ne doit pas être confondu avec "aucun trade ouvert"
+    (sinon une erreur réseau faisait passer tous les trades pour clôturés).
+    """
     if is_maintenance_suspended():
+        if strict:
+            raise RuntimeError("maintenance OANDA")
         return []
     key = "open_trades_raw"
     if force_refresh:
@@ -303,38 +501,51 @@ def get_open_trades(force_refresh=False) -> list:
     resp = cache_get(key, ttl=1.0)
     if resp is None:
         try:
-            api = v88_client()
             r = trades.OpenTrades(accountID=OANDA_ACCOUNT_ID)
-            api.request(r)
-            resp = r.response
+            resp = oanda_request(r)
             cache_set(key, resp)
         except Exception as e:
             handle_api_error(e)
+            if strict:
+                raise
+            logger.warning(f"[TRADES] lecture des trades ouverts impossible : {short_error(e, 150)}")
             return []
     return resp.get("trades", [])
 
 def get_account_summary():
+    cached = cache_get("account_summary", ttl=3.0)
+    if cached is not None:
+        return cached
     try:
-        api = v88_client()
         r = accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID)
-        api.request(r)
-        return r.response
-    except:
+        resp = oanda_request(r)
+        cache_set("account_summary", resp)
+        return resp
+    except Exception as e:
+        handle_api_error(e)
+        logger.warning(f"[ACCOUNT] résumé du compte indisponible : {short_error(e, 150)}")
         return {}
 
 def get_balance():
     return float(get_account_summary().get("account", {}).get("balance", 0))
 
+_MARGIN_RATE_CACHE = {}   # {pair: (timestamp, rate)} : le taux de marge change très rarement
+MARGIN_RATE_TTL = 3600.0
+
 def get_oanda_margin_rate(pair: str) -> float:
+    cached = _MARGIN_RATE_CACHE.get(pair)
+    if cached and time.time() - cached[0] < MARGIN_RATE_TTL:
+        return cached[1]
     try:
-        api = v88_client()
         r = accounts.AccountInstruments(accountID=OANDA_ACCOUNT_ID, params={"instruments": pair})
-        api.request(r)
-        instr = r.response.get("instruments", [])
+        resp = oanda_request(r)
+        instr = resp.get("instruments", [])
         if instr:
-            return float(instr[0].get("marginRate", 0.0333))
-    except:
-        pass
+            rate = float(instr[0].get("marginRate", 0.0333))
+            _MARGIN_RATE_CACHE[pair] = (time.time(), rate)
+            return rate
+    except Exception as e:
+        logger.debug(f"[MARGIN] taux indisponible pour {pair} : {short_error(e, 120)}")
     return 0.0333
 
 def get_available_margin():
@@ -805,10 +1016,21 @@ def is_market_open(now_dt: datetime) -> bool:
     return True
 
 def open_trade_count() -> int:
-    return len(get_open_trades())
+    """v141 : fail-closed. Si l'état est illisible on suppose la limite atteinte (pas de nouvelle entrée à l'aveugle)."""
+    try:
+        return len(get_open_trades(strict=True))
+    except Exception as e:
+        logger.warning(f"[TRADES] état des trades inconnu -> on suppose la limite atteinte ({short_error(e, 100)})")
+        return MAX_TRADES_TOTAL
 
 def has_open_trade(pair: str) -> bool:
-    for t in get_open_trades():
+    """v141 : fail-closed (évite un 2e trade sur la même paire si la lecture échoue)."""
+    try:
+        open_trades = get_open_trades(strict=True)
+    except Exception as e:
+        logger.warning(f"[TRADES] état inconnu -> {pair} supposé occupé ({short_error(e, 100)})")
+        return True
+    for t in open_trades:
         if t.get("instrument") == pair:
             return True
     return False
@@ -819,7 +1041,8 @@ def get_trade_details(trade_id: str) -> dict:
         r = trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id)
         api.request(r)
         return r.response.get("trade", {})
-    except:
+    except Exception as e:
+        logger.debug(f"[TRADES] détails {trade_id} indisponibles : {short_error(e, 120)}")
         return {}
 
 def get_stop_loss(trade: dict) -> float:
@@ -832,15 +1055,29 @@ def has_trailing_stop(trade: dict) -> bool:
 # ============================================================
 # INDICATEURS
 # ============================================================
+def _atr_fallback(df: pd.DataFrame) -> float:
+    """
+    v141 : en cas d'échec de talib, l'ancien repli était 0.0001 QUEL QUE SOIT l'instrument
+    (= 1 pip EUR/USD, mais 0.01 pip sur l'or et 0.0001 % sur USD/JPY) : les seuils basés sur
+    l'ATR devenaient absurdes en silence. Repli = 10 pips de l'instrument.
+    """
+    try:
+        inst = str(df.attrs.get("instrument", "")).upper()
+        if inst:
+            return 10.0 * get_pip_value(inst)
+    except Exception:
+        pass
+    return 0.0001
+
 def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
     try:
         high = df['high'].values
         low = df['low'].values
         close = df['close'].values
         atr = talib.ATR(high, low, close, timeperiod=period)
-        return float(atr[-1]) if not np.isnan(atr[-1]) else 0.0001
-    except:
-        return 0.0001
+        return float(atr[-1]) if not np.isnan(atr[-1]) else _atr_fallback(df)
+    except Exception:
+        return _atr_fallback(df)
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
     try:
@@ -848,7 +1085,7 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
         low = df['low'].values
         close = df['close'].values
         return float(talib.ADX(high, low, close, timeperiod=period)[-1])
-    except:
+    except Exception:
         return 0.0
 
 def calculate_momentum(df: pd.DataFrame, period: int = 5) -> float:
@@ -889,7 +1126,7 @@ def get_last_rsi(prices: pd.Series, period: int = 14) -> float:
     try:
         rsi = talib.RSI(prices.values, timeperiod=period)
         return float(rsi[-1]) if not np.isnan(rsi[-1]) else 50.0
-    except:
+    except Exception:
         return 50.0
 
 def detect_swing_points(df: pd.DataFrame, lookback: int = 5) -> tuple:
@@ -2281,6 +2518,85 @@ def detect_bos_retest(
                 }
 
     return None
+def wick_followthrough(
+    df_m15: pd.DataFrame,
+    direction: str,
+    wick_time,
+) -> Tuple[bool, str]:
+    """
+    Confirmation d'un WICK_REJECTION (v141 rév.2).
+
+    1. Invalidation : depuis la bougie de rejet (exclue), aucune bougie fermée ne doit
+       avoir violé l'extrême de la mèche (BUY : low < low de la mèche ; SELL : high > high).
+    2. Micro-break : la dernière bougie fermée doit casser la bougie précédente
+       (BUY : close > high précédent ; SELL : close < low précédent).
+
+    Fail-closed : si la bougie de rejet est introuvable, la confirmation échoue.
+    """
+    try:
+        direction = str(direction).upper().strip()
+        if direction not in ("BUY", "SELL"):
+            return False, f"direction invalide: {direction}"
+
+        if df_m15 is None or len(df_m15) < 3:
+            return False, "données insuffisantes"
+
+        if wick_time is None:
+            return False, "bougie de rejet inconnue"
+
+        try:
+            idx = df_m15.index.get_loc(wick_time)
+        except Exception:
+            return False, "bougie de rejet introuvable"
+        if not isinstance(idx, (int, np.integer)):
+            return False, "bougie de rejet ambiguë"
+        idx = int(idx)
+
+        wick_candle = df_m15.iloc[idx]
+        after = df_m15.iloc[idx + 1:]
+
+        # 1) Invalidation de la mèche
+        if WICK_INVALIDATE_ON_BREAK and len(after) > 0:
+            if direction == "BUY":
+                wick_low = float(wick_candle["low"])
+                worst = float(after["low"].min())
+                if worst < wick_low:
+                    return False, (
+                        f"rejet invalidé (bas de mèche {wick_low:.5f} cassé par {worst:.5f})"
+                    )
+            else:
+                wick_high = float(wick_candle["high"])
+                worst = float(after["high"].max())
+                if worst > wick_high:
+                    return False, (
+                        f"rejet invalidé (haut de mèche {wick_high:.5f} cassé par {worst:.5f})"
+                    )
+
+        # 2) Micro-break sur la dernière bougie fermée
+        if WICK_REQUIRE_MICRO_BREAK:
+            last = df_m15.iloc[-1]
+            prev = df_m15.iloc[-2]
+            close_price = float(last["close"])
+            if direction == "BUY":
+                prev_high = float(prev["high"])
+                if not close_price > prev_high:
+                    return False, (
+                        f"pas de micro-break haussier (close {close_price:.5f} <= high précédent {prev_high:.5f})"
+                    )
+                return True, f"micro-break haussier OK (close {close_price:.5f} > {prev_high:.5f})"
+            prev_low = float(prev["low"])
+            if not close_price < prev_low:
+                return False, (
+                    f"pas de micro-break baissier (close {close_price:.5f} >= low précédent {prev_low:.5f})"
+                )
+            return True, f"micro-break baissier OK (close {close_price:.5f} < {prev_low:.5f})"
+
+        return True, "suivi WICK non exigé"
+
+    except Exception as e:
+        return False, f"erreur confirmation WICK: {e}"
+
+
 def get_confirmation_signal(
     df_m15: pd.DataFrame,
     direction: str
@@ -2636,10 +2952,10 @@ def calculate_sl_tp_structural(
     Règles :
     - BUY  : sous un swing low M15 exploitable
     - SELL : au-dessus d'un swing high M15 exploitable
-    - Buffer structurel : 5 pips
+    - Buffer structurel : max(5 pips, SL_BUFFER_ATR x ATR)   [v141]
     - Recherche des swings sur les 64 dernières bougies
     - SL maximum : 2 ATR
-    - Minimum SL : 10 pips si compatible avec 2 ATR
+    - Minimum SL : max(10 pips, MIN_SL_ATR x ATR) si compatible avec 2 ATR   [v141]
     - Si 10 pips > 2 ATR, le minimum effectif devient 2 ATR
     - USD_JPY / AUD_JPY : AUCUN fallback ATR
     - Autres paires : fallback ATR 1.5x si aucun swing exploitable
@@ -2697,16 +3013,18 @@ def calculate_sl_tp_structural(
     FALLBACK_SL_ATR = 1.5
     TARGET_RR = 2.0
 
-    sl_buffer = (
-        SL_BUFFER_PIPS * pip
+    sl_buffer = max(
+        SL_BUFFER_PIPS * pip,
+        atr * SL_BUFFER_ATR
     )
 
     max_sl_distance = (
         atr * MAX_SL_ATR
     )
 
-    requested_min_sl_distance = (
-        MIN_SL_PIPS * pip
+    requested_min_sl_distance = max(
+        MIN_SL_PIPS * pip,
+        atr * MIN_SL_ATR
     )
 
     # Le minimum 10 pips ne doit jamais
@@ -3437,11 +3755,25 @@ def evaluate_setup(
                 )
             }
 
+        wick_ok, wick_msg = wick_followthrough(
+            df_m15,
+            direction,
+            entry.get("time")
+        )
+
+        if not wick_ok:
+            return {
+                "passed": False,
+                "reason": (
+                    f"confirmation WICK: {wick_msg}"
+                )
+            }
+
         confirmation_ok = True
 
         confirmation_msg = (
             f"WICK confirmé "
-            f"(rejet={rejection_strength:.2f})"
+            f"(rejet={rejection_strength:.2f}, {wick_msg})"
         )
 
         confirmation = {
@@ -3525,6 +3857,10 @@ def evaluate_setup(
                     f"micro_break={micro_break})"
                 )
             }
+
+    logger.info(
+        f"[CONFIRM] {pair} {direction} {setup_type} : {confirmation_msg}"
+    )
 
     # =========================================================
     # FILTRES QUALITÉ (WIN RATE)
@@ -3823,7 +4159,7 @@ def evaluate_setup(
     }
     
 def get_session_label() -> str:
-    h = datetime.utcnow().hour
+    h = utcnow().hour
     if 7 <= h < 16:
         return "LONDON"
     if 12 <= h < 21:
@@ -3948,6 +4284,218 @@ trade_tracker = TradeTracker()
 open_trade_details = {}
 stagnant_trade_tracker = {}
 last_execution_attempt = {}
+
+# ============================================================
+# v141 : HISTORIQUE, GARDE-FOUS, ÉTAT, JOURNAL
+# ============================================================
+# L'historique vient d'OANDA (et non de la mémoire du processus) : les garde-fous
+# survivent donc à un redémarrage / redéploiement du bot.
+_CLOSED_HISTORY: list = []
+
+
+def refresh_trade_history(count: int = 200) -> bool:
+    """Charge les trades clôturés récents (paire, sens, heure de clôture, PL net)."""
+    global _CLOSED_HISTORY
+    try:
+        r = trades.TradesList(accountID=OANDA_ACCOUNT_ID, params={"state": "CLOSED", "count": count})
+        resp = oanda_request(r)
+    except Exception as e:
+        handle_api_error(e)
+        logger.warning(f"[HISTORY] historique indisponible (garde-fous sur données précédentes) : {short_error(e, 150)}")
+        return False
+
+    hist = []
+    for t in resp.get("trades", []):
+        try:
+            units = float(t.get("initialUnits", 0))
+            close_time = t.get("closeTime")
+            if units == 0 or not close_time:
+                continue
+            hist.append({
+                "id": str(t.get("id")),
+                "pair": t.get("instrument"),
+                "direction": "BUY" if units > 0 else "SELL",
+                "close_time": pd.to_datetime(close_time, utc=True),
+                "pl": float(t.get("realizedPL", 0) or 0) + float(t.get("financing", 0) or 0),
+            })
+        except Exception:
+            continue
+    _CLOSED_HISTORY = hist
+    logger.debug(f"[HISTORY] {len(hist)} trades clôturés chargés")
+    return True
+
+
+def trading_day_start(now=None) -> pd.Timestamp:
+    """Début de la journée de trading OANDA : 17h New York ~ 21:00 UTC (approximation, heure d'été)."""
+    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
+    start = now.normalize() + pd.Timedelta(hours=21)
+    if now < start:
+        start -= pd.Timedelta(days=1)
+    return start
+
+
+def daily_loss_limit_reason(now=None) -> Optional[str]:
+    """Texte si la perte réalisée du jour dépasse MAX_DAILY_LOSS_PCT, sinon None."""
+    if MAX_DAILY_LOSS_PCT <= 0:
+        return None
+    start = trading_day_start(now)
+    pl = sum(h["pl"] for h in _CLOSED_HISTORY if h["close_time"] >= start)
+    if pl >= 0:
+        return None
+    balance = get_balance()
+    if balance <= 0:
+        return None
+    day_start_balance = balance - pl          # le solde inclut déjà la perte du jour
+    limit = day_start_balance * MAX_DAILY_LOSS_PCT / 100.0
+    if -pl >= limit:
+        return f"perte réalisée du jour {pl:.2f} USD >= limite {MAX_DAILY_LOSS_PCT:.2f}% ({limit:.2f} USD)"
+    return None
+
+
+def net_currency_exposure(open_trades: list) -> dict:
+    """
+    Exposition nette par devise, en nombre de trades (+1 = long, -1 = short).
+    Ex. BUY USD_JPY -> USD +1, JPY -1 ; SELL EUR_USD -> EUR -1, USD +1.
+    Le 18/09, 4 positions "long USD" simultanées (USD/JPY, USD/CAD, GBP/USD SELL,
+    EUR/USD SELL) se sont fait stopper à la suite : c'était UN seul pari, pris 4 fois.
+    """
+    exp = defaultdict(int)
+    for t in open_trades or []:
+        parts = str(t.get("instrument", "")).split("_")
+        if len(parts) != 2:
+            continue
+        try:
+            units = float(t.get("currentUnits", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if units == 0:
+            continue
+        sign = 1 if units > 0 else -1
+        exp[parts[0]] += sign
+        exp[parts[1]] -= sign
+    return dict(exp)
+
+
+def trade_guard_reason(pair: str, direction: str, open_trades: list = None, now=None) -> Optional[str]:
+    """
+    Raison du blocage d'une nouvelle entrée sur (pair, direction), ou None si OK.
+      1. cooldown après le dernier trade clôturé sur cette paire+sens (perte : long, gain/BE : court)
+      2. série de pertes sur cette paire+sens dans la fenêtre récente
+      3. exposition nette par devise
+    Le 18/09 : 4 achats AUD/JPY d'affilée (4 stops en 1h40) et 11 trades USD/CAD BUY en 12 h.
+    """
+    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
+
+    hist = [h for h in _CLOSED_HISTORY if h["pair"] == pair and h["direction"] == direction]
+    if hist:
+        last = max(hist, key=lambda h: h["close_time"])
+        elapsed_min = (now - last["close_time"]).total_seconds() / 60.0
+        was_loss = last["pl"] < 0
+        cooldown = COOLDOWN_AFTER_LOSS_MIN if was_loss else COOLDOWN_AFTER_WIN_MIN
+        if cooldown > 0 and elapsed_min < cooldown:
+            return (f"cooldown {cooldown:.0f} min après {'perte' if was_loss else 'gain/BE'} "
+                    f"(clôturé il y a {elapsed_min:.0f} min)")
+        if MAX_LOSSES_PER_PAIR_DIR > 0:
+            since = now - pd.Timedelta(hours=LOSS_STREAK_WINDOW_HOURS)
+            losses = [h for h in hist if h["close_time"] >= since and h["pl"] < 0]
+            if len(losses) >= MAX_LOSSES_PER_PAIR_DIR:
+                return f"{len(losses)} pertes sur {pair} {direction} en {LOSS_STREAK_WINDOW_HOURS:.0f} h -> pause"
+
+    if MAX_NET_CURRENCY_EXPOSURE > 0:
+        if open_trades is None:
+            open_trades = get_open_trades()
+        exp = net_currency_exposure(open_trades)
+        parts = pair.split("_")
+        if len(parts) == 2:
+            s = 1 if direction == "BUY" else -1
+            for ccy, delta in ((parts[0], s), (parts[1], -s)):
+                before = exp.get(ccy, 0)
+                after = before + delta
+                # on ne bloque que si le nouveau trade AUGMENTE une exposition déjà au plafond
+                if abs(after) > MAX_NET_CURRENCY_EXPOSURE and abs(after) > abs(before):
+                    return f"exposition nette {ccy} {after:+d} > {MAX_NET_CURRENCY_EXPOSURE} trades dans le même sens"
+    return None
+
+
+_ISL_RE = re.compile(r"isl=([0-9]+(?:\.[0-9]+)?)")
+_SETUP_RE = re.compile(r"setup=([A-Z_]+)")
+
+
+def parse_initial_sl(trade: dict) -> float:
+    """SL initial écrit dans le commentaire du trade à l'ouverture (survit aux redémarrages)."""
+    ext = trade.get("clientExtensions") or {}
+    m = _ISL_RE.search(str(ext.get("comment", "")))
+    return float(m.group(1)) if m else 0.0
+
+
+def parse_setup_type(trade: dict) -> str:
+    ext = trade.get("clientExtensions") or {}
+    m = _SETUP_RE.search(str(ext.get("comment", "")))
+    return m.group(1) if m else ""
+
+
+def _ensure_trade_state(t: dict) -> Optional[dict]:
+    """
+    v141 : reconstruit l'état d'un trade ouvert dont le bot n'a plus la trace (redémarrage).
+    Avant, open_trade_details vivait uniquement en mémoire : après un redéploiement le SL
+    initial était perdu (R faussé -> trailing déclenché trop tôt) et la clôture de ces
+    trades n'était jamais journalisée.
+    Ordre de reconstruction du SL initial : commentaire du trade > TP/RR > SL courant s'il
+    n'est pas déjà remonté au breakeven.
+    """
+    trade_id = str(t.get("id"))
+    if trade_id in open_trade_details:
+        return open_trade_details[trade_id]
+    try:
+        pair = t.get("instrument")
+        units = float(t.get("currentUnits", 0) or 0)
+        if not pair or units == 0:
+            return None
+        direction = "BUY" if units > 0 else "SELL"
+        entry = float(t.get("price"))
+        tp_price = float((t.get("takeProfitOrder") or {}).get("price", 0) or 0)
+
+        sl = parse_initial_sl(t)
+        if sl <= 0 and tp_price > 0:
+            risk = abs(tp_price - entry) / RR_MIN_EXECUTION       # le TP est toujours à 2R
+            sl = entry - risk if direction == "BUY" else entry + risk
+        if sl <= 0:
+            cur = get_stop_loss(t)
+            already_be = (direction == "BUY" and cur >= entry) or (direction == "SELL" and cur <= entry)
+            sl = cur if (cur > 0 and not already_be) else 0.0
+
+        info = {
+            "pair": pair, "direction": direction, "entry": entry, "sl": sl, "tp": tp_price,
+            "units": abs(units), "setup_type": parse_setup_type(t) or "RESTORED", "eqs": 0,
+            "restored": True,
+        }
+        open_trade_details[trade_id] = info
+        trade_tracker.add_trade(trade_id, pair, direction, entry, sl, tp_price, info["setup_type"])
+        logger.info(f"[STATE] trade {trade_id} {pair} {direction} restauré (SL initial={sl:.5f})")
+        return info
+    except Exception as e:
+        logger.warning(f"[STATE] restauration du trade {trade_id} impossible : {short_error(e, 120)}")
+        return None
+
+
+def log_journal(record: dict) -> None:
+    """
+    Une ligne JSON par trade clôturé (grep "[JOURNAL]" dans les logs, ou JOURNAL_FILE=... pour un
+    fichier .jsonl). Sert à ajuster les paramètres sur des faits (R, MFE/MAE, SL en ATR, session...).
+    """
+    try:
+        line = json.dumps(record, default=str, ensure_ascii=False)
+        logger.info(f"[JOURNAL] {line}")
+        path = os.getenv("JOURNAL_FILE")
+        if path:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception as e:
+        logger.debug(f"[JOURNAL] écriture impossible : {short_error(e, 100)}")
 
 # ============================================================
 # EXÉCUTION ORDRE (VERSION 2R STRICT)
@@ -4227,6 +4775,23 @@ def execute_trade(
         )
         return None
 
+    # v141 : spread anormal (rollover, news) -> on ne rentre pas.
+    live_spread = float(
+        pricing_data.get("spread", 0) or 0
+    )
+
+    if (
+        MAX_SPREAD_R_FRACTION > 0
+        and live_spread > MAX_SPREAD_R_FRACTION * risk
+    ):
+        logger.warning(
+            f"[ORDER] {pair} | "
+            f"spread {live_spread / pip:.1f} pips = "
+            f"{live_spread / risk:.0%} du risque "
+            f"(> {MAX_SPREAD_R_FRACTION:.0%}) → rejet"
+        )
+        return None
+
     # ========================================================
     # 9. TP LIVE = EXACTEMENT 2R
     #
@@ -4369,7 +4934,7 @@ def execute_trade(
     # ========================================================
     # 13. RISK PERCENTAGE
     # ========================================================
-    hour = datetime.utcnow().hour
+    hour = utcnow().hour
 
     is_asia = (
         21 <= hour
@@ -4377,7 +4942,7 @@ def execute_trade(
     )
 
     risk_pct = (
-        0.5
+        RISK_PERCENTAGE * ASIA_RISK_FACTOR
         if is_asia
         else RISK_PERCENTAGE
     )
@@ -4465,6 +5030,19 @@ def execute_trade(
         else -units
     )
 
+    # v141 : slippage borné à l'envoi. Sans priceBound, un ordre au marché pouvait être
+    # rempli à n'importe quel prix ; au-delà de la borne l'ordre est simplement annulé.
+    slip_allowed = max(
+        MIN_PRICEBOUND_PIPS * pip,
+        MAX_ENTRY_SLIPPAGE_R * final_risk
+    )
+
+    price_bound = (
+        expected_entry + slip_allowed
+        if direction == "BUY"
+        else expected_entry - slip_allowed
+    )
+
     order_data = {
         "order": {
             "type": "MARKET",
@@ -4473,6 +5051,20 @@ def execute_trade(
                 int(signed_units)
             ),
             "positionFill": "DEFAULT",
+
+            "priceBound": round_price(
+                pair,
+                price_bound
+            ),
+
+            # SL initial + type de setup stockés CHEZ OANDA : restent lisibles après un redémarrage
+            "tradeClientExtensions": {
+                "tag": "bot2r",
+                "comment": (
+                    f"isl={round_price(pair, sl)}"
+                    f"|setup={setup_type}"
+                )[:120]
+            },
 
             "stopLossOnFill": {
                 "price": round_price(
@@ -4539,6 +5131,24 @@ def execute_trade(
                 f"{reject.get('rejectReason')}"
             )
 
+            return None
+
+        # v141 : ordre annulé (priceBound dépassé, marché halté...) = pas de trade.
+        cancel = resp.get(
+            "orderCancelTransaction"
+        )
+
+        if (
+            cancel
+            and not resp.get("orderFillTransaction")
+        ):
+            logger.warning(
+                f"[ORDER_CANCELLED] {pair} | "
+                f"{direction} | "
+                f"raison={cancel.get('reason')} | "
+                f"borne={price_bound:.5f} | "
+                f"attendu={expected_entry:.5f}"
+            )
             return None
 
         # ====================================================
@@ -4755,55 +5365,102 @@ def execute_trade(
         )
 
         # ====================================================
-        # 23. PROTECTION RR APRÈS FILL
+        # 23. PROTECTION RR APRÈS FILL   (v141)
+        #
+        # AVANT : rr_real < 2.0 - 0.001 -> fermeture immédiate au marché
+        # (spread perdu pour rien : 7 trades / -112 USD le 17-18/09, parfois pour
+        # 0.1 pip de slippage, puis ré-entrée dans la foulée).
+        # MAINTENANT : le slippage est déjà borné (priceBound) ; on RECALE le TP à
+        # 2R du prix réellement obtenu, SL structurel inchangé. On ne ferme que si
+        # le recalage échoue ET que le RR réel est catastrophique.
         # ====================================================
+        clear_cache()
+
         if (
-            rr_real
-            < RR_MIN_EXECUTION - 0.001
+            rr_real < RR_MIN_EXECUTION - 0.001
+            and risk_real > 0
         ):
 
-            logger.error(
-                f"[ORDER_ABORT] {pair} | "
-                f"RR réel {rr_real:.3f} < "
-                f"{RR_MIN_EXECUTION}"
+            if direction == "BUY":
+                new_tp = (
+                    actual_entry
+                    + risk_real * (RR_MIN_EXECUTION + 0.01)
+                )
+            else:
+                new_tp = (
+                    actual_entry
+                    - risk_real * (RR_MIN_EXECUTION + 0.01)
+                )
+
+            new_tp = float(
+                round_price(
+                    pair,
+                    new_tp
+                )
             )
 
-            try:
+            if modify_tp(
+                str(trade_id),
+                pair,
+                new_tp
+            ):
 
-                close_data = {
-                    "units": "ALL"
-                }
+                tp = new_tp
 
-                close_request = (
-                    trades.TradeClose(
-                        accountID=OANDA_ACCOUNT_ID,
-                        tradeID=str(
-                            trade_id
-                        ),
-                        data=close_data
-                    )
+                rr_real = (
+                    abs(tp - actual_entry)
+                    / risk_real
                 )
 
-                api.request(
-                    close_request
+                logger.info(
+                    f"[TP_REANCHOR] {pair} | "
+                    f"ID={trade_id} | "
+                    f"slippage={slippage_pips:+.2f} pips | "
+                    f"TP recalé={tp:.5f} | "
+                    f"RR={rr_real:.3f}"
                 )
+
+            elif rr_real < RR_ABORT_FLOOR:
 
                 logger.error(
                     f"[ORDER_ABORT] {pair} | "
-                    f"Trade {trade_id} "
-                    f"fermé immédiatement"
+                    f"RR réel {rr_real:.3f} < "
+                    f"{RR_ABORT_FLOOR} et recalage TP impossible"
                 )
 
-            except Exception as close_error:
+                try:
 
-                logger.critical(
-                    f"[ORDER_ABORT] {pair} | "
-                    f"IMPOSSIBLE DE FERMER "
-                    f"LE TRADE {trade_id}: "
-                    f"{close_error}"
+                    api.request(
+                        trades.TradeClose(
+                            accountID=OANDA_ACCOUNT_ID,
+                            tradeID=str(trade_id),
+                            data={"units": "ALL"}
+                        )
+                    )
+
+                    logger.error(
+                        f"[ORDER_ABORT] {pair} | "
+                        f"Trade {trade_id} fermé"
+                    )
+
+                except Exception as close_error:
+
+                    logger.critical(
+                        f"[ORDER_ABORT] {pair} | "
+                        f"IMPOSSIBLE DE FERMER "
+                        f"LE TRADE {trade_id}: "
+                        f"{close_error}"
+                    )
+
+                return None
+
+            else:
+
+                logger.warning(
+                    f"[TP_REANCHOR] {pair} | "
+                    f"recalage impossible, trade conservé "
+                    f"(RR réel={rr_real:.3f})"
                 )
-
-            return None
 
         # ====================================================
         # 24. LOG SLIPPAGE
@@ -4845,6 +5502,7 @@ def execute_trade(
             "eqs": eqs,
             "pair": pair,
             "units": units,
+            "opened_at": utcnow().isoformat(),
             **metrics
         }
 
@@ -4885,11 +5543,26 @@ def modify_sl(trade_id: str, pair: str, new_sl: float, adjust_tp: bool = False) 
         # TP ne doit pas être modifié
         r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
         api.request(r)
-        logger.info(f"[BE] SL modifié pour {trade_id} -> {new_sl:.5f}")
+        logger.debug(f"[BE] SL modifié pour {trade_id} -> {new_sl:.5f}")
         clear_cache()
         return True
     except Exception as e:
         logger.error(f"[BE] Erreur modif SL {trade_id}: {short_error(e)}")
+        return False
+
+def modify_tp(trade_id: str, pair: str, new_tp: float) -> bool:
+    """v141 : recale le TP d'un trade ouvert (le SL n'est pas touché)."""
+    try:
+        if is_maintenance_suspended():
+            return False
+        api = v88_client()
+        data = {"takeProfit": {"price": round_price(pair, new_tp), "timeInForce": "GTC"}}
+        r = trades.TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=data)
+        api.request(r)
+        clear_cache()
+        return True
+    except Exception as e:
+        logger.error(f"[TP] Erreur modif TP {trade_id}: {short_error(e)}")
         return False
 
 def create_trailing_stop(trade_id: str, pair: str, distance: float) -> bool:
@@ -4912,7 +5585,13 @@ def check_breakeven():
         if is_maintenance_suspended():
             return
         open_trades = get_open_trades()
-        logger.info(f"[BE] Scan de {len(open_trades)} trades ouverts")
+        logger.debug(f"[BE] Scan de {len(open_trades)} trades ouverts")   # v141 : DEBUG (était INFO toutes les 30 s)
+        if not open_trades:
+            return
+
+        # v141 : UN appel pricing pour tous les trades (avant : 1 appel bougies M5 par trade)
+        quotes = get_prices_bulk({t.get("instrument") for t in open_trades})
+
         for t in open_trades:
             trade_id = str(t.get("id"))
             pair = t.get("instrument")
@@ -4922,32 +5601,44 @@ def check_breakeven():
             if current_sl <= 0:
                 continue
 
-            current_price = get_current_price(pair)
+            # Prix de SORTIE réel : bid pour un BUY, ask pour un SELL (avant : mid)
+            current_price = exit_price_from_quote(quotes.get(pair), direction)
+            if current_price <= 0:
+                current_price = get_current_price(pair)
             if current_price <= 0:
                 continue
 
             trade_tracker.update_price(trade_id, current_price)
 
-            # Récupérer le SL initial
-            trade_info = open_trade_details.get(trade_id, {})
-            initial_sl = trade_info.get("sl", current_sl)
-            if initial_sl <= 0:
-                initial_sl = current_sl
+            # ----------------------------------------------------------
+            # Risque INITIAL (1R), toujours calculé depuis le SL INITIAL.
+            #
+            # BUG CORRIGÉ : pour un SELL, l'ancien code utilisait le SL COURANT.
+            # Après le déplacement du SL au breakeven (entry - 0.25R), le "risque"
+            # devenait 0.25R -> R gonflé x4 -> trailing activé dès ~0.16R réel au
+            # lieu de 0.65R. Les BUY n'étaient pas touchés (SL initial utilisé).
+            # ----------------------------------------------------------
+            trade_info = _ensure_trade_state(t) or {}
+            initial_sl = float(trade_info.get("sl", 0) or 0)
 
-            if direction == "BUY":
-                profit = current_price - entry
-                initial_risk = entry - initial_sl
-            else:
-                profit = entry - current_price
-                initial_risk = current_sl - entry
+            is_already_be = (
+                (direction == "BUY" and current_sl >= entry)
+                or (direction == "SELL" and current_sl <= entry)
+            )
+
+            initial_risk = abs(entry - initial_sl) if initial_sl > 0 else 0.0
+            if initial_risk <= 0 and not is_already_be:
+                initial_risk = abs(entry - current_sl)   # SL jamais déplacé : c'est bien le SL initial
             if initial_risk <= 0:
-                initial_risk = abs(entry - current_sl)
-            r = profit / initial_risk if initial_risk > 0 else 0.0
+                logger.debug(f"[BE] {trade_id} {pair} : risque initial inconnu, gestion ignorée")
+                continue
+
+            profit = (current_price - entry) if direction == "BUY" else (entry - current_price)
+            r = profit / initial_risk
 
             # BE à 0.55R : verrouille réellement une fraction du risque
             # (0.25R par défaut), pas juste +1 pip symbolique.
             # Ne modifie pas le TP.
-            is_already_be = (direction == "BUY" and current_sl >= entry) or (direction == "SELL" and current_sl <= entry)
             if not is_already_be and r >= BASE_BREAKEVEN_TRIGGER_R:
                 lock_amount = initial_risk * BASE_BREAKEVEN_LOCK_R
                 if direction == "BUY":
@@ -4956,14 +5647,12 @@ def check_breakeven():
                     be_sl = entry - lock_amount
                 if (direction == "BUY" and be_sl > current_sl) or (direction == "SELL" and be_sl < current_sl):
                     if modify_sl(trade_id, pair, be_sl, adjust_tp=False):
-                        logger.info(f"[BE] SL déplacé à {be_sl:.5f} pour {trade_id} (verrouille {BASE_BREAKEVEN_LOCK_R:.2f}R)")
+                        logger.info(f"[BE] {pair} {trade_id} : {r:.2f}R atteint -> SL à {be_sl:.5f} (verrouille {BASE_BREAKEVEN_LOCK_R:.2f}R)")
                         current_sl = be_sl
 
             # Trailing stop (ne modifie pas le TP)
-            # NOUVEAU : "t" (déjà récupéré via get_open_trades ci-dessus)
-            # contient déjà trailingStopLossOrder -- inutile de rappeler
-            # get_trade_details ici, ce qui évitait un appel API redondant
-            # et un 404 NO_SUCH_TRADE si le trade se ferme entre-temps.
+            # "t" (déjà récupéré via get_open_trades) contient trailingStopLossOrder :
+            # inutile de rappeler get_trade_details (appel redondant + 404 possible).
             if has_trailing_stop(t):
                 continue
 
@@ -4972,18 +5661,10 @@ def check_breakeven():
                 pip = get_pip_value(pair)
                 distance = max(atr * BASE_TRAILING_STOP_DISTANCE_ATR_MULTIPLIER, pip * BASE_TRAILING_STOP_MIN_DISTANCE_PIPS)
 
-                # --------------------------------------------------------
-                # NOUVEAU : garde-fou anti-recul.
-                #
-                # Un ordre TRAILING_STOP_LOSS OANDA place son stop initial
-                # à (prix_courant ± distance), sans connaître le SL déjà
-                # en place. Si "distance" dépasse le profit non réalisé
-                # actuel, le stop initial du trailing serait PIRE que le
-                # SL déjà verrouillé par le breakeven -> on redonnerait
-                # du terrain gagné dès l'activation. On plafonne donc la
-                # distance pour que le stop initial ne recule jamais
-                # sous le niveau déjà acquis.
-                # --------------------------------------------------------
+                # Garde-fou anti-recul : un TRAILING_STOP_LOSS OANDA place son stop initial à
+                # (prix courant ± distance) sans connaître le SL déjà en place. Si "distance"
+                # dépasse le profit latent, le stop initial serait PIRE que le SL déjà
+                # verrouillé par le breakeven. On plafonne donc la distance.
                 if direction == "BUY":
                     max_safe_distance = max(0.0, current_price - current_sl)
                 else:
@@ -4991,16 +5672,9 @@ def check_breakeven():
 
                 distance = min(distance, max_safe_distance) if max_safe_distance > 0 else distance
 
-                # --------------------------------------------------------
-                # NOUVEAU : si la distance plafonnée par le garde-fou
-                # anti-recul (ci-dessus) tombe sous notre propre plancher
-                # minimum, elle est quasi certainement aussi sous le
-                # minimum imposé par OANDA -> l'ordre serait rejeté
-                # (PRICE_DISTANCE_MINIMUM_NOT_MET), et on le retenterait
-                # en boucle à chaque cycle (observé : 11 rejets de suite
-                # sur un même trade). On attend plutôt que le prix
-                # progresse encore, sans appel API ni log d'erreur inutile.
-                # --------------------------------------------------------
+                # Si la distance plafonnée tombe sous notre plancher (et donc sous le minimum
+                # OANDA), l'ordre serait rejeté (PRICE_DISTANCE_MINIMUM_NOT_MET) et retenté en
+                # boucle : on attend plutôt que le prix progresse.
                 min_floor = pip * BASE_TRAILING_STOP_MIN_DISTANCE_PIPS
                 if distance < min_floor:
                     logger.debug(
@@ -5022,8 +5696,19 @@ def check_closed_trades():
     try:
         if is_maintenance_suspended():
             return
-        current_open = get_open_trades(force_refresh=True)
+        try:
+            current_open = get_open_trades(force_refresh=True, strict=True)
+        except Exception as e:
+            # v141 : "lecture impossible" != "aucun trade ouvert". Avant, une simple erreur
+            # réseau faisait passer TOUS les trades suivis pour clôturés (état perdu, stats faussées).
+            logger.warning(f"[CLOSE] lecture des trades ouverts impossible, cycle ignoré : {short_error(e, 150)}")
+            return
         open_ids = {str(t.get("id")) for t in current_open}
+
+        # v141 : trades ouverts avant un redémarrage -> état reconstruit (clôture journalisée)
+        for t in current_open:
+            _ensure_trade_state(t)
+
         for trade_id in list(open_trade_details.keys()):
             trade_id = str(trade_id)
             if trade_id in open_ids:
@@ -5047,12 +5732,8 @@ def check_closed_trades():
             is_estimate = True
             trade_data = get_trade_details(trade_id)
             if not trade_data:
-                # NOUVEAU : juste après la clôture d'un trade, OANDA met
-                # parfois un court instant à propager l'info sur
-                # /trades/{id} (d'où le 404 NO_SUCH_TRADE observé). Une
-                # seule retentative après un bref délai suffit à récupérer
-                # le vrai prix de clôture au lieu de retomber sur une
-                # estimation.
+                # Juste après la clôture, OANDA met parfois un instant à propager l'info sur
+                # /trades/{id} (404 NO_SUCH_TRADE) : une retentative brève suffit.
                 time.sleep(1.5)
                 trade_data = get_trade_details(trade_id)
             if trade_data:
@@ -5080,7 +5761,30 @@ def check_closed_trades():
 
             logger.info(f"[CLOSE] {pair} | {direction} | R={r_multiple:.2f} | PL={pl:.2f} | {'EST' if is_estimate else 'CONF'}")
             stats.record_close(trade_id, pair, setup_type, eqs, r_multiple, pl, close_price, is_estimate, trade_info)
+
+            # v141 : journal structuré (une ligne JSON par trade) pour ajuster les paramètres sur des faits
+            tracked = trade_tracker.get_trade(trade_id) or {}
+            atr_price = float(trade_info.get("atr_price", 0) or 0)
+            duration_min = None
+            try:
+                if trade_info.get("opened_at"):
+                    duration_min = round((pd.Timestamp(utcnow()) - pd.Timestamp(trade_info["opened_at"])).total_seconds() / 60.0, 1)
+            except Exception:
+                pass
+            log_journal({
+                "id": trade_id, "pair": pair, "dir": direction, "setup": setup_type,
+                "entry": entry, "sl_initial": sl, "exit": close_price,
+                "r": round(r_multiple, 2), "pl": round(pl, 2), "estimate": is_estimate,
+                "mfe_pips": round(float(tracked.get("mfe", 0)), 1), "mae_pips": round(float(tracked.get("mae", 0)), 1),
+                "sl_atr": round(abs(entry - sl) / atr_price, 2) if atr_price > 0 and sl > 0 else None,
+                "adx_h1": round(float(trade_info.get("adx", 0) or 0), 1) if trade_info.get("adx") is not None else None,
+                "rsi_m15": round(float(trade_info.get("rsi", 0) or 0), 1) if trade_info.get("rsi") is not None else None,
+                "duration_min": duration_min, "restored": bool(trade_info.get("restored", False)),
+                "closed_at": utcnow().isoformat(),
+            })
+
             trade_tracker.close_trade(trade_id, close_price, r_multiple)
+        clear_cache()
     except Exception as e:
         logger.error(f"[CLOSE] Erreur: {short_error(e)}")
 
@@ -5113,6 +5817,13 @@ def advanced_main():
         logger.info("🎯 MODE 2R STRICT : Biais → Retracement → Confirmation → 2R")
     except Exception as e:
         logger.error(f"❌ Échec API: {short_error(e)}")
+        return
+
+    # v141 : historique OANDA à jour + limite de perte journalière
+    refresh_trade_history()
+    daily_reason = daily_loss_limit_reason()
+    if daily_reason:
+        logger.warning(f"⛔ [DAILY_LIMIT] {daily_reason} -> aucune nouvelle entrée ce cycle")
         return
 
     # Diagnostic compact de la structure HTF
@@ -5208,6 +5919,14 @@ def advanced_main():
                 continue
 
             # ====================================================
+            # 4b. GARDE-FOUS (v141) : cooldown / série de pertes / exposition devise
+            # ====================================================
+            guard_reason = trade_guard_reason(pair, bias)
+            if guard_reason:
+                logger.info(f"[GUARD] {pair} {bias} ignoré : {guard_reason}")
+                continue
+
+            # ====================================================
             # 5. DÉTECTION DES SETUPS M15
             # ====================================================
             setups = detect_setups(
@@ -5258,6 +5977,8 @@ def advanced_main():
                 )
 
                 if not result.get("passed"):
+                    # v141 : record_signal n'était jamais appelé (stats "Signaux: 0" partout)
+                    stats.record_signal(pair, False, reason=result.get("reason", ""), direction=bias)
                     logger.info(
                         f"[REJECT] {pair} {bias} "
                         f"{entry.get('type')} : "
@@ -5279,6 +6000,8 @@ def advanced_main():
                 execution_entry = float(
                     result["execution_entry"]
                 )
+
+                stats.record_signal(pair, True, direction=bias)
 
                 valid_trades.append(
                     {
@@ -5444,27 +6167,64 @@ def send_telegram(pair, direction, entry, sl, tp, rr, setup_type):
     try:
         msg = f"{'🟢' if direction=='BUY' else '🔴'} TRADE\nPair: {pair}\nDirection: {direction}\nEntry: {entry:.5f}\nSL: {sl:.5f}\nTP: {tp:.5f}\nRR: {rr:.2f}\nSetup: {setup_type}"
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
-    except:
-        pass
+    except Exception as e:
+        logger.debug(f"[TELEGRAM] envoi impossible : {short_error(e, 100)}")
 
 # ============================================================
 # BOUCLE PRINCIPALE
 # ============================================================
-if __name__ == "__main__":
-    logger.info("🚀 Démarrage du Bot 2R Strict - Version Optimisée v140")
-    logger.info("✅ SL structurel | TP = 2R (immuable) | RR ≥ 2.0 avant ordre")
-    logger.info("✅ Structure H1 assouplie (2/3) + tolérance retracement H4 fort")
-    logger.info("✅ Distance max 2.0 ATR | Confirmation rejet OU micro-break")
-    logger.info("✅ SL structurel exploitable ≤ 2×ATR | fallback ATR 1.5× | TP 2R")
-    logger.info(f"✅ MAX TRADES: {MAX_TRADES_TOTAL}")
+def next_scan_time(now_ts: float,
+                   interval: int = SIGNAL_SCAN_INTERVAL,
+                   delay: int = SIGNAL_SCAN_DELAY_SECONDS) -> float:
+    """
+    Prochain scan = prochaine clôture de bougie M15 + quelques secondes.
+    v141 : avant, le scan tournait toutes les 900 s à partir de l'heure de démarrage
+    (15:42:21, 15:57:46...), soit en pleine bougie M15 -> décisions sur des bougies inachevées.
+    """
+    return (int(now_ts // interval) + 1) * interval + delay
+
+
+def validate_config() -> bool:
+    """Échec explicite au démarrage plutôt qu'erreurs obscures (ou ordres sur un mauvais compte) ensuite."""
+    ok = True
+    if not OANDA_ACCOUNT_ID:
+        logger.critical("OANDA_ACCOUNT_ID manquant (plus de valeur par défaut codée en dur)")
+        ok = False
+    if not (os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN")):
+        logger.critical("OANDA_API_KEY / OANDA_ACCESS_TOKEN manquant")
+        ok = False
+    if OANDA_ENVIRONMENT not in ("practice", "live"):
+        logger.critical(f"OANDA_ENVIRONMENT invalide : {OANDA_ENVIRONMENT!r} (practice | live)")
+        ok = False
+    elif OANDA_ENVIRONMENT == "live":
+        logger.warning("⚠️ ENVIRONNEMENT LIVE : ordres réels")
+    return ok
+
+
+def main_loop():
+    logger.info("🚀 Démarrage du Bot 2R Strict - v141")
+    logger.info("✅ SL structurel >= 1 ATR M15 | TP = 2R recalé après fill | RR >= 2.0 avant ordre")
+    logger.info("✅ Bougies FERMÉES uniquement | scan à la clôture M15 | slippage borné (priceBound)")
+    logger.info(
+        f"✅ Risque/trade {RISK_PERCENTAGE}% | MAX TRADES: {MAX_TRADES_TOTAL} | "
+        f"cooldown perte {COOLDOWN_AFTER_LOSS_MIN:.0f} min | expo devise max {MAX_NET_CURRENCY_EXPOSURE} | "
+        f"perte jour max {MAX_DAILY_LOSS_PCT}%"
+    )
     if DEMO_MODE:
         logger.info("🔬 MODE DEMO ACTIVÉ")
     if DEBUG_MODE:
         logger.info("🔍 MODE DEBUG ACTIVÉ")
+    if not EXECUTE_TRADES:
+        logger.warning("EXECUTE_TRADES=false : simulation, aucun ordre envoyé")
 
-    SIGNAL_SCAN_INTERVAL = 900  # 15 min
-    last_signal_scan = time.time() - SIGNAL_SCAN_INTERVAL
+    if not validate_config():
+        sys.exit(1)
+
     FAST_LOOP_INTERVAL = 30
+    HEARTBEAT_INTERVAL = 600     # v141 : les lignes [SCAN]/[BE] toutes les 30 s = 57 % des logs -> 1 heartbeat / 10 min
+
+    next_signal_scan = time.time()   # premier scan immédiat (bougies fermées uniquement : sans risque)
+    last_heartbeat = 0.0
 
     while True:
         try:
@@ -5474,18 +6234,23 @@ if __name__ == "__main__":
                 continue
 
             clear_cache()
-            current_open = open_trade_count()
-            logger.info(f"[SCAN] Trades ouverts: {current_open}/{MAX_TRADES_TOTAL}")
-
             check_closed_trades()
             check_breakeven()
+            current_open = open_trade_count()
 
-            if time.time() - last_signal_scan >= SIGNAL_SCAN_INTERVAL:
+            now = time.time()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                logger.info(
+                    f"[SCAN] 💓 Trades ouverts: {current_open}/{MAX_TRADES_TOTAL} | "
+                    f"prochain scan dans {max(0, next_signal_scan - now):.0f}s"
+                )
+                last_heartbeat = now
+
+            if now >= next_signal_scan:
                 logger.info("⏰ Scan des signaux")
-                last_signal_scan = time.time()
+                next_signal_scan = next_scan_time(now)
                 if current_open < MAX_TRADES_TOTAL:
-                    # --- AJOUT : vérification du marché ouvert ---
-                    now_utc = datetime.utcnow()
+                    now_utc = utcnow()
                     if not is_market_open(now_utc):
                         logger.info(f"Marché fermé ({now_utc.strftime('%A %H:%M')} UTC) → pas de scan")
                     else:
@@ -5493,16 +6258,19 @@ if __name__ == "__main__":
                 else:
                     logger.info("Limite trades atteinte")
 
-            time.sleep(FAST_LOOP_INTERVAL)
+            # on se réveille pile pour le prochain scan si celui-ci tombe avant la prochaine passe rapide
+            time.sleep(min(FAST_LOOP_INTERVAL, max(0.5, next_signal_scan - time.time())))
 
         except KeyboardInterrupt:
             logger.info("🛑 Arrêt demandé")
             break
         except Exception as e:
             logger.error(f"💥 Erreur critique: {short_error(e)}")
-            # Trace complète disponible en DEBUG uniquement (via le logger,
-            # pas via traceback.print_exc() qui écrivait sur stderr sans
-            # troncature et pouvait inonder les logs avec une page HTML
-            # entière en cas d'erreur HTTP non-JSON).
+            # Trace complète en DEBUG uniquement (via le logger, pas traceback.print_exc()
+            # qui écrivait sur stderr sans troncature).
             logger.debug("Traceback complet de l'erreur critique", exc_info=True)
             time.sleep(30)
+
+
+if __name__ == "__main__":
+    main_loop()
