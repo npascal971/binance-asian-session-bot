@@ -80,17 +80,28 @@ RSI_OVERBOUGHT = 78.0           # RSI M15 : au-dessus, on n'ouvre plus de BUY (m
 RSI_OVERSOLD = 22.0             # RSI M15 : en-dessous, on n'ouvre plus de SELL
 STRICT_BIAS_ALIGNMENT = False   # True = exige HH+HL (ou LH+LL) complet en H4, rejette les biais "_WEAK" partiels
 
-# --- NOUVEAU : exclusion paire/sens (analyse du 15/09 sur 210 trades, 7-15 sept) ---
-# Ces trois combinaisons ont un échantillon assez large (24-38 trades) et un
-# PL moyen nettement négatif, avec un coût de spread ~2x plus élevé que les
-# paires rentables (GBP/USD, USD/CAD, AUD/USD ~11-12 vs EUR/USD, USD/JPY,
-# XAU/USD ~6.5-7.5) -- assez pour transformer un edge marginal en perte nette.
-# Retire une entrée (ou vide le set) pour la réactiver.
+# --- exclusion paire/sens (analyse du 15/09 sur 210 trades, 7-15 sept) ---
+# Ces trois combinaisons avaient un PL moyen nettement négatif sur échantillon
+# large (24-38 trades). MAIS l'analyse du 16/09 a montré qu'une exclusion
+# PERMANENTE rate de vrais trades gagnants : GBP/USD SELL a été bloqué 9 fois
+# pendant que le prix s'effondrait de 1,3480 à 1,3381 (grosse chute H4).
+#
+# On rend donc l'exclusion CONDITIONNELLE au régime H4 :
+#   - marché H4 sans tendance franche (ADX H4 faible) -> exclusion ACTIVE
+#     (c'est le contexte "range/chop" où ces combinaisons perdaient).
+#   - vraie tendance H4 dans le sens du trade (ADX H4 fort ET pente H4 alignée)
+#     -> exclusion LEVÉE (on prend le trade, ex: GBP/USD SELL en pleine chute).
 DISABLED_PAIR_DIRECTIONS = {
     ("GBP_USD", "SELL"),   # 24 trades, PL moyen -56.69
     ("USD_CAD", "BUY"),    # 38 trades, PL moyen -48.84
     ("AUD_USD", "SELL"),   # 30 trades, PL moyen -45.76
 }
+# Seuil du régime H4 qui LÈVE l'exclusion : une pente EMA H4 franche dans le
+# sens du trade suffit (voir CORRECTIF 18/09 dans evaluate_setup). Une pente
+# plate (range) ou à contre-sens ne lève jamais l'exclusion.
+EXCLUSION_OVERRIDE_MIN_SLOPE_H4 = 0.80  # pente EMA H4 (en ATR) dans le sens du trade
+# Conservé pour information (loggé), n'entre plus dans la décision d'override :
+EXCLUSION_OVERRIDE_MIN_ADX_H4 = 25.0    # ADX H4 indicatif d'une tendance franche
 
 PIP_SIZE_V88 = {
     "EUR_USD": 0.0001, "GBP_USD": 0.0001, "AUD_USD": 0.0001,
@@ -3246,19 +3257,56 @@ def evaluate_setup(
     entry,
     df_m15,
     df_h1,
-    current_price
+    current_price,
+    df_h4=None
 ):
     # =========================================================
     # EXCLUSION PAIRE/SENS (drag structurel identifié le 15/09)
+    # conditionnelle au régime H4 (voir DISABLED_PAIR_DIRECTIONS)
     # =========================================================
     if (pair, direction) in DISABLED_PAIR_DIRECTIONS:
-        return {
-            "passed": False,
-            "reason": (
-                f"{pair} {direction} désactivé "
-                f"(PL moyen négatif confirmé sur échantillon large)"
+
+        # Par défaut l'exclusion est active. Elle n'est levée que si le
+        # marché H4 est en tendance franche DANS LE SENS du trade.
+        override = False
+        adx_h4 = 0.0
+        slope_h4 = 0.0
+
+        if df_h4 is not None:
+            try:
+                adx_h4 = float(calculate_adx(df_h4))
+            except Exception:
+                adx_h4 = 0.0
+            slope_h4 = trend_slope_atr(df_h4)
+
+            # CORRECTIF (18/09) : l'exclusion est levée dès que la pente H4
+            # est FRANCHE et DANS LE SENS du trade. On n'exige plus un ADX H4
+            # élevé en plus : les tendances 4H régulières mais douces (USD/CAD
+            # et GBP/USD du 17/09 -- biais correct, tendance 4H claire) donnent
+            # justement un ADX faible, ce qui rendait l'ancien "ADX>=25 ET
+            # pente" inerte. La pente alignée suffit ; un range (pente ~plate)
+            # ou une pente à contre-sens ne lève jamais l'exclusion, donc on
+            # n'ouvre jamais un trade à contre-tendance H4. L'ADX H4 reste
+            # calculé pour information (loggé ci-dessous).
+            override = (
+                (direction == "BUY" and slope_h4 >= EXCLUSION_OVERRIDE_MIN_SLOPE_H4)
+                or (direction == "SELL" and slope_h4 <= -EXCLUSION_OVERRIDE_MIN_SLOPE_H4)
             )
-        }
+
+        if not override:
+            return {
+                "passed": False,
+                "reason": (
+                    f"{pair} {direction} désactivé "
+                    f"(pas de tendance H4 franche : "
+                    f"ADX H4={adx_h4:.1f}, pente H4={slope_h4:+.2f} ATR)"
+                )
+            }
+
+        logger.info(
+            f"[EXCL_OVERRIDE] {pair} {direction} : exclusion levée, "
+            f"tendance H4 franche (ADX={adx_h4:.1f}, pente={slope_h4:+.2f} ATR)"
+        )
 
     # =========================================================
     # TYPES DE SETUPS AUTORISÉS
@@ -5205,7 +5253,8 @@ def advanced_main():
                     entry=entry,
                     df_m15=df_m15,
                     df_h1=df_h1,
-                    current_price=current_price
+                    current_price=current_price,
+                    df_h4=df_h4
                 )
 
                 if not result.get("passed"):
