@@ -5,6 +5,8 @@
 #        utilisées comme "fermées", stops < 1 ATR, ré-entrées en boucle,
 #        bug R des SELL après breakeven...). Voir CHANGELOG.md.
 # v141 rév.2 : confirmation des WICK_REJECTION (micro-break obligatoire + mèche non invalidée)
+# v141 rév.3 : snapshots de décision [SNAPSHOT] + journal de clôture enrichi (exit_reason, opened_at...)
+# v141 rév.3b : vérification au démarrage des fichiers de sortie (avertissement volume Railway)
 # Stratégie : Biais H4/H1 → Retracement → Confirmation → 2R
 # ============================================================
 
@@ -151,6 +153,17 @@ SIGNAL_SCAN_DELAY_SECONDS = _env_int("SIGNAL_SCAN_DELAY_SECONDS", 8)  # scan jus
 #   2. l'extrême de la mèche n'a pas été violé depuis la bougie de rejet (sinon le rejet est invalidé)
 WICK_REQUIRE_MICRO_BREAK = _env_bool("WICK_REQUIRE_MICRO_BREAK", True)
 WICK_INVALIDATE_ON_BREAK = _env_bool("WICK_INVALIDATE_ON_BREAK", True)
+
+# --- v141 rév.3 : snapshots de décision (comprendre pourquoi le bot prend / refuse un setup) ---
+# Une ligne JSON "[SNAPSHOT]" par setup évalué (REJECT / VALID) et par tentative d'exécution (EXEC).
+# SNAPSHOT_FILE=/chemin/snapshots.jsonl pour écrire aussi dans un fichier (volume persistant requis).
+SNAPSHOT_ENABLED = _env_bool("SNAPSHOT_ENABLED", True)
+# Railway expose ces variables d'environnement ; sert seulement à afficher un avertissement pertinent.
+RAILWAY_ENV = bool(
+    os.getenv("RAILWAY_ENVIRONMENT")
+    or os.getenv("RAILWAY_PROJECT_ID")
+    or os.getenv("RAILWAY_SERVICE_ID")
+)
 
 # --- NOUVEAU : filtres qualité (win rate) ---
 # Ces filtres utilisent des métriques déjà calculées (ADX, RSI) mais qui
@@ -4482,6 +4495,82 @@ def _ensure_trade_state(t: dict) -> Optional[dict]:
         return None
 
 
+def _append_line(path: str, line: str) -> None:
+    """Ajoute une ligne à un fichier .jsonl en créant le dossier parent au besoin."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def check_output_file(env_name: str) -> None:
+    """
+    Vérifie AU DÉMARRAGE qu'un fichier de sortie (JOURNAL_FILE / SNAPSHOT_FILE) est écrivable,
+    et le dit clairement dans les logs. Sans ça, un chemin non inscriptible (ou hors du volume
+    Railway) échouait en silence (niveau DEBUG) et on ne s'en apercevait jamais.
+
+    ⚠️ Railway : le système de fichiers est éphémère. Un fichier écrit HORS d'un volume monté
+    est PERDU à chaque redéploiement/redémarrage. Monter un volume (ex. /data) et pointer la
+    variable dessus (ex. /data/journal.jsonl).
+    """
+    path = os.getenv(env_name)
+    if not path:
+        logger.info(
+            f"[OUTPUT] {env_name} non défini : pas de fichier {env_name.split('_')[0].lower()} "
+            f"(les lignes restent visibles dans les logs stdout)."
+        )
+        return
+    try:
+        parent = os.path.dirname(path) or "."
+        os.makedirs(parent, exist_ok=True)
+        marker = json.dumps({
+            "_startup_check": env_name,
+            "at": utcnow().isoformat(),
+            "note": "ligne de test, ecriture OK",
+        }, ensure_ascii=False)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(marker + "\n")
+
+        exists = os.path.exists(path)
+        size = os.path.getsize(path) if exists else 0
+        on_volume = _looks_like_railway_volume(parent)
+        logger.info(
+            f"[OUTPUT] {env_name}={path} : écriture OK "
+            f"(dossier {parent}, taille {size} o)."
+        )
+        if RAILWAY_ENV and not on_volume:
+            logger.warning(
+                f"[OUTPUT] ⚠️ {env_name}={path} ne semble PAS sur un volume Railway persistant : "
+                f"le fichier sera EFFACÉ au prochain redéploiement. Monte un volume (ex. /data) "
+                f"et pointe {env_name} dessus (ex. /data/{os.path.basename(path)})."
+            )
+    except Exception as e:
+        logger.error(
+            f"[OUTPUT] ❌ {env_name}={path} NON inscriptible : {short_error(e, 150)}. "
+            f"Les lignes resteront seulement dans les logs stdout. "
+            f"Sur Railway, vérifie qu'un volume est monté sur le dossier visé."
+        )
+
+
+def _looks_like_railway_volume(parent: str) -> bool:
+    """
+    Heuristique : sous Railway, un volume est monté sur un chemin dédié (souvent /data, /mnt/...,
+    /app/data...). On considère la racine du projet et /tmp comme éphémères. RAILWAY_VOLUME_MOUNT_PATH
+    est fourni par Railway quand un volume est monté : c'est le signal le plus fiable.
+    """
+    mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    try:
+        ap = os.path.abspath(parent)
+        if mount:
+            return ap == os.path.abspath(mount) or ap.startswith(os.path.abspath(mount) + os.sep)
+        # Pas de variable de montage : on ne peut pas garantir, on suppose éphémère si sous /app, /home, /tmp, cwd.
+        ephemeral_roots = (os.path.abspath(os.getcwd()), "/app", "/home", "/tmp", "/root")
+        return not any(ap == r or ap.startswith(r + os.sep) for r in ephemeral_roots)
+    except Exception:
+        return False
+
+
 def log_journal(record: dict) -> None:
     """
     Une ligne JSON par trade clôturé (grep "[JOURNAL]" dans les logs, ou JOURNAL_FILE=... pour un
@@ -4492,10 +4581,179 @@ def log_journal(record: dict) -> None:
         logger.info(f"[JOURNAL] {line}")
         path = os.getenv("JOURNAL_FILE")
         if path:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            _append_line(path, line)
     except Exception as e:
         logger.debug(f"[JOURNAL] écriture impossible : {short_error(e, 100)}")
+
+
+def _r(x, nd=5):
+    """Arrondi tolérant (None / non numérique -> None)."""
+    try:
+        if x is None:
+            return None
+        return round(float(x), nd)
+    except Exception:
+        return None
+
+
+def _iso(t):
+    try:
+        if t is None:
+            return None
+        return pd.Timestamp(t).isoformat()
+    except Exception:
+        return str(t)
+
+
+def _candle_snapshot(df, pos):
+    """Bougie à la position pos : heure (UTC) + OHLC, pour la retrouver sur un graphique."""
+    try:
+        row = df.iloc[pos]
+        return {
+            "t": _iso(df.index[pos]),
+            "o": _r(row["open"]), "h": _r(row["high"]),
+            "l": _r(row["low"]), "c": _r(row["close"]),
+        }
+    except Exception:
+        return None
+
+
+def log_snapshot(record: dict) -> None:
+    """Une ligne JSON par décision : grep [SNAPSHOT] dans les logs, ou SNAPSHOT_FILE pour un .jsonl."""
+    try:
+        line = json.dumps(record, default=str, ensure_ascii=False)
+        logger.info(f"[SNAPSHOT] {line}")
+        path = os.getenv("SNAPSHOT_FILE")
+        if path:
+            _append_line(path, line)
+    except Exception as e:
+        logger.debug(f"[SNAPSHOT] écriture impossible : {short_error(e, 100)}")
+
+
+def build_setup_context(pair, direction, entry, df_m15, df_h1, df_h4, current_price) -> dict:
+    """
+    Ce que le bot "voyait" au moment de la décision : setup, bougies concernées (heures UTC),
+    indicateurs. Toutes les heures sont celles des bougies OANDA -> comparables à un graphique
+    (idéalement en récupérant les bougies OANDA correspondantes).
+    """
+    ctx = {
+        "ts": utcnow().isoformat(),
+        "pair": pair,
+        "dir": direction,
+        "setup": entry.get("type"),
+        "level": _r(entry.get("entry_level")),
+        "setup_time": _iso(entry.get("time")),
+        "distance_atr": _r(entry.get("distance_atr"), 2),
+        "rejection_strength": _r(entry.get("rejection_strength"), 2),
+        "price": _r(current_price),
+    }
+
+    # Détails propres au type de setup (FVG : bornes de la zone ; BOS : niveaux...)
+    if isinstance(entry.get("fvg"), dict):
+        ctx["fvg"] = entry.get("fvg")
+    extra = {
+        k: v for k, v in entry.items()
+        if k not in ("type", "direction", "entry_level", "time", "distance_atr",
+                     "rejection_strength", "fvg")
+        and isinstance(v, (int, float, str, bool, pd.Timestamp))
+    }
+    if extra:
+        ctx["setup_raw"] = extra
+
+    try:
+        n = len(df_m15)
+        ctx["last_closed"] = _candle_snapshot(df_m15, n - 1)   # bougie de décision (micro-break)
+        ctx["prev"] = _candle_snapshot(df_m15, n - 2)
+        if entry.get("type") == "WICK_REJECTION" and entry.get("time") is not None:
+            try:
+                idx = df_m15.index.get_loc(entry.get("time"))
+                if isinstance(idx, (int, np.integer)):
+                    ctx["wick_candle"] = _candle_snapshot(df_m15, int(idx))
+                    ctx["bars_since_wick"] = n - 1 - int(idx)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        atr = calculate_atr(df_m15)
+        ctx["atr"] = _r(atr)
+        pip = get_pip_value(pair)
+        ctx["atr_pips"] = _r(float(atr) / pip, 1) if pip else None
+    except Exception:
+        pass
+    try:
+        ctx["adx_h1"] = _r(calculate_adx(df_h1), 1)
+    except Exception:
+        pass
+    try:
+        ctx["rsi_m15"] = _r(get_last_rsi(df_m15["close"]), 1)
+    except Exception:
+        pass
+    try:
+        ctx["slope_h1"] = _r(trend_slope_atr(df_h1), 2)
+        if df_h4 is not None:
+            ctx["slope_h4"] = _r(trend_slope_atr(df_h4), 2)
+    except Exception:
+        pass
+    return ctx
+
+
+def snapshot_evaluation(pair, direction, entry, result, df_m15, df_h1, df_h4, current_price):
+    """
+    Journalise le résultat d'evaluate_setup (REJECT ou VALID) avec son contexte.
+    Renvoie le contexte (réutilisé pour la ligne EXEC) ou None. Ne lève JAMAIS : ne doit pas
+    pouvoir perturber le trading. Les exclusions "paire/sens désactivé" ne sont pas journalisées
+    (répétitives, sans intérêt pour comprendre une décision).
+    """
+    if not SNAPSHOT_ENABLED:
+        return None
+    try:
+        passed = bool(result.get("passed"))
+        reason = "" if passed else str(result.get("reason", ""))
+        if "désactivé" in reason:
+            return None
+
+        ctx = build_setup_context(pair, direction, entry, df_m15, df_h1, df_h4, current_price)
+        rec = {"kind": "VALID" if passed else "REJECT", **ctx}
+
+        if passed:
+            metrics = result.get("metrics") or {}
+            risk = result.get("risk")
+            atr = ctx.get("atr")
+            rec.update({
+                "exec_entry": _r(result.get("execution_entry")),
+                "sl": _r(result.get("sl")),
+                "tp": _r(result.get("tp")),
+                "rr": _r(result.get("rr"), 3),
+                "sl_atr": _r(float(risk) / atr, 2) if (risk and atr) else None,
+                "setup_dist_atr": _r(metrics.get("setup_distance_atr"), 2),
+                "confirm": metrics.get("confirmation_message"),
+            })
+        else:
+            rec["reason"] = reason
+
+        log_snapshot(rec)
+        return ctx
+    except Exception as e:
+        logger.debug(f"[SNAPSHOT] contexte indisponible : {short_error(e, 100)}")
+        return None
+
+
+def exit_reason_from_trade(trade_data) -> str:
+    """Motif de clôture déduit de l'état des ordres liés au trade (détails OANDA)."""
+    try:
+        if not trade_data:
+            return "UNKNOWN"
+        if (trade_data.get("takeProfitOrder") or {}).get("state") == "FILLED":
+            return "TAKE_PROFIT"
+        if (trade_data.get("trailingStopLossOrder") or {}).get("state") == "FILLED":
+            return "TRAILING_STOP"
+        if (trade_data.get("stopLossOrder") or {}).get("state") == "FILLED":
+            return "STOP_LOSS"
+        return "MARKET_OR_MANUAL"
+    except Exception:
+        return "UNKNOWN"
 
 # ============================================================
 # EXÉCUTION ORDRE (VERSION 2R STRICT)
@@ -5781,6 +6039,17 @@ def check_closed_trades():
                 "rsi_m15": round(float(trade_info.get("rsi", 0) or 0), 1) if trade_info.get("rsi") is not None else None,
                 "duration_min": duration_min, "restored": bool(trade_info.get("restored", False)),
                 "closed_at": utcnow().isoformat(),
+                # v141 rév.3 : de quoi relier le trade à une décision et à un graphique
+                "opened_at": trade_info.get("opened_at"),
+                "close_time": (trade_data or {}).get("closeTime"),
+                "exit_reason": exit_reason_from_trade(trade_data),
+                "tp": trade_info.get("tp"),
+                "setup_level": trade_info.get("setup_level"),
+                "exec_entry": trade_info.get("execution_entry"),
+                "setup_time": trade_info.get("setup_time"),
+                "slope_h1": trade_info.get("slope_h1"),
+                "slope_h4": trade_info.get("slope_h4"),
+                "confirm": trade_info.get("confirmation_message"),
             })
 
             trade_tracker.close_trade(trade_id, close_price, r_multiple)
@@ -5976,6 +6245,11 @@ def advanced_main():
                     df_h4=df_h4
                 )
 
+                snap_ctx = snapshot_evaluation(
+                    pair, bias, entry, result,
+                    df_m15, df_h1, df_h4, current_price
+                )
+
                 if not result.get("passed"):
                     # v141 : record_signal n'était jamais appelé (stats "Signaux: 0" partout)
                     stats.record_signal(pair, False, reason=result.get("reason", ""), direction=bias)
@@ -6020,6 +6294,7 @@ def advanced_main():
                             "metrics",
                             {}
                         ),
+                        "snap": snap_ctx,
                     }
                 )
 
@@ -6082,6 +6357,10 @@ def advanced_main():
             # On conserve explicitement le niveau structurel
             metrics["setup_level"] = setup_level
             metrics["execution_entry"] = execution_entry
+            metrics["setup_time"] = _iso(best["entry"].get("time"))
+            _snap = best.get("snap") or {}
+            metrics["slope_h1"] = _snap.get("slope_h1")
+            metrics["slope_h4"] = _snap.get("slope_h4")
 
             # ====================================================
             # 10. LOG AVANT EXÉCUTION
@@ -6115,6 +6394,31 @@ def advanced_main():
                 setup_type=setup_type,
                 metrics=metrics
             )
+
+            if SNAPSHOT_ENABLED:
+                try:
+                    log_snapshot({
+                        "kind": "EXEC",
+                        "ts": utcnow().isoformat(),
+                        "pair": pair,
+                        "dir": bias,
+                        "setup": setup_type,
+                        "setup_time": metrics.get("setup_time"),
+                        "level": _r(setup_level),
+                        "exec_entry": _r(execution_entry),
+                        "sl": _r(stop_loss),
+                        "tp": _r(take_profit),
+                        "rr": _r(rr, 3),
+                        "n_valid": len(valid_trades),
+                        "candidates": [
+                            f"{v['entry'].get('type')}@{float(v['setup_level']):.5f}"
+                            for v in valid_trades
+                        ],
+                        "trade_id": str(trade_id) if trade_id else None,
+                        "opened": bool(trade_id),
+                    })
+                except Exception as e:
+                    logger.debug(f"[SNAPSHOT] EXEC indisponible : {short_error(e, 100)}")
 
             # ====================================================
             # 12. RÉSULTAT
@@ -6198,6 +6502,16 @@ def validate_config() -> bool:
         ok = False
     elif OANDA_ENVIRONMENT == "live":
         logger.warning("⚠️ ENVIRONNEMENT LIVE : ordres réels")
+
+    # Fichiers de sortie : on vérifie tout de suite qu'ils sont écrivables (et persistants sur Railway).
+    if RAILWAY_ENV and not os.getenv("RAILWAY_VOLUME_MOUNT_PATH"):
+        logger.warning(
+            "[OUTPUT] ⚠️ Railway détecté sans volume monté (RAILWAY_VOLUME_MOUNT_PATH absent) : "
+            "tout fichier écrit sera perdu au redéploiement. Ajoute un volume si tu veux garder "
+            "JOURNAL_FILE / SNAPSHOT_FILE."
+        )
+    check_output_file("JOURNAL_FILE")
+    check_output_file("SNAPSHOT_FILE")
     return ok
 
 
