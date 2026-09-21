@@ -7,6 +7,7 @@
 # v141 rév.2 : confirmation des WICK_REJECTION (micro-break obligatoire + mèche non invalidée)
 # v141 rév.3 : snapshots de décision [SNAPSHOT] + journal de clôture enrichi (exit_reason, opened_at...)
 # v141 rév.3b : vérification au démarrage des fichiers de sortie (avertissement volume Railway)
+# v141 rév.4 : BOS sans micro-break exige un ADX réel ; abandon des setups périmés ; dédoublonnage des candidats
 # Stratégie : Biais H4/H1 → Retracement → Confirmation → 2R
 # ============================================================
 
@@ -153,6 +154,15 @@ SIGNAL_SCAN_DELAY_SECONDS = _env_int("SIGNAL_SCAN_DELAY_SECONDS", 8)  # scan jus
 #   2. l'extrême de la mèche n'a pas été violé depuis la bougie de rejet (sinon le rejet est invalidé)
 WICK_REQUIRE_MICRO_BREAK = _env_bool("WICK_REQUIRE_MICRO_BREAK", True)
 WICK_INVALIDATE_ON_BREAK = _env_bool("WICK_INVALIDATE_ON_BREAK", True)
+
+# --- v141 rév.4 : correctifs issus de l'analyse de la 1re journée v141 ---
+# 1) BOS_RETEST : un BOS dont la confirmation n'est PAS un vrai micro-break n'a plus le droit
+#    de passer le filtre ADX par la seule pente EMA -> il lui faut un ADX réel (marché en tendance).
+#    (le seul trade perdant de la journée était un BOS "rejection" à ADX 15.2 sauvé par la pente)
+BOS_REQUIRE_STRONG_TREND = _env_bool("BOS_REQUIRE_STRONG_TREND", True)
+# 2) Setup périmé : on abandonne un retest dès que le prix a déjà quitté le niveau DANS LE SENS
+#    du trade de plus de N ATR (le retest est manqué : plus la peine de le revalider en boucle).
+MAX_SETUP_RUNAWAY_ATR = _env_float("MAX_SETUP_RUNAWAY_ATR", 1.0)
 
 # --- v141 rév.3 : snapshots de décision (comprendre pourquoi le bot prend / refuse un setup) ---
 # Une ligne JSON "[SNAPSHOT]" par setup évalué (REJECT / VALID) et par tentative d'exécution (EXEC).
@@ -3728,17 +3738,48 @@ def evaluate_setup(
             )
         }
 
+    # v141 rév.4 : setup périmé. Sur un retest (BOS/FVG), on veut entrer PRÈS du niveau.
+    # Si le prix l'a déjà dépassé DANS LE SENS du trade de plus de MAX_SETUP_RUNAWAY_ATR,
+    # le retest est manqué : inutile de revalider ce setup à chaque cycle (il serait de toute
+    # façon rejeté à l'exécution pour "marché trop éloigné").
+    if setup_type in ("BOS_RETEST", "FVG_RETEST"):
+        if direction == "BUY":
+            runaway = float(current_price) - setup_level
+        else:
+            runaway = setup_level - float(current_price)
+        runaway_atr = runaway / atr_price if atr_price else 0.0
+        if runaway_atr > MAX_SETUP_RUNAWAY_ATR:
+            return {
+                "passed": False,
+                "reason": (
+                    f"setup périmé : prix déjà parti de {runaway_atr:.2f} ATR "
+                    f"dans le sens du trade (max {MAX_SETUP_RUNAWAY_ATR:.2f}) "
+                    f"-> retest manqué"
+                )
+            }
+
     # =========================================================
     # CONFIRMATION
     # =========================================================
 
+    # v141 rév.4 : un BOS confirmé seulement par "rejection" (pas de micro-break réel) exigera
+    # plus loin un ADX réel (interdiction de passer par la seule pente EMA).
+    bos_requires_real_adx = False
+
     if setup_type == "BOS_RETEST":
+
+        bos_conf = str(entry.get("confirmation", "")).lower().strip()
+        bos_has_micro_break = (bos_conf == "micro_break")
+        bos_requires_real_adx = (
+            BOS_REQUIRE_STRONG_TREND and not bos_has_micro_break
+        )
 
         confirmation_ok = True
 
         confirmation_msg = (
             f"BOS_RETEST "
             f"{entry.get('confirmation', 'OK')}"
+            + ("" if bos_has_micro_break else " [ADX réel requis]")
         )
 
         confirmation = {
@@ -3912,6 +3953,18 @@ def evaluate_setup(
                     f"({adx_h1:.1f} < {MIN_ADX_TREND}) "
                     f"et pente EMA non concluante "
                     f"({slope:+.2f} ATR) -> marché sans tendance"
+                )
+            }
+
+        # v141 rév.4 : un BOS "rejection" (sans micro-break) ne peut PAS être sauvé par la
+        # seule pente EMA -> il lui faut un ADX réel. Bloque le profil du trade perdant observé.
+        if bos_requires_real_adx and adx_h1 < MIN_ADX_TREND:
+            return {
+                "passed": False,
+                "reason": (
+                    f"BOS sans micro-break et ADX H1 trop faible "
+                    f"({adx_h1:.1f} < {MIN_ADX_TREND}) : pente seule insuffisante "
+                    f"pour un BOS -> refusé"
                 )
             }
 
@@ -6297,6 +6350,28 @@ def advanced_main():
                         "snap": snap_ctx,
                     }
                 )
+
+            # v141 rév.4 : dédoublonnage. Deux setups voisins (ex. deux FVG à ~1 pip)
+            # peuvent produire EXACTEMENT le même ordre -> on n'en garde qu'un.
+            if valid_trades:
+                seen_orders = set()
+                deduped = []
+                for vt in valid_trades:
+                    key = (
+                        round(vt["execution_entry"], 6),
+                        round(vt["sl"], 6),
+                        round(vt["tp"], 6),
+                    )
+                    if key in seen_orders:
+                        continue
+                    seen_orders.add(key)
+                    deduped.append(vt)
+                if len(deduped) != len(valid_trades):
+                    logger.debug(
+                        f"[DEDUP] {pair} : {len(valid_trades)} candidats -> "
+                        f"{len(deduped)} après dédoublonnage"
+                    )
+                valid_trades = deduped
 
             # ====================================================
             # 7. AUCUN TRADE VALIDE
