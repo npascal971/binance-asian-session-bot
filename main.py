@@ -1,5 +1,5 @@
 # ============================================================
-# main.py - Version PROD "2R Strict" (v141)
+# main.py - Version FORWARD "2R Strict" (v142)
 # v141 : correctifs issus de l'analyse transactions + logs du 17-18/09
 #        (trades ouverts puis fermés à la seconde, bougies M15 en cours
 #        utilisées comme "fermées", stops < 1 ATR, ré-entrées en boucle,
@@ -8,6 +8,8 @@
 # v141 rév.3 : snapshots de décision [SNAPSHOT] + journal de clôture enrichi (exit_reason, opened_at...)
 # v141 rév.3b : vérification au démarrage des fichiers de sortie (avertissement volume Railway)
 # v141 rév.4 : BOS sans micro-break exige un ADX réel ; abandon des setups périmés ; dédoublonnage des candidats
+# v142 : univers fixe sans USD_CAD/USD_JPY + SELL only + fenêtre 10h-13h Guadeloupe
+# v141 rév.5 : setup FVG désactivable (ENABLE_FVG) et filtre ADX dédié (FVG_MIN_ADX)
 # Stratégie : Biais H4/H1 → Retracement → Confirmation → 2R
 # ============================================================
 
@@ -65,7 +67,14 @@ DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 # =========================
 # CONFIGURATION GÉNÉRALE
 # =========================
-PAIR_LIST = ["GBP_USD", "USD_CAD", "AUD_USD", "XAU_USD", "EUR_USD", "USD_JPY", "AUD_JPY"]
+PAIR_LIST = ["GBP_USD", "AUD_USD", "XAU_USD", "EUR_USD", "AUD_JPY"]
+# v142 forward validation : univers fixe issu de la phase de robustesse.
+# USD_CAD et USD_JPY restent exclus.
+FORWARD_SELL_ONLY = _env_bool("FORWARD_SELL_ONLY", True)
+FORWARD_SESSION_ENABLED = _env_bool("FORWARD_SESSION_ENABLED", True)
+FORWARD_SESSION_START_LOCAL = 10
+FORWARD_SESSION_END_LOCAL = 13
+FORWARD_LOCAL_UTC_OFFSET = -4  # Guadeloupe, UTC-4 toute l'année
 GRANULARITY_D1 = "D"
 GRANULARITY_H4 = "H4"
 GRANULARITY_H1 = "H1"
@@ -164,6 +173,14 @@ BOS_REQUIRE_STRONG_TREND = _env_bool("BOS_REQUIRE_STRONG_TREND", True)
 #    du trade de plus de N ATR (le retest est manqué : plus la peine de le revalider en boucle).
 MAX_SETUP_RUNAWAY_ATR = _env_float("MAX_SETUP_RUNAWAY_ATR", 1.0)
 
+# --- v141 rév.5 : le setup FVG était le seul sous 50% de réussite partout au backtest
+# (PF 0.31 en ADX 20-25). Deux leviers, configurables, activés par défaut sans rien casser :
+#   - ENABLE_FVG=false          : désactive complètement le setup FVG.
+#   - FVG_MIN_ADX (défaut 0)     : exige un ADX H1 réel >= ce seuil POUR LES FVG uniquement
+#                                  (0 = pas de filtre supplémentaire ; mettre p.ex. 25 pour durcir).
+ENABLE_FVG = _env_bool("ENABLE_FVG", True)
+FVG_MIN_ADX = _env_float("FVG_MIN_ADX", 0.0)
+
 # --- v141 rév.3 : snapshots de décision (comprendre pourquoi le bot prend / refuse un setup) ---
 # Une ligne JSON "[SNAPSHOT]" par setup évalué (REJECT / VALID) et par tentative d'exécution (EXEC).
 # SNAPSHOT_FILE=/chemin/snapshots.jsonl pour écrire aussi dans un fichier (volume persistant requis).
@@ -178,7 +195,7 @@ RAILWAY_ENV = bool(
 # --- NOUVEAU : filtres qualité (win rate) ---
 # Ces filtres utilisent des métriques déjà calculées (ADX, RSI) mais qui
 # n'étaient jusqu'ici jamais utilisées pour rejeter un setup.
-ENABLE_QUALITY_FILTERS = True   # coupe-circuit global, pour A/B tester facilement
+ENABLE_QUALITY_FILTERS = _env_bool("ENABLE_QUALITY_FILTERS", False)   # v142 : pas de filtre H1 qualité additionnel
 MIN_ADX_TREND = 20.0            # ADX H1 minimum : sous ce seuil, marché sans tendance -> setups de continuation peu fiables
 # --- NOUVEAU : voie alternative à l'ADX pour les tendances douces mais régulières ---
 # L'ADX sous-note les tendances à pente faible (ex: USD/JPY, AUD/JPY qui montent
@@ -1574,8 +1591,8 @@ def detect_setups(
             if distance_atr <= 1.50:
                 setups.append({**bos, "distance_atr": distance_atr})
 
-        # FVG
-        for f in detect_fvg(df_m15, max_lookback_bars=24):
+        # FVG (désactivable via ENABLE_FVG)
+        for f in ([] if not ENABLE_FVG else detect_fvg(df_m15, max_lookback_bars=24)):
             if f.get("direction") != bias:
                 continue
             level = float(f["midpoint"])
@@ -3974,6 +3991,17 @@ def evaluate_setup(
                 f"mais pente EMA confirme la tendance ({slope:+.2f} ATR) -> accepté"
             )
 
+        # v141 rév.5 : les FVG exigent un ADX RÉEL >= FVG_MIN_ADX (pas de sauvetage par la pente),
+        # car c'est le setup le plus faible en marché peu directionnel.
+        if setup_type == "FVG_RETEST" and FVG_MIN_ADX > 0 and adx_h1 < FVG_MIN_ADX:
+            return {
+                "passed": False,
+                "reason": (
+                    f"FVG : ADX H1 {adx_h1:.1f} < FVG_MIN_ADX {FVG_MIN_ADX:.0f} "
+                    f"-> setup FVG trop risqué en marché peu directionnel"
+                )
+            }
+
         try:
             rsi_m15 = float(get_last_rsi(df_m15["close"]))
         except Exception:
@@ -4224,6 +4252,19 @@ def evaluate_setup(
         "metrics": metrics
     }
     
+def forward_entry_window_open(now_utc: Optional[datetime] = None) -> bool:
+    """Fenêtre d'entrée forward 10h-13h heure Guadeloupe (UTC-4).
+
+    La gestion des positions reste active 24/7 ; cette fonction ne bloque
+    que la recherche de NOUVEAUX signaux.
+    """
+    if not FORWARD_SESSION_ENABLED:
+        return True
+    now_utc = now_utc or utcnow()
+    local_hour = (now_utc.hour + FORWARD_LOCAL_UTC_OFFSET) % 24
+    return FORWARD_SESSION_START_LOCAL <= local_hour < FORWARD_SESSION_END_LOCAL
+
+
 def get_session_label() -> str:
     h = utcnow().hour
     if 7 <= h < 16:
@@ -6148,6 +6189,17 @@ def advanced_main():
         logger.warning(f"⛔ [DAILY_LIMIT] {daily_reason} -> aucune nouvelle entrée ce cycle")
         return
 
+    # v142 : la gestion des positions reste active en dehors de la fenêtre,
+    # mais aucune nouvelle entrée n'est recherchée hors 10h-13h Guadeloupe.
+    now_utc = utcnow()
+    if not forward_entry_window_open(now_utc):
+        logger.info(
+            f"[SESSION] Fenêtre d'entrée fermée | Guadeloupe={((now_utc.hour + FORWARD_LOCAL_UTC_OFFSET) % 24):02d}:"
+            f"{now_utc.minute:02d} | autorisé={FORWARD_SESSION_START_LOCAL:02d}:00-"
+            f"{FORWARD_SESSION_END_LOCAL:02d}:00"
+        )
+        return
+
     # Diagnostic compact de la structure HTF
     def _struct_brief(df, label):
         highs, lows = detect_swing_points(df, 5)
@@ -6227,6 +6279,12 @@ def advanced_main():
                 df_h1,
                 pair=pair
             )
+
+            # v142 : forward validation SELL uniquement. Le biais H4/H1 reste
+            # souverain ; un biais BUY est simplement ignoré pour les nouvelles entrées.
+            if FORWARD_SELL_ONLY and bias != "SELL":
+                logger.info(f"{pair} | SELL_ONLY : biais {bias} -> aucune entrée")
+                continue
 
             # ====================================================
             # 4. DIAGNOSTIC SI NEUTRE
@@ -6591,8 +6649,10 @@ def validate_config() -> bool:
 
 
 def main_loop():
-    logger.info("🚀 Démarrage du Bot 2R Strict - v141")
+    logger.info("🚀 Démarrage du Bot 2R Strict - v142 FORWARD VALIDATION")
     logger.info("✅ SL structurel >= 1 ATR M15 | TP = 2R recalé après fill | RR >= 2.0 avant ordre")
+    logger.info(f"✅ Univers: {', '.join(PAIR_LIST)} | SELL_ONLY={FORWARD_SELL_ONLY} | session Guadeloupe={FORWARD_SESSION_START_LOCAL:02d}:00-{FORWARD_SESSION_END_LOCAL:02d}:00")
+    logger.info(f"✅ Filtres qualité H1 additionnels: {ENABLE_QUALITY_FILTERS}")
     logger.info("✅ Bougies FERMÉES uniquement | scan à la clôture M15 | slippage borné (priceBound)")
     logger.info(
         f"✅ Risque/trade {RISK_PERCENTAGE}% | MAX TRADES: {MAX_TRADES_TOTAL} | "
