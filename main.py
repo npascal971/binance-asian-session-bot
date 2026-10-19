@@ -462,6 +462,13 @@ def cycle():
             if res:                    # succès, simulation OU incertain : pas de 2e essai
                 _ENTRY_DONE_FOR[pair] = candle_ts
         else:
+            # Une ligne par clôture journalière : à combien l'or est du prochain achat.
+            # Ce bloc ne s'exécute qu'une fois par bougie (le marqueur ci-dessous
+            # fait sauter les cycles suivants), donc pas de répétition toutes les 15 min.
+            hi = float(df["high"].rolling(CHANNEL).max().shift(1).iloc[-1])
+            day = df.index[-1].strftime("%Y-%m-%d")
+            logger.info(f"[ATTENTE] {pair} clôture du {day} {last_close:.2f} < plus haut "
+                        f"{CHANNEL}j {hi:.2f} (manque {hi - last_close:.2f})")
             _ENTRY_DONE_FOR[pair] = candle_ts
 
 
