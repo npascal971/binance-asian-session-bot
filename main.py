@@ -92,7 +92,9 @@ logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(
                     datefmt="%Y-%m-%d %H:%M:%S", stream=sys.stdout)
 logger = logging.getLogger("VwapGold")
 for noisy in ("urllib3", "requests", "oandapyV20"):
-    logging.getLogger(noisy).setLevel(logging.ERROR)
+    # CRITICAL : oandapyV20 imprime la page HTML entière d'une erreur 504 d'OANDA
+    # (des centaines de lignes). Le bot réessaie lui-même et signale ses vrais échecs.
+    logging.getLogger(noisy).setLevel(logging.CRITICAL)
 
 
 def short_error(e, limit=200):
