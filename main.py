@@ -90,6 +90,28 @@ TAG = "vwap"
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
                     format="%(asctime)s | %(levelname)-8s | %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S", stream=sys.stdout)
+VERSION = "vwap-v3"            # apparaît dans chaque ligne 💓 : dit quel code tourne vraiment
+
+
+class _OneLine(logging.Filter):
+    """Toute ligne de log tient sur UNE ligne de 300 caractères maximum. Les pages
+    HTML d'erreur d'OANDA (504) ne peuvent plus inonder les logs, d'où qu'elles viennent."""
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        first = msg.split("\n", 1)[0]
+        if len(first) > 300:
+            first = first[:300] + " …"
+        if first != msg:
+            record.msg, record.args = first + (" [suite coupée]" if "\n" in msg else ""), None
+        return True
+
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_OneLine())
+
 logger = logging.getLogger("VwapGold")
 for noisy in ("urllib3", "requests", "oandapyV20"):
     # CRITICAL : oandapyV20 imprime la page HTML entière d'une erreur 504 d'OANDA
@@ -453,7 +475,7 @@ def validate_config():
 
 
 def main():
-    logger.info("🚀 Bot VWAP Or — VWAP mensuel +1σ, H1, acheteur seul, stop plus bas 10, objectif 2R")
+    logger.info(f"🚀 Bot VWAP Or ({VERSION}) — VWAP mensuel +1σ, H1, acheteur seul, stop plus bas 10, objectif 2R")
     logger.info(f"✅ Risque {RISK_PCT:.2f}% par trade | 1 position max | spread max {MAX_SPREAD} $")
     logger.info("ℹ️  ~30-45 trades/an. t = 2,39 hors réglage : prometteur, pas prouvé. Démo seulement.")
     if not validate_config():
@@ -464,7 +486,7 @@ def main():
         try:
             if time.time() - last_hb >= 3600:
                 a = get_account()
-                logger.info(f"💓 solde={float(a.get('balance', 0) or 0):.2f} | "
+                logger.info(f"💓 {VERSION} | solde={float(a.get('balance', 0) or 0):.2f} | "
                             f"P/L latent={float(a.get('unrealizedPL', 0) or 0):+.2f}")
                 last_hb = time.time()
             cycle()
