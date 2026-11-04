@@ -83,6 +83,9 @@ MAX_SPREAD = _env_float("VWAP_MAX_SPREAD", 1.0)           # en dollars ; au-del�
 MAX_MARGIN_USAGE_PCT = _env_float("MAX_MARGIN_USAGE_PCT", 20.0)
 MAX_UNITS = 500
 LATE_MINUTES = 20              # signal vu trop tard (bot redémarré) -> on ne court pas après
+ENTRY_WINDOW_MIN = 20          # une fois le marché ouvert, 20 min max pour entrer (spread trop large -> expire)
+MAX_SLIPPAGE = _env_float("VWAP_MAX_SLIPPAGE", 1.0)       # $ au-delà du prix demandé : ordre annulé
+TOL = 0.05                     # $ d'écart toléré entre stop/objectif réels et ceux de la règle
 CHECK_SECONDS = 30
 STATE_FILE = os.getenv("VWAP_STATE_FILE", "/data/vwap_state.json")
 TAG = "vwap"
@@ -90,7 +93,7 @@ TAG = "vwap"
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
                     format="%(asctime)s | %(levelname)-8s | %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S", stream=sys.stdout)
-VERSION = "vwap-v3"            # apparaît dans chaque ligne 💓 : dit quel code tourne vraiment
+VERSION = "vwap-v4"            # apparaît dans chaque ligne 💓 : dit quel code tourne vraiment
 
 
 class _OneLine(logging.Filter):
@@ -188,6 +191,37 @@ def px(p):
     return f"{float(p):.3f}"
 
 
+_MARGIN_RATE = {}
+
+
+def margin_rate():
+    """Taux de marge RÉEL de l'or sur ce compte (5 % par défaut si illisible)."""
+    if "r" not in _MARGIN_RATE:
+        try:
+            r = accounts.AccountInstruments(accountID=OANDA_ACCOUNT_ID, params={"instruments": PAIR})
+            _MARGIN_RATE["r"] = float(read(r)["instruments"][0].get("marginRate", 0.05))
+        except Exception as e:
+            logger.warning(f"[MARGE] taux illisible, 5 % retenu : {short_error(e, 80)}")
+            return 0.05
+    return _MARGIN_RATE["r"]
+
+
+def usd_per_unit(ccy):
+    """Combien vaut 1 unité de la devise du compte, en dollars (None si introuvable)."""
+    if ccy == "USD":
+        return 1.0
+    for ins, inv in ((f"{ccy}_USD", False), (f"USD_{ccy}", True)):
+        try:
+            r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": ins})
+            p = read(r, retries=1)["prices"][0]
+            mid = (float(p["bids"][0]["price"]) + float(p["asks"][0]["price"])) / 2
+            if mid > 0:
+                return 1 / mid if inv else mid
+        except Exception:
+            continue
+    return None
+
+
 # ===========================================================================
 # LA RÈGLE — même calcul que vwap_robust.py / pine_backtest.py
 # ===========================================================================
@@ -254,24 +288,32 @@ def our_trades(all_trades):
         com = str((t.get("clientExtensions") or {}).get("comment", ""))
         parts = com.split("|")
         if len(parts) >= 3 and parts[0] == TAG and parts[2].startswith("sl0="):
+            tpo, slo = t.get("takeProfitOrder") or {}, t.get("stopLossOrder") or {}
             out.append({"id": str(t["id"]), "entry": float(t.get("price", 0) or 0),
                         "sl0": float(parts[2][4:]), "opened_at": t.get("openTime"),
-                        "has_tp": bool(t.get("takeProfitOrder")),
-                        "has_sl": bool(t.get("stopLossOrder"))})
+                        "units": float(t.get("currentUnits", 0) or 0),
+                        "tp": float(tpo["price"]) if tpo.get("price") else None,
+                        "sl": float(slo["price"]) if slo.get("price") else None,
+                        "has_tp": bool(tpo), "has_sl": bool(slo)})
     return out
 
 
-_KNOWN = {}
-
-
 def track_closures(mine):
+    """Les trades suivis sont gardés dans le fichier d'état : un trade fermé PENDANT un arrêt
+    du bot est quand même journalisé au redémarrage."""
+    known = STATE.setdefault("known", {})
+    fills = STATE.setdefault("fills", {})
     ids = {t["id"] for t in mine}
+    changed = False
     for t in mine:
-        _KNOWN.setdefault(t["id"], t)
-    for tid in list(_KNOWN):
+        if t["id"] not in known:
+            known[t["id"]] = {"entry": t["entry"], "sl0": t["sl0"], "units": t["units"],
+                              "opened_at": t.get("opened_at")}
+            changed = True
+    for tid in list(known):
         if tid in ids:
             continue
-        info = _KNOWN[tid]
+        info = known[tid]
         try:
             td = read(trades.TradeDetails(accountID=OANDA_ACCOUNT_ID, tradeID=tid)).get("trade", {})
             if td.get("state") != "CLOSED":
@@ -280,41 +322,65 @@ def track_closures(mine):
             continue
         close = float(td.get("averageClosePrice", 0) or 0)
         risk = info["entry"] - info["sl0"]
+        pl = float(td.get("realizedPL", 0) or 0)
+        fin = float(td.get("financing", 0) or 0)
+        units = float(info.get("units") or td.get("initialUnits") or 0)
+        k = STATE.get("usd_per_ccy", 1.0) or 1.0
+        risk_usd = units * risk
+        f = fills.pop(tid, {})
         log_event("JOURNAL_FILE", "JOURNAL", {
-            "id": tid, "pair": PAIR, "dir": "BUY", "entry": info["entry"], "exit": close,
-            "sl0": info["sl0"], "pl": round(float(td.get("realizedPL", 0) or 0), 2),
-            "r": round((close - info["entry"]) / risk, 2) if risk > 0 and close else None,
-            "opened_at": info.get("opened_at"), "closed_at": td.get("closeTime")})
-        del _KNOWN[tid]
+            "id": tid, "pair": PAIR, "dir": "BUY", "units": units, "entry": info["entry"], "exit": close,
+            "sl0": info["sl0"], "tp": round(info["entry"] + RR * risk, 3),
+            "r_prix": round((close - info["entry"]) / risk, 2) if risk > 0 and close else None,
+            "pl": round(pl, 2), "financement": round(fin, 2),
+            "r_net": round((pl + fin) * k / risk_usd, 2) if risk_usd > 0 else None,
+            "glissement": f.get("slippage"), "opened_at": info.get("opened_at"),
+            "closed_at": td.get("closeTime")})
+        del known[tid]
+        changed = True
+    if changed:
+        save_state(STATE)
 
 
 # ===========================================================================
 # ACTIONS
 # ===========================================================================
 def units_for(entry, sl, acct):
-    balance = float(acct.get("balance", 0) or 0)
+    """Taille pour risquer RISK_PCT % du solde. Le solde et la marge sont convertis en dollars
+    si le compte n'est pas en USD. Pas de marge disponible -> pas de trade."""
     dist = entry - sl
+    ccy = acct.get("currency", "USD") or "USD"
+    k = usd_per_unit(ccy)
+    if k is None:
+        logger.error(f"[ORDER] conversion {ccy} -> USD impossible -> pas de trade")
+        return 0
+    STATE["usd_per_ccy"] = k
+    balance = float(acct.get("balance", 0) or 0) * k
+    margin_avail = float(acct.get("marginAvailable", 0) or 0) * k
     if balance <= 0 or dist <= 0:
         return 0
+    if margin_avail <= 0:
+        logger.warning("[ORDER] marge disponible nulle -> pas de trade")
+        return 0
     u = min(int(balance * RISK_PCT / 100.0 / dist), MAX_UNITS)
-    est_margin = u * entry * 0.05
-    cap = min(balance * MAX_MARGIN_USAGE_PCT / 100.0,
-              float(acct.get("marginAvailable", 0) or 0) or balance)
-    if est_margin > cap > 0:
-        u = int(u * cap / est_margin)
+    per_unit_margin = entry * margin_rate()
+    cap = min(balance * MAX_MARGIN_USAGE_PCT / 100.0, margin_avail)
+    if u * per_unit_margin > cap:
+        u = int(cap / per_unit_margin)
     return max(0, u)
 
 
 def ensure_protection(t):
-    """Un trade du bot sans objectif ou sans stop est réparé (après un ordre partiel)."""
-    if t["has_tp"] and t["has_sl"]:
-        return
+    """Vérifie à CHAQUE cycle que le stop et l'objectif sont là ET aux bons niveaux
+    (objectif = entrée réelle + 2 x risque). Les répare sinon."""
     tp = t["entry"] + RR * (t["entry"] - t["sl0"])
     data = {}
-    if not t["has_tp"]:
+    if not t["has_tp"] or t["tp"] is None or abs(t["tp"] - tp) > TOL:
         data["takeProfit"] = {"price": px(tp), "timeInForce": "GTC"}
-    if not t["has_sl"]:
+    if not t["has_sl"] or t["sl"] is None or abs(t["sl"] - t["sl0"]) > TOL:
         data["stopLoss"] = {"price": px(t["sl0"]), "timeInForce": "GTC"}
+    if not data:
+        return
     if not EXECUTE_TRADES:
         return
     try:
@@ -350,7 +416,9 @@ def open_long(sl, ask, candle):
         logger.info("[ORDER] EXECUTE_TRADES=false -> simulation")
         return "OK"
     order = {"order": {
-        "type": "MARKET", "instrument": PAIR, "units": str(u), "positionFill": "DEFAULT",
+        "type": "MARKET", "instrument": PAIR, "units": str(u),
+        "positionFill": "OPEN_ONLY",           # n'ouvre QUE ; ne réduit jamais une autre position
+        "priceBound": px(ask + MAX_SLIPPAGE),  # pire prix accepté : au-delà, OANDA annule
         "stopLossOnFill": {"price": px(sl), "timeInForce": "GTC"},
         "takeProfitOnFill": {"price": px(tp), "timeInForce": "GTC"},
         "tradeClientExtensions": {"tag": TAG, "comment": f"{TAG}|{PAIR}|sl0={sl:.5f}"}}}
@@ -369,6 +437,10 @@ def open_long(sl, ask, candle):
         reason = rej.get("rejectReason") or rej.get("reason")
         if reason in ("MARKET_HALTED", "MARKET_CLOSED"):
             return "RETRY"
+        if reason == "BOUNDS_VIOLATION":
+            logger.warning(f"[ORDER] prix obtenu > {px(ask + MAX_SLIPPAGE)} (glissement > {MAX_SLIPPAGE} $) "
+                           f"-> annulé, nouvel essai dans la fenêtre d'entrée")
+            return "RETRY"
         logger.error(f"[ORDER] refusé : {reason}")
         return "SKIP"
     fill = resp.get("orderFillTransaction") or {}
@@ -377,7 +449,9 @@ def open_long(sl, ask, candle):
         logger.warning("[ORDER] état incertain -> pas de nouvel essai sur cette bougie")
         return "UNCERTAIN"
     fpx = float(fill.get("price", ask) or ask)
-    if abs(fpx - ask) <= 5.0:                  # prix aberrant : on garde l'objectif de l'ordre
+    STATE.setdefault("fills", {})[str(tid)] = {"ask": ask, "fill": fpx, "slippage": round(fpx - ask, 3)}
+    save_state(STATE)
+    if abs(fpx - ask) <= 5.0:                  # prix aberrant : ensure_protection corrigera au cycle suivant
         fix_tp_on_fill(str(tid), fpx, sl)
     logger.info(f"[ORDER_OK] BUY {u} oz #{tid} à {fpx:.2f} | stop {sl:.2f} | "
                 f"objectif {fpx + RR * (fpx - sl):.2f} | risque {RISK_PCT:.2f}%")
@@ -436,7 +510,16 @@ def cycle():
         logger.warning(f"[SIGNAL] {candle} découvert {pd.Timestamp(first_seen) - end} après la "
                        f"clôture (bot arrêté ?) -> pas d'entrée en retard")
         STATE["done_for"] = candle
-        STATE["seen"] = {}
+        STATE["seen"], STATE["open_seen"] = {}, {}
+        save_state(STATE)
+        return
+    # fenêtre d'entrée : 20 min à partir du moment où le marché est ouvert
+    open_seen = STATE.setdefault("open_seen", {}).setdefault(candle, utcnow().isoformat())
+    if pd.Timestamp(utcnow()) - pd.Timestamp(open_seen) > pd.Timedelta(minutes=ENTRY_WINDOW_MIN):
+        logger.warning(f"[SIGNAL] {candle} expiré : pas d'entrée possible en {ENTRY_WINDOW_MIN} min "
+                       f"(spread ou glissement trop grands) -> on laisse passer")
+        STATE["done_for"] = candle
+        STATE["seen"], STATE["open_seen"] = {}, {}
         save_state(STATE)
         return
     if ask - bid > MAX_SPREAD:
@@ -450,9 +533,10 @@ def cycle():
     else:
         res = open_long(sl, ask, candle)
     if res == "RETRY":
+        save_state(STATE)
         return
     STATE["done_for"] = candle
-    STATE["seen"] = {}
+    STATE["seen"], STATE["open_seen"] = {}, {}
     save_state(STATE)
 
 
@@ -476,7 +560,8 @@ def validate_config():
 
 def main():
     logger.info(f"🚀 Bot VWAP Or ({VERSION}) — VWAP mensuel +1σ, H1, acheteur seul, stop plus bas 10, objectif 2R")
-    logger.info(f"✅ Risque {RISK_PCT:.2f}% par trade | 1 position max | spread max {MAX_SPREAD} $")
+    logger.info(f"✅ Risque {RISK_PCT:.2f}% par trade | 1 position max | spread max {MAX_SPREAD} $ | "
+                f"glissement max {MAX_SLIPPAGE} $ | fenêtre d'entrée {ENTRY_WINDOW_MIN} min | ordres OPEN_ONLY")
     logger.info("ℹ️  ~30-45 trades/an. t = 2,39 hors réglage : prometteur, pas prouvé. Démo seulement.")
     if not validate_config():
         sys.exit(1)
