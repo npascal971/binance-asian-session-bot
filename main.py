@@ -9,6 +9,8 @@ import logging
 import math
 import os
 import signal
+import re
+import urllib.error
 import urllib.request
 import urllib.parse
 from dataclasses import dataclass
@@ -30,7 +32,8 @@ def _env_bool(name, default):
     return default if value is None else value.strip().lower() in ('1', 'true', 'yes', 'oui', 'on')
 
 
-VERSION = 'vwap-v6-demo-candidate'
+VERSION = 'vwap-v6.1-shadow-candidate'
+PATTERN_SHADOW = _env_bool('PATTERN_SHADOW', True)
 PAIR, SIGMA, SL_BARS, RR, MIN_AGE, CANDLES = 'XAU_USD', 1.0, 10, 2.0, 3, 1000
 CHECK_SECONDS, ENTRY_WINDOW_MIN = 30, 20
 ACCOUNT = (os.getenv('VWAP_ACCOUNT_ID') or os.getenv('OANDA_ACCOUNT_ID', '')).strip()
@@ -61,7 +64,10 @@ def utcnow():
 
 
 def short_error(exc):
-    # Ne journalise jamais un corps HTTP entier ni des credentials.
+    if isinstance(exc, urllib.error.HTTPError):
+        # Aucune URL, query, clé ni corps HTML ; chemin contrôlé ajouté au transport.
+        return (f'HTTPError status={exc.code} method={getattr(exc, "bot_method", "?")} '
+                f'endpoint={getattr(exc, "bot_endpoint", "?")}')
     return type(exc).__name__
 
 
@@ -127,8 +133,13 @@ class RestClient:
         request = urllib.request.Request(url, data=data, method=req.method, headers={
             'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json',
             'Accept-Datetime-Format': 'RFC3339'})
-        with self.opener.open(request, timeout=15) as response:
-            return json.load(response)
+        try:
+            with self.opener.open(request, timeout=15) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            exc.bot_method = req.method
+            exc.bot_endpoint = re.sub(r'/accounts/[^/]+', '/accounts/<compte>', req.path)
+            raise
 
 
 def api():
@@ -584,6 +595,15 @@ def cycle():
     candle = df.index[-1].isoformat()
     if STATE.get('done_for') and pd.Timestamp(candle) <= pd.Timestamp(STATE['done_for']):
         return
+    if PATTERN_SHADOW:
+        try:
+            from recherche_pattern import features
+            candidate = features(df.rename(columns={k: 'mid_' + k for k in ('open','high','low','close')})).iloc[-1]
+            labels = {1: 'BUY', -1: 'SELL', 0: 'NONE'}
+            logger.info('[PATTERN_SHADOW] bougie=%s contexte_H4=%s candidat=%s (observation)',
+                        candle, labels[int(candidate['context'])], labels[int(candidate['side'])])
+        except Exception as exc:
+            logger.warning('[PATTERN_SHADOW_INDISPONIBLE] %s', short_error(exc))
     sig, sl, band, close = evaluate(df)
     if not sig:
         mark_done(candle, f'ATTENTE close={close:.2f} bande={band:.2f}')
