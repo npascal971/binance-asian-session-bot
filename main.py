@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VWAP mensuel or H1 — v6 candidate DEMO. Voir README.md avant déploiement.
+"""VWAP mensuel or H1 — v6.3 autonome DEMO, observation H4/H1 sur quatre marchés.
 Signal identique à v4 ; aucune promesse de rendement. Compte practice uniquement.
 """
 import fcntl
@@ -32,7 +32,7 @@ def _env_bool(name, default):
     return default if value is None else value.strip().lower() in ('1', 'true', 'yes', 'oui', 'on')
 
 
-VERSION = 'vwap-v6.2-multipair-shadow'
+VERSION = 'vwap-v6.3-multipair-standalone'
 PATTERN_SHADOW = _env_bool('PATTERN_SHADOW', True)
 PATTERN_PAIRS = ('XAU_USD', 'EUR_USD', 'GBP_USD', 'USD_JPY')
 _PATTERN_LAST = {}
@@ -67,6 +67,9 @@ def utcnow():
 
 
 def short_error(exc):
+    if isinstance(exc, ModuleNotFoundError):
+        name = re.sub(r"[^A-Za-z0-9_.-]", "?", exc.name or "inconnu")[:100]
+        return f"ModuleNotFoundError module={name}"
     if isinstance(exc, urllib.error.HTTPError):
         # Aucune URL, query, clé ni corps HTML ; chemin contrôlé ajouté au transport.
         return (f'HTTPError status={exc.code} method={getattr(exc, "bot_method", "?")} '
@@ -578,6 +581,62 @@ def window_valid(candle, now):
     return pd.Timestamp(candle) + pd.Timedelta(hours=1) <= pd.Timestamp(now) < pd.Timestamp(deadline)
 
 
+# Calcul H4/H1 intégré : aucun fichier recherche_pattern.py requis.
+@dataclass(frozen=True)
+class Rule:
+    trend_ema_h4: int = 50
+    trend_slope_h4: int = 3
+    pullback_ema_h1: int = 20
+    pullback_window: int = 3
+    trigger_window: int = 2
+    atr_h1: int = 14
+    stop_buffer_atr: float = 0.1
+    rr: float = 2.0
+    max_entry_spread_over_risk: float = 0.1
+
+RULE = Rule()
+OHLC = ('open', 'high', 'low', 'close')
+
+
+def features(df):
+    """Index = ouverture H1 ; toutes les colonnes décrivent la décision à sa clôture."""
+    h1=df.rename(columns={f'mid_{k}':k for k in OHLC})[list(OHLC)].copy()
+    groups=h1.resample('4h',origin='start_day',closed='left',label='left')
+    h4=groups.agg({'open':'first','high':'max','low':'min','close':'last'})
+    # Quatre heures réellement présentes, aucune H4 partielle à travers une fermeture.
+    h4=h4[groups['close'].count()==4].dropna()
+    h4['ema']=h4.close.ewm(span=RULE.trend_ema_h4,adjust=False,min_periods=RULE.trend_ema_h4).mean()
+    h4['slope']=h4.ema-h4.ema.shift(RULE.trend_slope_h4)
+    h4['context']=np.select([(h4.close>h4.ema)&(h4.slope>0),
+                              (h4.close<h4.ema)&(h4.slope<0)],[1,-1],default=0)
+    # Une H4 ouverte à 00h n'est disponible qu'à 04h. Jointure à la clôture H1.
+    h4.index=h4.index+pd.Timedelta(hours=4)
+    times=h1.index+pd.Timedelta(hours=1)
+    context=h4[['context']].reindex(times,method='ffill',tolerance=pd.Timedelta(hours=4))
+    out=pd.DataFrame(index=df.index)
+    out['context']=context['context'].fillna(0).to_numpy(dtype=int)
+    out['ema20']=h1.close.ewm(span=RULE.pullback_ema_h1,adjust=False,min_periods=RULE.pullback_ema_h1).mean()
+    prev=h1.close.shift(1)
+    tr=pd.concat([h1.high-h1.low,(h1.high-prev).abs(),(h1.low-prev).abs()],axis=1).max(axis=1)
+    out['atr']=tr.rolling(RULE.atr_h1,min_periods=RULE.atr_h1).mean()
+    # Repli : une des 3 bougies PRÉCÉDENTES touche EMA20 et une clôture va à contresens.
+    touched=(h1.low<=out.ema20)&(h1.high>=out.ema20)
+    touch=touched.shift(1).rolling(RULE.pullback_window).max().fillna(0).astype(bool)
+    down=(h1.close<h1.open).shift(1).rolling(RULE.pullback_window).max().fillna(0).astype(bool)
+    up=(h1.close>h1.open).shift(1).rolling(RULE.pullback_window).max().fillna(0).astype(bool)
+    prev_high=h1.high.shift(1).rolling(RULE.trigger_window).max()
+    prev_low=h1.low.shift(1).rolling(RULE.trigger_window).min()
+    buy=(out.context==1)&touch&down&(h1.close>prev_high)&(h1.close>out.ema20)
+    sell=(out.context==-1)&touch&up&(h1.close<prev_low)&(h1.close<out.ema20)
+    out['side']=np.select([buy,sell],[1,-1],default=0)
+    # Un même élan consécutif ne génère qu'un déclenchement.
+    repeat=out.side.eq(out.side.shift(1))&out.side.ne(0)
+    out.loc[repeat,'side']=0
+    out['sl_buy']=h1.low.rolling(RULE.pullback_window+1).min()-RULE.stop_buffer_atr*out.atr
+    out['sl_sell']=h1.high.rolling(RULE.pullback_window+1).max()+RULE.stop_buffer_atr*out.atr
+    return out
+
+
 def scan_pattern_pairs():
     """Observation multi-paires indépendante de done_for et des positions VWAP.
     Au démarrage puis à chaque clôture H1 ; panne isolée, nouvel essai après 5 min.
@@ -604,7 +663,6 @@ def scan_pattern_pairs():
                 raise ValueError('Bougie H1 non clôturée')
             if pair in _PATTERN_LAST and candle <= _PATTERN_LAST[pair]:
                 continue
-            from recherche_pattern import features
             candidate = features(df.rename(columns={k: 'mid_' + k for k in ('open','high','low','close')})).iloc[-1]
             logger.info('[PATTERN_SHADOW] pair=%s bougie=%s contexte_H4=%s candidat=%s mode=observation',
                         pair, candle.isoformat(), labels[int(candidate['context'])], labels[int(candidate['side'])])
