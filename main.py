@@ -32,8 +32,11 @@ def _env_bool(name, default):
     return default if value is None else value.strip().lower() in ('1', 'true', 'yes', 'oui', 'on')
 
 
-VERSION = 'vwap-v6.1-shadow-candidate'
+VERSION = 'vwap-v6.2-multipair-shadow'
 PATTERN_SHADOW = _env_bool('PATTERN_SHADOW', True)
+PATTERN_PAIRS = ('XAU_USD', 'EUR_USD', 'GBP_USD', 'USD_JPY')
+_PATTERN_LAST = {}
+_PATTERN_NEXT = {}
 PAIR, SIGMA, SL_BARS, RR, MIN_AGE, CANDLES = 'XAU_USD', 1.0, 10, 2.0, 3, 1000
 CHECK_SECONDS, ENTRY_WINDOW_MIN = 30, 20
 ACCOUNT = (os.getenv('VWAP_ACCOUNT_ID') or os.getenv('OANDA_ACCOUNT_ID', '')).strip()
@@ -253,9 +256,11 @@ def get_price():
     return bid, ask, p.get('tradeable') is True
 
 
-def get_candles():
-    result = read(instruments.InstrumentsCandles(instrument=PAIR, params={
-        'granularity': 'H1', 'price': 'M', 'count': CANDLES}))
+def get_candles(pair=PAIR, retries=2):
+    result = read(instruments.InstrumentsCandles(instrument=pair, params={
+        'granularity': 'H1', 'price': 'M', 'count': CANDLES}), retries=retries)
+    if result.get('instrument') != pair:
+        raise RuntimeError('Historique reçu pour un autre instrument')
     rows, idx = [], []
     for c in result['candles']:
         if not c.get('complete'):
@@ -573,6 +578,47 @@ def window_valid(candle, now):
     return pd.Timestamp(candle) + pd.Timedelta(hours=1) <= pd.Timestamp(now) < pd.Timestamp(deadline)
 
 
+def scan_pattern_pairs():
+    """Observation multi-paires indépendante de done_for et des positions VWAP.
+    Au démarrage puis à chaque clôture H1 ; panne isolée, nouvel essai après 5 min.
+    Aucun accès en écriture à STATE et aucun envoi d'ordre dans cette fonction.
+    """
+    if not PATTERN_SHADOW:
+        return
+    labels = {1: 'BUY', -1: 'SELL', 0: 'NONE'}
+    for pair in PATTERN_PAIRS:
+        if _STOP:
+            return
+        tick = time.monotonic()
+        if tick < _PATTERN_NEXT.get(pair, 0):
+            continue
+        _PATTERN_NEXT[pair] = tick + 300  # report en cas d'erreur
+        try:
+            df = get_candles(pair, retries=0)
+            if len(df) < 240:
+                logger.warning('[PATTERN_SHADOW_INDISPONIBLE] pair=%s historique=%s bougies', pair, len(df))
+                continue
+            candle = df.index[-1]
+            now = pd.Timestamp(utcnow())
+            if candle + pd.Timedelta(hours=1) > now:
+                raise ValueError('Bougie H1 non clôturée')
+            if pair in _PATTERN_LAST and candle <= _PATTERN_LAST[pair]:
+                continue
+            from recherche_pattern import features
+            candidate = features(df.rename(columns={k: 'mid_' + k for k in ('open','high','low','close')})).iloc[-1]
+            logger.info('[PATTERN_SHADOW] pair=%s bougie=%s contexte_H4=%s candidat=%s mode=observation',
+                        pair, candle.isoformat(), labels[int(candidate['context'])], labels[int(candidate['side'])])
+            _PATTERN_LAST[pair] = candle
+            # Une bougie fraîche : prochaine lecture juste après la prochaine heure UTC.
+            # Historique ancien (week-end, retard) : nouvelle vérification dans 5 minutes.
+            if candle == now.floor('h') - pd.Timedelta(hours=1):
+                seconds = (now.floor('h') + pd.Timedelta(hours=1, seconds=2) - now).total_seconds()
+                _PATTERN_NEXT[pair] = time.monotonic() + seconds
+        except Exception as exc:
+            logger.warning('[PATTERN_SHADOW_INDISPONIBLE] pair=%s %s ; nouvel essai dans 5 min',
+                           pair, short_error(exc))
+
+
 def cycle():
     resolved = True
     if STATE.get('pending'):
@@ -595,15 +641,6 @@ def cycle():
     candle = df.index[-1].isoformat()
     if STATE.get('done_for') and pd.Timestamp(candle) <= pd.Timestamp(STATE['done_for']):
         return
-    if PATTERN_SHADOW:
-        try:
-            from recherche_pattern import features
-            candidate = features(df.rename(columns={k: 'mid_' + k for k in ('open','high','low','close')})).iloc[-1]
-            labels = {1: 'BUY', -1: 'SELL', 0: 'NONE'}
-            logger.info('[PATTERN_SHADOW] bougie=%s contexte_H4=%s candidat=%s (observation)',
-                        candle, labels[int(candidate['context'])], labels[int(candidate['side'])])
-        except Exception as exc:
-            logger.warning('[PATTERN_SHADOW_INDISPONIBLE] %s', short_error(exc))
     sig, sl, band, close = evaluate(df)
     if not sig:
         mark_done(candle, f'ATTENTE close={close:.2f} bande={band:.2f}')
@@ -665,6 +702,7 @@ def main():
     signal.signal(signal.SIGINT, request_stop)
     logger.info('Démarrage %s | practice | execute=%s risque=%.2f%% | échéance clôture+20min',
                 VERSION, EXECUTE_TRADES, RISK_PCT)
+    logger.info('[PATTERN_CONFIG] enabled=%s mode=observation pairs=%s', PATTERN_SHADOW, ','.join(PATTERN_PAIRS))
     last_hb = 0
     while not _STOP:
         try:
@@ -678,6 +716,8 @@ def main():
             raise
         except Exception as exc:
             logger.error('[CYCLE_SUSPENDU] %s', short_error(exc))
+        # Le scan des autres marchés reste possible même si un cycle VWAP a échoué.
+        scan_pattern_pairs()
         for _ in range(CHECK_SECONDS):
             if _STOP:
                 break
