@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VWAP mensuel or H1 — v6.3 autonome DEMO, observation H4/H1 sur quatre marchés.
+"""VWAP mensuel or H1 — v6.4 autonome DEMO, exécution H4/H1 sur quatre marchés.
 Signal identique à v4 ; aucune promesse de rendement. Compte practice uniquement.
 """
 import fcntl
@@ -32,8 +32,15 @@ def _env_bool(name, default):
     return default if value is None else value.strip().lower() in ('1', 'true', 'yes', 'oui', 'on')
 
 
-VERSION = 'vwap-v6.3-multipair-standalone'
-PATTERN_SHADOW = _env_bool('PATTERN_SHADOW', True)
+VERSION = 'vwap-v6.4-multipair-demo'
+PATTERN_ENABLED = _env_bool('PATTERN_ENABLED', True)
+# PATTERN_SHADOW est obsolète : EXECUTE_TRADES commande les deux stratégies.
+PATTERN_SHADOW = False
+MAX_TOTAL_RISK_PCT = float(os.getenv('MAX_TOTAL_RISK_PCT', '2.0'))
+MAX_OPEN_TRADES = 4
+PAIR_PRECISION = {'XAU_USD': 3, 'EUR_USD': 5, 'GBP_USD': 5, 'USD_JPY': 3}
+PAIR_SPREAD = {'XAU_USD': 1.0, 'EUR_USD': .00020, 'GBP_USD': .00025, 'USD_JPY': .025}
+PAIR_SLIPPAGE = {'XAU_USD': 1.0, 'EUR_USD': .00005, 'GBP_USD': .00005, 'USD_JPY': .005}
 PATTERN_PAIRS = ('XAU_USD', 'EUR_USD', 'GBP_USD', 'USD_JPY')
 _PATTERN_LAST = {}
 _PATTERN_NEXT = {}
@@ -196,7 +203,7 @@ def load_state():
         value = json.loads(STATE_FILE.read_text(encoding='utf-8'))
         if not isinstance(value, dict):
             raise ValueError('Objet JSON requis')
-        for name in ('known', 'fills', 'windows'):
+        for name in ('known', 'fills', 'windows', 'pattern_done'):
             if name in value and not isinstance(value[name], dict):
                 raise ValueError('Structure état invalide')
         return value
@@ -345,25 +352,123 @@ def size_order(ask, sl, acct):
             'risk_home_max': u * dist / k, 'margin_rate': rate}
 
 
+def price_text(pair, value):
+    return f'{number(value):.{PAIR_PRECISION[pair]}f}'
+
+
+def quote_home(pair, acct):
+    """Cotation fraîche et facteurs OANDA quote -> devise du compte."""
+    response = read(pricing.PricingInfo(accountID=ACCOUNT, params={
+        'instruments': pair, 'includeHomeConversions': 'true'}))
+    matches = [p for p in response['prices'] if p.get('instrument') == pair]
+    if len(matches) != 1:
+        raise ValueError('Cotation instrument absente')
+    p = matches[0]
+    bid, ask = number(p['bids'][0]['price']), number(p['asks'][0]['price'])
+    stamp = pd.Timestamp(p['time'])
+    age = (pd.Timestamp(utcnow()) - stamp).total_seconds()
+    if stamp.tzinfo is None or not (0 < bid <= ask and -5 <= age <= 60):
+        raise ValueError('Cotation invalide ou périmée')
+    if p.get('tradeable') is not True:
+        raise ValueError('Marché fermé')
+    quote = pair.split('_')[1]
+    if quote == acct['currency']:
+        loss, value = 1., 1.
+    else:
+        conversion = next(c for c in response['homeConversions'] if c['currency'] == quote)
+        loss = max(number(conversion['accountLoss']), number(conversion['accountGain']))
+        value = number(conversion['positionValue'])
+    if min(loss, value) <= 0:
+        raise ValueError('Conversion invalide')
+    return {'bid': bid, 'ask': ask, 'quote_to_home': loss, 'value_to_home': value}
+
+
+def available_risk(pair, acct, all_trades):
+    """Une position par instrument ; budget cumulé initial et stops effectifs.
+    Les positions manuelles consomment aussi le budget. Un stop inconnu bloque.
+    Ce plafond théorique exclut gaps, financement et évolution des conversions.
+    """
+    if len(all_trades) >= MAX_OPEN_TRADES or any(t['instrument'] == pair for t in all_trades):
+        return 0.
+    budget = min(number(acct['balance']), number(acct['NAV'])) * MAX_TOTAL_RISK_PCT / 100
+    for t in all_trades:
+        units = number(t['currentUnits'])
+        if not units:
+            continue
+        stop = (t.get('stopLossOrder') or {}).get('price')
+        if stop is None:
+            return 0.
+        q = quote_home(t['instrument'], acct)
+        effective = max(0., (number(t['price']) - number(stop)) * units) * q['quote_to_home']
+        info = STATE.get('known', {}).get(str(t['id']), {})
+        initial = 0.
+        if info.get('sl0') is not None:
+            initial = abs(number(t['price']) - number(info['sl0'])) * abs(units) * q['quote_to_home']
+        budget -= max(effective, initial)
+    return max(0., budget)
+
+
+def pattern_plan(pair, side, sl, acct, q, budget):
+    item = read(accounts.AccountInstruments(accountID=ACCOUNT, params={'instruments': pair}))['instruments'][0]
+    precision = PAIR_PRECISION[pair]
+    if item['name'] != pair or int(item['displayPrecision']) != precision or side not in (-1, 1):
+        raise ValueError('Instrument ou direction invalide')
+    sl = number(price_text(pair, sl))
+    entry = q['ask'] if side == 1 else q['bid']
+    bound = number(price_text(pair, entry + side * PAIR_SLIPPAGE[pair]))
+    dist = side * (bound - sl)
+    if sl <= 0 or side * ((q['bid'] if side == 1 else q['ask']) - sl) <= 0 or dist <= 0:
+        return {'units': 0}
+    if q['ask'] - q['bid'] > PAIR_SPREAD[pair] or (q['ask'] - q['bid']) / (side * (entry - sl)) > RULE.max_entry_spread_over_risk:
+        return {'units': 0}
+    rate = max(number(item['marginRate']), number(acct['marginRate']))
+    if not 0 < rate <= 1:
+        raise ValueError('Marge invalide')
+    nav, available, used = number(acct['NAV']), number(acct['marginAvailable']), number(acct['marginUsed'])
+    cap = max(0., min(available * .95, nav * MAX_MARGIN_USAGE_PCT / 100 - used))
+    risk = max(0., min(min(number(acct['balance']), nav) * RISK_PCT / 100, budget))
+    # Majoration de conversion de 1 % pour la cotation finale avant envoi.
+    conversion = q['quote_to_home'] * 1.01
+    per_unit_margin = max(q['ask'], bound) * q['value_to_home'] * 1.01 * rate
+    u = max(0, min(math.floor(risk / (dist * conversion)), math.floor(cap / per_unit_margin),
+                   int(number(item['maximumOrderUnits'])), MAX_UNITS if pair == PAIR else 200000))
+    if u < max(1, math.ceil(number(item['minimumTradeSize']))):
+        u = 0
+    return {'units': u, 'currency': acct['currency'], 'quote_to_home': q['quote_to_home'],
+            'quote_to_home_limit': conversion,
+            'price_bound': bound, 'risk_home_max': u * dist * conversion,
+            'margin_rate': rate, 'pair': pair, 'side': side, 'strategy': 'h4h1',
+            'sl0': sl, 'ask': entry, 'precision': precision}
+
+
 def our_trades(all_trades):
     found = []
     for t in all_trades:
-        ext = t.get('clientExtensions') or {}
-        parts = str(ext.get('comment', '')).split('|')
-        # Un marqueur VWAP corrompu doit bloquer les entrées, pas rendre le trade invisible.
-        if parts[0] != 'vwap':
+        parts = str((t.get('clientExtensions') or {}).get('comment', '')).split('|')
+        if parts[0] not in ('vwap', 'h4h1'):
             continue
-        if len(parts) != 3 or parts[1] != PAIR or not parts[2].startswith('sl0='):
-            raise RuntimeError('Marqueur VWAP invalide : intervention nécessaire')
-        initial_sl, entry, units = number(parts[2][4:]), number(t['price']), number(t['currentUnits'])
-        if t['instrument'] != PAIR or units <= 0 or not 0 < initial_sl < entry:
-            raise RuntimeError('Trade VWAP incohérent : entrée suspendue')
-        found.append({'id': str(t['id']), 'entry': entry, 'sl0': initial_sl,
-                      'units': abs(number(t.get('initialUnits', units))), 'opened_at': t['openTime'],
-                      'tp': (t.get('takeProfitOrder') or {}).get('price'),
+        if len(parts) != 3 or parts[1] not in PATTERN_PAIRS or not parts[2].startswith('sl0='):
+            raise RuntimeError('Marqueur bot invalide : entrée suspendue')
+        strategy, pair = parts[:2]
+        sl, entry, units = number(parts[2][4:]), number(t['price']), number(t['currentUnits'])
+        side = 1 if units > 0 else -1
+        if t['instrument'] != pair or not units or sl <= 0 or side * (entry-sl) <= 0:
+            raise RuntimeError('Trade bot incohérent : entrée suspendue')
+        if strategy == 'vwap' and (pair != PAIR or side != 1):
+            raise RuntimeError('Trade VWAP incohérent')
+        found.append({'id': str(t['id']), 'pair': pair, 'side': side, 'strategy': strategy,
+                      'entry': entry, 'sl0': sl, 'units': abs(number(t.get('initialUnits', units))),
+                      'opened_at': t['openTime'], 'tp': (t.get('takeProfitOrder') or {}).get('price'),
                       'sl': (t.get('stopLossOrder') or {}).get('price'),
                       'trailing': bool(t.get('trailingStopLossOrder'))})
     return found
+
+
+def consume_pending(p):
+    if p.get('strategy') == 'h4h1':
+        STATE.setdefault('pattern_done', {})[p['pair']] = p['candle']
+    else:
+        STATE['done_for'] = p['candle']
 
 
 def register_fill(fill, pending):
@@ -372,20 +477,26 @@ def register_fill(fill, pending):
         raise RuntimeError('Exécution sans tradeOpened : réconciliation bloquée')
     tid = str(opened['tradeID'])
     entry = number(opened.get('price', fill['price']))
-    u = abs(number(opened['units']))
-    if u <= 0 or entry <= pending['sl0']:
+    signed_units = number(opened['units'])
+    u, side = abs(signed_units), pending.get('side', 1)
+    if u <= 0 or signed_units * side <= 0 or side * (entry - pending['sl0']) <= 0:
         raise RuntimeError('Exécution incohérente : vérifier le compte')
+    k = pending.get('quote_to_home')
+    if k is None:
+        k = 1 / pending['usd_per_ccy']
     info = {'entry': entry, 'sl0': pending['sl0'], 'units': u,
+            'pair': pending.get('pair', PAIR), 'side': side, 'strategy': pending.get('strategy', 'vwap'),
             'opened_at': fill['time'], 'currency': pending['currency'],
-            'usd_per_ccy': pending['usd_per_ccy'],
-            'risk_home': u * (entry - pending['sl0']) / pending['usd_per_ccy'],
-            'slippage': entry - pending['ask'], 'tp_sent': pending['tp_sent'],
+            'usd_per_ccy': pending.get('usd_per_ccy'), 'quote_to_home': k,
+            'risk_home': u * side * (entry - pending['sl0']) * k,
+            'slippage': side * (entry - pending['ask']), 'tp_sent': pending['tp_sent'],
             'tp_rebased': False, 'client_id': pending['client_id']}
     STATE.setdefault('known', {})[tid] = info
-    STATE['done_for'] = pending['candle']
+    consume_pending(pending)
     STATE['pending'] = None
     save_state()
-    logger.info('[ORDER_OK] trade=%s unités=%s prix=%.3f risque_max_prévu=%.2f',
+    logger.info('[ORDER_OK] stratégie=%s pair=%s direction=%s trade=%s unités=%s prix=%s risque_max_prévu=%.2f',
+                info['strategy'], info['pair'], 'BUY' if side == 1 else 'SELL',
                 tid, u, entry, pending['risk_home_max'])
 
 
@@ -400,7 +511,7 @@ def resolve_response(response):
     rejection = response.get('orderRejectTransaction') or response.get('orderCancelTransaction')
     if rejection:
         # Un refus confirmé consomme le signal. Aucune boucle d'ouverture/fermeture.
-        STATE['done_for'] = pending['candle']
+        consume_pending(pending)
         STATE['pending'] = None
         save_state()
         logger.warning('[ORDER_REFUSED] %s', rejection.get('rejectReason', rejection.get('reason')))
@@ -431,16 +542,16 @@ def reconcile_pending():
 
 def ensure_protection(t):
     info = STATE['known'][t['id']]
+    pair, side = info.get('pair', PAIR), info.get('side', 1)
+    tol = 1.1 * 10 ** -PAIR_PRECISION[pair]
     target = t['entry'] + RR * (t['entry'] - t['sl0'])
     data = {}
-    if not t['trailing'] and (t['sl'] is None or number(t['sl']) < t['sl0'] - TOL):
-        data['stopLoss'] = {'price': px(t['sl0']), 'timeInForce': 'GTC'}
-    # Un TP existant des anciennes versions est respecté. Pour les nouveaux, recaler
-    # une seule fois, sauf si l'utilisateur a déjà déplacé le TP envoyé initialement.
+    if not t['trailing'] and (t['sl'] is None or side * (number(t['sl']) - t['sl0']) < -tol):
+        data['stopLoss'] = {'price': price_text(pair, t['sl0']), 'timeInForce': 'GTC'}
     rebase = not info.get('tp_rebased', True)
-    manual_tp = rebase and t['tp'] is not None and abs(number(t['tp']) - info['tp_sent']) > TOL
-    if t['tp'] is None or (rebase and not manual_tp and abs(number(t['tp']) - target) > TOL):
-        data['takeProfit'] = {'price': px(target), 'timeInForce': 'GTC'}
+    manual_tp = rebase and t['tp'] is not None and abs(number(t['tp']) - info['tp_sent']) > tol
+    if t['tp'] is None or (rebase and not manual_tp and abs(number(t['tp']) - target) > tol):
+        data['takeProfit'] = {'price': price_text(pair, target), 'timeInForce': 'GTC'}
     if data and not EXECUTE_TRADES:
         logger.info('[DRY_RUN] protection à vérifier trade=%s champs=%s', t['id'], list(data))
         return
@@ -471,7 +582,7 @@ def track_closures(mine):
     for t in mine:
         if t['id'] not in known:
             # Reprise d'une position v4 ou après migration ; taux initial inconnu.
-            known[t['id']] = {k: t[k] for k in ('entry', 'sl0', 'units', 'opened_at')}
+            known[t['id']] = {k: t[k] for k in ('entry', 'sl0', 'units', 'opened_at', 'pair', 'side', 'strategy') if k in t}
             known[t['id']]['restored'] = True
             known[t['id']]['tp_rebased'] = True
             save_state()
@@ -491,7 +602,8 @@ def track_closures(mine):
         pl = number(td['realizedPL'])
         fin = number(td['financing']) if 'financing' in td else None
         risk_home = info.get('risk_home')
-        rec = {'version': VERSION, 'id': tid, 'pair': PAIR, 'dir': 'BUY',
+        rec = {'version': VERSION, 'id': tid, 'pair': info.get('pair', PAIR), 'dir': 'BUY' if info.get('side', 1) == 1 else 'SELL',
+               'strategy': info.get('strategy', 'vwap'),
                'entry': entry, 'sl0': sl, 'exit': close, 'units': info['units'],
                'r_prix': (close - entry) / (entry - sl), 'pl': pl, 'financement': fin,
                'r_apres_financement': (pl + fin) / risk_home if fin is not None and risk_home else None,
@@ -516,6 +628,9 @@ def open_long(sl, ask, candle):
     plan = size_order(ask, sl, acct)
     if plan['units'] < 1:
         logger.info('[SKIP] taille/marge insuffisante')
+        return 'SKIP'
+    if available_risk(PAIR, acct, get_open_trades()) + 1e-8 < plan['risk_home_max']:
+        logger.info('[SKIP] exposition totale ou position existante')
         return 'SKIP'
     tp = number(px(ask + RR * (ask - sl)))
     rec = {'version': VERSION, 'candle': candle, 'ts': utcnow().isoformat(),
@@ -637,12 +752,70 @@ def features(df):
     return out
 
 
+def open_pattern(pair, side, sl, candle):
+    if ENVIRONMENT != 'practice':
+        raise ValueError('Practice uniquement')
+    if STATE.get('pending'):
+        return 'RETRY'
+    response = get_account_response()
+    acct = response['account']
+    budget = available_risk(pair, acct, get_open_trades())
+    if budget <= 0:
+        logger.info('[PATTERN_BLOQUE] pair=%s position existante ou budget atteint', pair)
+        return 'SKIP'
+    q = quote_home(pair, acct)
+    plan = pattern_plan(pair, side, sl, acct, q, budget)
+    if plan['units'] < 1:
+        logger.info('[PATTERN_BLOQUE] pair=%s taille, spread ou stop invalide', pair)
+        return 'SKIP'
+    tp = number(price_text(pair, plan['ask'] + RR * (plan['ask'] - plan['sl0'])))
+    if min(tp, plan['price_bound']) <= 0:
+        return 'SKIP'
+    if not EXECUTE_TRADES:
+        logger.info('[DRY_RUN] H4/H1 pair=%s direction=%s unités=%s', pair, side, plan['units'])
+        return 'OK'
+    # Prix et conversion relus juste avant l'envoi ; aucune répétition d'un POST.
+    fresh = quote_home(pair, acct)
+    entry = fresh['ask'] if side == 1 else fresh['bid']
+    close_side = fresh['bid'] if side == 1 else fresh['ask']
+    if (side * (entry - plan['price_bound']) > 0 or side * (close_side - plan['sl0']) <= 0 or
+            fresh['ask'] - fresh['bid'] > PAIR_SPREAD[pair] or
+            fresh['quote_to_home'] > plan['quote_to_home_limit'] or
+            fresh['value_to_home'] > q['value_to_home'] * 1.01):
+        return 'RETRY'
+    if not (pd.Timestamp(candle) + pd.Timedelta(hours=1) <= pd.Timestamp(utcnow()) <
+            pd.Timestamp(candle) + pd.Timedelta(hours=1, minutes=ENTRY_WINDOW_MIN)):
+        return 'SKIP'
+    seq = int(STATE.get('order_seq', 0)) + 1
+    STATE['order_seq'] = seq
+    cid = 'h41-' + hashlib.sha256(f'{ACCOUNT}|{pair}|{candle}|{seq}'.encode()).hexdigest()[:24]
+    pending = {**plan, 'client_id': cid, 'since_id': str(response['lastTransactionID']),
+               'candle': candle, 'tp_sent': tp}
+    log_event(SNAPSHOT_FILE, 'PATTERN_SIGNAL', {'version': VERSION, **pending, 'ts': utcnow().isoformat()})
+    STATE['pending'] = pending
+    save_state()
+    order = {'type': 'MARKET', 'timeInForce': 'FOK', 'instrument': pair,
+             'units': str(side * plan['units']), 'positionFill': 'OPEN_ONLY',
+             'priceBound': price_text(pair, plan['price_bound']),
+             'clientExtensions': {'id': cid, 'tag': 'h4h1'},
+             'tradeClientExtensions': {'id': cid, 'tag': 'h4h1',
+                 'comment': f"h4h1|{pair}|sl0={price_text(pair, plan['sl0'])}"},
+             'stopLossOnFill': {'price': price_text(pair, plan['sl0']), 'timeInForce': 'GTC'},
+             'takeProfitOnFill': {'price': price_text(pair, tp), 'timeInForce': 'GTC'}}
+    try:
+        result = api().request(orders.OrderCreate(accountID=ACCOUNT, data={'order': order}))
+    except Exception as exc:
+        logger.error('[ORDER_UNCERTAIN] pair=%s %s ; réconciliation requise', pair, short_error(exc))
+        return 'UNCERTAIN'
+    resolve_response(result)
+    return 'UNCERTAIN' if STATE.get('pending') else 'OK'
+
+
 def scan_pattern_pairs():
-    """Observation multi-paires indépendante de done_for et des positions VWAP.
-    Au démarrage puis à chaque clôture H1 ; panne isolée, nouvel essai après 5 min.
-    Aucun accès en écriture à STATE et aucun envoi d'ordre dans cette fonction.
+    """Décision sur H1 clôturée ; exécution démo autorisée par EXECUTE_TRADES.
+    Les bougies consommées persistent. Panne réseau : réessai sous une minute.
     """
-    if not PATTERN_SHADOW:
+    if not PATTERN_ENABLED:
         return
     labels = {1: 'BUY', -1: 'SELL', 0: 'NONE'}
     for pair in PATTERN_PAIRS:
@@ -651,29 +824,39 @@ def scan_pattern_pairs():
         tick = time.monotonic()
         if tick < _PATTERN_NEXT.get(pair, 0):
             continue
-        _PATTERN_NEXT[pair] = tick + 300  # report en cas d'erreur
+        _PATTERN_NEXT[pair] = tick + 60
         try:
             df = get_candles(pair, retries=0)
             if len(df) < 240:
-                logger.warning('[PATTERN_SHADOW_INDISPONIBLE] pair=%s historique=%s bougies', pair, len(df))
+                logger.warning('[PATTERN_INDISPONIBLE] pair=%s historique=%s bougies', pair, len(df))
                 continue
             candle = df.index[-1]
             now = pd.Timestamp(utcnow())
             if candle + pd.Timedelta(hours=1) > now:
                 raise ValueError('Bougie H1 non clôturée')
-            if pair in _PATTERN_LAST and candle <= _PATTERN_LAST[pair]:
+            done = STATE.get('pattern_done', {}).get(pair)
+            if done and candle <= pd.Timestamp(done):
                 continue
-            candidate = features(df.rename(columns={k: 'mid_' + k for k in ('open','high','low','close')})).iloc[-1]
-            logger.info('[PATTERN_SHADOW] pair=%s bougie=%s contexte_H4=%s candidat=%s mode=observation',
-                        pair, candle.isoformat(), labels[int(candidate['context'])], labels[int(candidate['side'])])
-            _PATTERN_LAST[pair] = candle
-            # Une bougie fraîche : prochaine lecture juste après la prochaine heure UTC.
-            # Historique ancien (week-end, retard) : nouvelle vérification dans 5 minutes.
-            if candle == now.floor('h') - pd.Timedelta(hours=1):
-                seconds = (now.floor('h') + pd.Timedelta(hours=1, seconds=2) - now).total_seconds()
+            candidate = features(df.rename(columns={k: 'mid_' + k for k in OHLC})).iloc[-1]
+            side = int(candidate['side'])
+            logger.info('[PATTERN_SCAN] pair=%s bougie=%s contexte_H4=%s candidat=%s mode=%s',
+                        pair, candle.isoformat(), labels[int(candidate['context'])], labels[side],
+                        'execution_demo' if EXECUTE_TRADES else 'simulation')
+            result = 'SKIP'
+            if side and candle + pd.Timedelta(hours=1) <= now < candle + pd.Timedelta(hours=1, minutes=ENTRY_WINDOW_MIN):
+                sl = number(candidate['sl_buy' if side == 1 else 'sl_sell'])
+                result = open_pattern(pair, side, sl, candle.isoformat())
+            elif side:
+                logger.info('[PATTERN_EXPIRE] pair=%s bougie=%s', pair, candle.isoformat())
+            if result in ('OK', 'SKIP'):
+                STATE.setdefault('pattern_done', {})[pair] = candle.isoformat()
+                save_state()
+                seconds = max(30, (now.floor('h') + pd.Timedelta(hours=1, seconds=2) - now).total_seconds())
                 _PATTERN_NEXT[pair] = time.monotonic() + seconds
+        except StateError:
+            raise
         except Exception as exc:
-            logger.warning('[PATTERN_SHADOW_INDISPONIBLE] pair=%s %s ; nouvel essai dans 5 min',
+            logger.warning('[PATTERN_INDISPONIBLE] pair=%s %s ; nouvel essai dans 1 min',
                            pair, short_error(exc))
 
 
@@ -703,7 +886,7 @@ def cycle():
     if not sig:
         mark_done(candle, f'ATTENTE close={close:.2f} bande={band:.2f}')
         return
-    if mine:
+    if any(t.get('pair', PAIR) == PAIR for t in mine):
         mark_done(candle, 'POSITION_EXISTANTE')
         return
     if not window_valid(candle, utcnow()):
@@ -725,9 +908,9 @@ def validate_config():
         raise ValueError('Cette candidate v6 est réservée à OANDA practice')
     if not ACCOUNT or not (os.getenv('OANDA_API_KEY') or os.getenv('OANDA_ACCESS_TOKEN')):
         raise ValueError('Compte ou clé OANDA manquant')
-    for value in (RISK_PCT, MAX_SPREAD, MAX_SLIPPAGE, MAX_MARGIN_USAGE_PCT):
+    for value in (RISK_PCT, MAX_SPREAD, MAX_SLIPPAGE, MAX_MARGIN_USAGE_PCT, MAX_TOTAL_RISK_PCT):
         number(value)
-    if not (0 < RISK_PCT <= 2 and MAX_SPREAD > 0 and MAX_SLIPPAGE >= 0 and 0 < MAX_MARGIN_USAGE_PCT <= 100):
+    if not (0 < RISK_PCT <= 2 and MAX_SPREAD > 0 and MAX_SLIPPAGE >= 0 and 0 < MAX_MARGIN_USAGE_PCT <= 100 and RISK_PCT <= MAX_TOTAL_RISK_PCT <= 4):
         raise ValueError('Paramètres hors bornes')
     if len({str(p.resolve()) for p in (STATE_FILE, JOURNAL_FILE, SNAPSHOT_FILE)}) != 3:
         raise ValueError('État, journal et signaux doivent avoir des chemins distincts')
@@ -760,11 +943,15 @@ def main():
     signal.signal(signal.SIGINT, request_stop)
     logger.info('Démarrage %s | practice | execute=%s risque=%.2f%% | échéance clôture+20min',
                 VERSION, EXECUTE_TRADES, RISK_PCT)
-    logger.info('[PATTERN_CONFIG] enabled=%s mode=observation pairs=%s', PATTERN_SHADOW, ','.join(PATTERN_PAIRS))
+    logger.info('[PATTERN_CONFIG] enabled=%s mode=%s pairs=%s risque_total_max=%.2f%% max_positions=%s',
+                PATTERN_ENABLED, 'execution_demo' if EXECUTE_TRADES else 'simulation',
+                ','.join(PATTERN_PAIRS), MAX_TOTAL_RISK_PCT, MAX_OPEN_TRADES)
     last_hb = 0
     while not _STOP:
+        management_ok = False
         try:
             cycle()
+            management_ok = True
             if time.monotonic() - last_hb >= 3600:
                 acct = get_account_response()['account']
                 logger.info('[HEARTBEAT] %s solde=%s devise=%s pending=%s', VERSION,
@@ -774,8 +961,8 @@ def main():
             raise
         except Exception as exc:
             logger.error('[CYCLE_SUSPENDU] %s', short_error(exc))
-        # Le scan des autres marchés reste possible même si un cycle VWAP a échoué.
-        scan_pattern_pairs()
+        if management_ok:
+            scan_pattern_pairs()
         for _ in range(CHECK_SECONDS):
             if _STOP:
                 break
